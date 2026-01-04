@@ -199,11 +199,12 @@ class ModelUpdater:
                         f"threshold={self.validation_threshold_r2})"
                     )
                 
-                # Step 5: Cleanup old data (keep last 90 days)
+                # Step 5: Cleanup old data (configurable retention period)
                 if self.total_retrains % 10 == 0:  # Every 10 retrains
                     logger.info("Running data cleanup...")
-                    deleted = self.data_collector.cleanup_old_data(days=90)
-                    logger.info(f"Cleaned up {deleted} old records")
+                    retention_days = self.settings.ml_data_retention_days
+                    deleted = self.data_collector.cleanup_old_data(days=retention_days)
+                    logger.info(f"Cleaned up {deleted} records older than {retention_days} days")
                 
                 # Step 6: Sleep until next cycle
                 self._sleep_until_next_cycle(cycle_start)
@@ -223,9 +224,10 @@ class ModelUpdater:
         """
         try:
             # Get training data
+            max_examples = self.settings.ml_max_training_examples
             X, y = self.data_collector.get_training_set(
                 min_examples=self.min_total_examples,
-                max_examples=50000,
+                max_examples=max_examples,
             )
             
             if len(X) < self.min_total_examples:

@@ -261,6 +261,11 @@ POLYBOT_ML_VALIDATION_THRESHOLD_R2=0.03  # 3% R² minimum
 # Prediction Blending
 POLYBOT_ML_PREDICTION_BLEND_WEIGHT=0.7  # 70% ML, 30% baseline
 
+# Data Retention (LARGE CAPACITY)
+POLYBOT_ML_DATA_RETENTION_DAYS=730  # Keep 2 years of data (~15GB max DB)
+POLYBOT_ML_MAX_TRAINING_EXAMPLES=5000000  # Use up to 5M examples for training
+POLYBOT_ML_DATA_COLLECTION_LIMIT=50  # Track 50 markets per cycle
+
 # Advanced
 POLYBOT_ML_USE_ENSEMBLE=false  # Use single model (simpler)
 ```

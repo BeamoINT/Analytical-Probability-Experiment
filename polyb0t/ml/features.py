@@ -30,7 +30,7 @@ class AdvancedFeatureEngine:
         """Initialize feature engine."""
         # Historical price cache for time series features
         self.price_history: Dict[str, List[tuple[datetime, float]]] = {}
-        self.max_history_size = 1000  # Keep last 1000 prices per token
+        self.max_history_size = 10000  # Keep last 10,000 prices per token (2+ years)
         
         # Volume history
         self.volume_history: Dict[str, List[tuple[datetime, float]]] = {}

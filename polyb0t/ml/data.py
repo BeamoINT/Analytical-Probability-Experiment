@@ -428,11 +428,11 @@ class DataCollector:
             'training_ready': with_targets >= 1000,
         }
     
-    def cleanup_old_data(self, days: int = 90) -> int:
+    def cleanup_old_data(self, days: int = 730) -> int:
         """Remove old training data to save space.
         
         Args:
-            days: Remove data older than N days.
+            days: Remove data older than N days (default: 730 = 2 years).
             
         Returns:
             Number of rows deleted.

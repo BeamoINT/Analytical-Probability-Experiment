@@ -227,6 +227,14 @@ class Settings(BaseSettings):
         default=50,
         description="Max markets to collect data from per cycle (0 = unlimited)"
     )
+    ml_max_training_examples: int = Field(
+        default=5_000_000,
+        description="Max training examples to use (larger = more memory, better models)"
+    )
+    ml_data_retention_days: int = Field(
+        default=730,
+        description="How long to keep training data (days). 730 days = ~15GB max DB size"
+    )
     
     # Logging
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = Field(
