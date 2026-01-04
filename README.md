@@ -70,11 +70,24 @@ polyb0t/
 
 ## 🚀 Quick Start
 
-## Quick Start (5 Minutes)
+### Ubuntu/Debian Users - One-Command Setup ⚡
 
 ```bash
-git clone <REPO_URL>
-cd "Polymarket Auto Trading API"
+git clone https://github.com/BeamoINT/Analytical-Probability-Experiment.git
+cd Analytical-Probability-Experiment
+./ubuntu_setup.sh
+```
+
+**That's it!** The script auto-installs Python 3.11+, Poetry, and all dependencies.  
+See **[UBUNTU_QUICK_START.md](UBUNTU_QUICK_START.md)** for details.
+
+---
+
+### Manual Setup (All Platforms)
+
+```bash
+git clone https://github.com/BeamoINT/Analytical-Probability-Experiment.git
+cd Analytical-Probability-Experiment
 
 # Create runtime env file (required)
 cp .env.example .env
