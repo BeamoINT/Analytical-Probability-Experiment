@@ -42,7 +42,10 @@ class Settings(BaseSettings):
 
     # Strategy
     edge_threshold: float = Field(
-        default=0.05, description="Minimum edge to take position (5%)"
+        default=0.05, description="Minimum raw edge to consider (mid-price, 5%)"
+    )
+    min_net_edge: float = Field(
+        default=0.02, description="Minimum net edge after fees/slippage to trade (2%)"
     )
     paper_bankroll: float = Field(default=10000.0, description="Initial paper trading bankroll")
 

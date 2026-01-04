@@ -9,12 +9,14 @@ import numpy as np
 from polyb0t.config import get_settings
 from polyb0t.data.models import Market, OrderBook, Trade
 from polyb0t.models.features import FeatureEngine
+from polyb0t.models.fill_estimation import FillPriceEstimator, FillEstimate
+from polyb0t.models.position_sizing import PositionSizer, SizingResult
 
 logger = logging.getLogger(__name__)
 
 
 class TradingSignal:
-    """Trading signal with edge calculation."""
+    """Trading signal with edge calculation and fill estimation."""
 
     def __init__(
         self,
@@ -24,8 +26,12 @@ class TradingSignal:
         p_market: float,
         p_model: float,
         edge: float,
+        edge_raw: float,  # Raw mid-price edge
+        edge_net: float,  # Net edge after fills/fees
         confidence: float,
         features: dict[str, Any],
+        fill_estimate: FillEstimate | None = None,
+        sizing_result: SizingResult | None = None,
         timestamp: datetime | None = None,
     ) -> None:
         """Initialize trading signal.
@@ -34,11 +40,15 @@ class TradingSignal:
             token_id: Token identifier.
             market_id: Market condition ID.
             side: Trade direction (BUY or SELL).
-            p_market: Market implied probability.
+            p_market: Market implied probability (mid-price).
             p_model: Model probability estimate.
-            edge: Expected edge (p_model - p_market for BUY).
+            edge: Primary edge metric (net edge).
+            edge_raw: Raw edge based on mid-price.
+            edge_net: Net edge based on expected fill.
             confidence: Signal confidence (0-1).
             features: Feature dictionary.
+            fill_estimate: Expected fill pricing details.
+            sizing_result: Position sizing calculation.
             timestamp: Signal generation time.
         """
         self.token_id = token_id
@@ -46,9 +56,13 @@ class TradingSignal:
         self.side = side
         self.p_market = p_market
         self.p_model = p_model
-        self.edge = edge
+        self.edge = edge  # Use net edge as primary metric
+        self.edge_raw = edge_raw
+        self.edge_net = edge_net
         self.confidence = confidence
         self.features = features
+        self.fill_estimate = fill_estimate
+        self.sizing_result = sizing_result
         self.timestamp = timestamp or datetime.utcnow()
 
 
@@ -72,28 +86,38 @@ class BaselineStrategy:
         """Initialize baseline strategy."""
         self.settings = get_settings()
         self.feature_engine = FeatureEngine()
+        self.fill_estimator = FillPriceEstimator()
+        self.position_sizer = PositionSizer()
         self.shrinkage_factor = 0.3  # Weight on prior (0.5)
         self.momentum_weight = 0.2
         self.mean_reversion_weight = 0.1
+        
+        # Minimum net edge threshold (after fees/slippage)
+        self.min_net_edge = 0.02  # Require at least 2% net edge
 
     def generate_signals(
         self,
         markets: list[Market],
         orderbooks: dict[str, OrderBook],
         trades: dict[str, list[Trade]],
-    ) -> list[TradingSignal]:
+        available_usdc: float = 0.0,
+        reserved_usdc: float = 0.0,
+    ) -> tuple[list[TradingSignal], dict[str, int]]:
         """Generate trading signals for all tradable markets.
 
         Args:
             markets: List of filtered markets.
             orderbooks: Dict of token_id -> OrderBook.
             trades: Dict of token_id -> list of recent trades.
+            available_usdc: Available USDC balance.
+            reserved_usdc: Reserved USDC (for position sizing).
 
         Returns:
-            List of TradingSignal objects meeting edge threshold.
+            Tuple of (signals meeting threshold, rejection_reasons dict).
         """
         signals: list[TradingSignal] = []
         price_source_counts: dict[str, int] = {"orderbook_mid": 0, "last_trade": 0, "gamma_price": 0, "none": 0}
+        rejection_reasons: dict[str, int] = {}
 
         for market in markets:
             for idx, outcome in enumerate(market.outcomes):
@@ -101,9 +125,14 @@ class BaselineStrategy:
                 orderbook = orderbooks.get(token_id)
                 token_trades = trades.get(token_id, [])
 
-                signal = self._generate_signal(market, idx, orderbook, token_trades)
+                signal, reason = self._generate_signal_with_reason(
+                    market, idx, orderbook, token_trades, available_usdc, reserved_usdc
+                )
                 if signal:
                     signals.append(signal)
+                else:
+                    rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
+                    
                 # Count price sources for observability (even if no signal)
                 src = None
                 try:
@@ -123,38 +152,38 @@ class BaselineStrategy:
 
         logger.info(
             f"Generated {len(signals)} signals meeting threshold",
-            extra={"price_sources": price_source_counts},
+            extra={"price_sources": price_source_counts, "rejection_reasons": rejection_reasons},
         )
-        return signals
+        return signals, rejection_reasons
 
-    def _generate_signal(
+    def _generate_signal_with_reason(
         self,
         market: Market,
         outcome_idx: int,
         orderbook: OrderBook | None,
         recent_trades: list[Trade],
-    ) -> TradingSignal | None:
-        """Generate signal for a single outcome.
+        available_usdc: float,
+        reserved_usdc: float,
+    ) -> tuple[TradingSignal | None, str]:
+        """Generate signal for a single outcome with rejection reason.
 
         Args:
             market: Market data.
             outcome_idx: Outcome index.
             orderbook: OrderBook data.
             recent_trades: Recent trades.
+            available_usdc: Available balance.
+            reserved_usdc: Reserved balance.
 
         Returns:
-            TradingSignal if edge threshold met, else None.
+            Tuple of (TradingSignal if threshold met, rejection_reason).
         """
         # Compute features
         features = self.feature_engine.compute_features(
             market, outcome_idx, orderbook, recent_trades
         )
 
-        # Market probability with fallback:
-        #  a) orderbook mid
-        #  b) last trade
-        #  c) Gamma outcome price
-        #  d) None => skip
+        # Market probability with fallback
         gamma_price = None
         if outcome_idx < len(market.outcomes):
             gamma_price = market.outcomes[outcome_idx].price
@@ -166,25 +195,77 @@ class BaselineStrategy:
         )
 
         if p_market is None:
-            return None
+            return None, "no_market_price"
 
         features["p_market_source"] = p_market_source
 
         # Model probability
         p_model = self._compute_model_probability(p_market, features)
 
-        # Edge calculation
-        edge = p_model - p_market
+        # Raw edge (mid-price based)
+        edge_raw = p_model - p_market
+        
+        # Check raw edge threshold
+        if abs(edge_raw) < self.settings.edge_threshold:
+            return None, "raw_edge_below_threshold"
 
+        # Determine side
+        side = "BUY" if edge_raw > 0 else "SELL"
+        
         # Confidence based on data quality
         confidence = self._compute_confidence(features)
 
-        # Check threshold
-        if abs(edge) < self.settings.edge_threshold:
-            return None
+        # Estimate initial position size for fill estimation
+        sizing = self.position_sizer.compute_size(
+            edge_net=abs(edge_raw),  # Use raw edge for initial sizing
+            confidence=confidence,
+            available_usdc=available_usdc,
+            reserved_usdc=reserved_usdc,
+        )
+        
+        # If size is below minimum, reject
+        if sizing.size_usd_final < self.settings.min_order_usd:
+            return None, f"size_below_minimum_{sizing.sizing_reason}"
 
-        # Determine side
-        side = "BUY" if edge > 0 else "SELL"
+        # Compute expected fill price and net edge
+        if not orderbook:
+            return None, "no_orderbook_for_fill_estimation"
+            
+        edge_raw_calc, edge_net, fill_est = self.fill_estimator.compute_net_edge(
+            p_model=p_model,
+            p_market_mid=p_market,
+            orderbook=orderbook,
+            side=side,
+            size_usd=sizing.size_usd_final,
+        )
+
+        # Check if fill is feasible
+        if not fill_est or not fill_est.is_feasible:
+            return None, "fill_not_feasible"
+        
+        # Check net edge threshold (after fees/slippage)
+        if abs(edge_net) < self.min_net_edge:
+            return None, "net_edge_below_threshold"
+        
+        # Recompute sizing with net edge
+        sizing_final = self.position_sizer.compute_size(
+            edge_net=abs(edge_net),
+            confidence=confidence,
+            available_usdc=available_usdc,
+            reserved_usdc=reserved_usdc,
+        )
+        
+        # Final size check
+        if sizing_final.size_usd_final < self.settings.min_order_usd:
+            return None, f"final_size_below_minimum_{sizing_final.sizing_reason}"
+
+        # Store fill and sizing info in features
+        features["fill_expected_price"] = fill_est.expected_price
+        features["fill_price_impact_pct"] = fill_est.price_impact_pct
+        features["fill_slippage_bps"] = fill_est.slippage_bps
+        features["fill_levels_consumed"] = fill_est.levels_consumed
+        features["sizing_reason"] = sizing_final.sizing_reason
+        features["kelly_fraction"] = sizing_final.kelly_fraction
 
         outcome = market.outcomes[outcome_idx]
         return TradingSignal(
@@ -193,10 +274,37 @@ class BaselineStrategy:
             side=side,
             p_market=p_market,
             p_model=p_model,
-            edge=edge,
+            edge=edge_net,  # Use net edge as primary
+            edge_raw=edge_raw,
+            edge_net=edge_net,
             confidence=confidence,
             features=features,
+            fill_estimate=fill_est,
+            sizing_result=sizing_final,
+        ), "passed"
+    
+    def _generate_signal(
+        self,
+        market: Market,
+        outcome_idx: int,
+        orderbook: OrderBook | None,
+        recent_trades: list[Trade],
+    ) -> TradingSignal | None:
+        """Generate signal for a single outcome (legacy method).
+
+        Args:
+            market: Market data.
+            outcome_idx: Outcome index.
+            orderbook: OrderBook data.
+            recent_trades: Recent trades.
+
+        Returns:
+            TradingSignal if edge threshold met, else None.
+        """
+        signal, _ = self._generate_signal_with_reason(
+            market, outcome_idx, orderbook, recent_trades, 0.0, 0.0
         )
+        return signal
 
     def _compute_model_probability(
         self,

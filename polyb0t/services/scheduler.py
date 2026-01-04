@@ -190,9 +190,12 @@ class TradingScheduler:
             markets, gamma_list_diag = await self._fetch_markets(db_session)
             logger.info(f"Fetched {len(markets)} markets")
 
-            # Step 2: Filter tradable universe
-            tradable_markets = self.market_filter.filter_markets(markets)
-            logger.info(f"Filtered to {len(tradable_markets)} tradable markets")
+            # Step 2: Filter tradable universe (initial pass without orderbooks)
+            tradable_markets, initial_rejections = self.market_filter.filter_markets(markets)
+            logger.info(
+                f"Filtered to {len(tradable_markets)} tradable markets",
+                extra={"initial_rejections": initial_rejections},
+            )
 
             if not tradable_markets:
                 logger.warning("No tradable markets found")
@@ -252,18 +255,27 @@ class TradingScheduler:
                 },
             )
 
-            # Step 4: Filter markets by spread (if orderbook data available)
-            tradable_markets = self.market_filter.filter_markets(
+            # Step 4: Filter markets by spread, depth, and liquidity
+            tradable_markets, filter_rejections = self.market_filter.filter_markets(
                 tradable_markets, orderbooks
             )
             logger.info(
-                f"After spread filtering: {len(tradable_markets)} tradable markets"
+                f"After all filtering: {len(tradable_markets)} tradable markets",
+                extra={"filter_rejections": filter_rejections},
             )
 
-            # Step 5: Generate trading signals
-            signals = self.strategy.generate_signals(tradable_markets, orderbooks, trades)
+            # Step 5: Generate trading signals with balance-aware sizing
+            available_for_signals = float(balance_summary.get("available_usdc", 0.0) or 0.0) if balance_summary else 0.0
+            reserved_for_signals = float(balance_summary.get("reserved_usdc", 0.0) or 0.0) if balance_summary else 0.0
+            
+            signals, signal_rejections = self.strategy.generate_signals(
+                tradable_markets, orderbooks, trades, available_for_signals, reserved_for_signals
+            )
             self._save_signals(signals, cycle_id, db_session)
-            logger.info(f"Signals computed: {len(signals)}")
+            logger.info(
+                f"Signals computed: {len(signals)}",
+                extra={"signal_rejections": signal_rejections},
+            )
             if signals:
                 sample = []
                 for s in signals[:3]:
@@ -273,8 +285,11 @@ class TradingScheduler:
                             "side": s.side,
                             "p_market": s.p_market,
                             "p_model": s.p_model,
-                            "edge": s.edge,
+                            "edge_net": s.edge_net,
+                            "edge_raw": s.edge_raw,
                             "source": s.features.get("p_market_source"),
+                            "fill_price": s.fill_estimate.expected_price if s.fill_estimate else None,
+                            "size_usd": s.sizing_result.size_usd_final if s.sizing_result else None,
                         }
                     )
                 logger.info("Signal sample", extra={"sample": sample})
@@ -376,52 +391,15 @@ class TradingScheduler:
                 if expired:
                     logger.info(f"Expired intents: {expired}")
 
-                # Create intents from risk-approved signals
+                # Create intents from signals (signals are already sized and validated)
                 created = 0
                 rejected = 0
                 skipped_dedup = 0
                 for signal in sorted(signals, key=lambda s: abs(s.edge), reverse=True):
-                    # Live sizing: require available collateral. If balance is unavailable, reject safely.
-                    available_usdc = None
-                    if balance_summary and balance_summary.get("available_usdc") is not None:
-                        try:
-                            available_usdc = float(balance_summary["available_usdc"])
-                        except Exception:
-                            available_usdc = None
-
-                    # CRITICAL: Reject if balance unavailable
-                    if available_usdc is None:
-                        rejected += 1
-                        logger.info(
-                            "Signal rejected: balance unavailable (set POLYBOT_POLYGON_RPC_URL)",
-                            extra={"token_id": signal.token_id, "edge": signal.edge},
-                        )
-                        continue
-
-                    # CRITICAL: Reject if available balance <= 0
-                    if available_usdc <= 0.0:
-                        rejected += 1
-                        logger.info(
-                            "Signal rejected: available_usdc <= 0",
-                            extra={"token_id": signal.token_id, "edge": signal.edge, "available_usdc": available_usdc},
-                        )
-                        continue
-
-                    # CRITICAL: Reject if available balance < min_order_usd
-                    min_order = float(self.settings.min_order_usd)
-                    if available_usdc < min_order:
-                        rejected += 1
-                        logger.info(
-                            "Signal rejected: insufficient balance (available < min_order_usd)",
-                            extra={
-                                "token_id": signal.token_id,
-                                "edge": signal.edge,
-                                "available_usdc": available_usdc,
-                                "min_order_usd": min_order,
-                            },
-                        )
-                        continue
-
+                    # Signals already have sizing computed, use it
+                    size_usd = signal.sizing_result.size_usd_final if signal.sizing_result else 0.0
+                    
+                    # Additional risk manager check (legacy compatibility)
                     risk_result = self.risk_manager.check_position(
                         signal,
                         self.portfolio.cash_balance,
@@ -431,31 +409,12 @@ class TradingScheduler:
                     if not risk_result.approved:
                         rejected += 1
                         logger.info(
-                            f"Signal rejected by risk: {risk_result.reason}",
+                            f"Signal rejected by risk manager: {risk_result.reason}",
                             extra={"token_id": signal.token_id, "edge": signal.edge},
                         )
                         continue
 
-                    # Absolute live limits (safe defaults):
-                    # size_usd = min(recommended, max_order_usd, available_usdc)
-                    rec = float(risk_result.max_position_size or 0.0)
-                    size_usd = min(rec, float(self.settings.max_order_usd), float(available_usdc))
-                    
-                    # CRITICAL: Reject if computed size < min_order_usd
-                    if size_usd < min_order:
-                        rejected += 1
-                        logger.info(
-                            "Signal rejected: computed size_usd < min_order_usd",
-                            extra={
-                                "token_id": signal.token_id,
-                                "edge": signal.edge,
-                                "size_usd": size_usd,
-                                "min_order_usd": min_order,
-                            },
-                        )
-                        continue
-
-                    # Exposure guardrail (conservative): use reserved_usdc + new size
+                    # Exposure guardrail (final check)
                     reserved = float(balance_summary.get("reserved_usdc", 0.0) or 0.0) if balance_summary else 0.0
                     if reserved + size_usd > float(self.settings.max_total_exposure_usd):
                         rejected += 1
@@ -465,7 +424,7 @@ class TradingScheduler:
                         )
                         continue
 
-                    # Open orders guardrail (best-effort from account snapshot)
+                    # Open orders guardrail
                     oo = int(account_state_summary.get("open_orders_count", 0) or 0) if account_state_summary else 0
                     if oo >= int(self.settings.max_open_orders):
                         rejected += 1
@@ -475,15 +434,23 @@ class TradingScheduler:
                         )
                         continue
 
+                    # Build enhanced risk checks with fill/sizing info
+                    risk_checks = {
+                        "approved": True,
+                        "max_position_size": risk_result.max_position_size,
+                        "sized_by_kelly": True,
+                        "kelly_fraction": signal.sizing_result.kelly_fraction if signal.sizing_result else None,
+                        "sizing_reason": signal.sizing_result.sizing_reason if signal.sizing_result else None,
+                        "edge_net": signal.edge_net,
+                        "edge_raw": signal.edge_raw,
+                        "fill_price": signal.fill_estimate.expected_price if signal.fill_estimate else None,
+                        "fill_slippage_bps": signal.fill_estimate.slippage_bps if signal.fill_estimate else None,
+                    }
+
                     intent = intent_manager.create_intent_from_signal(
                         signal=signal,
                         size=size_usd,
-                        risk_checks={
-                            "approved": True,
-                            "max_position_size": risk_result.max_position_size,
-                            "sized_by_available_usdc": True,
-                            "available_usdc": available_usdc,
-                        },
+                        risk_checks=risk_checks,
                         cycle_id=cycle_id,
                     )
                     if intent is None:
@@ -491,21 +458,16 @@ class TradingScheduler:
                     else:
                         created += 1
 
-                if created == 0:
-                    logger.info(
-                        f"No trade intents created (signals={len(signals)}, risk_rejected={rejected}, dedup_skipped={skipped_dedup})"
-                    )
-                else:
-                    logger.info(
-                        f"Trade intents created: {created} (risk_rejected={rejected}, dedup_skipped={skipped_dedup})"
-                    )
-
-                # Non-spammy per-cycle intent lifecycle summary
+                # Comprehensive cycle summary (single structured log)
                 logger.info(
-                    "Intent lifecycle summary",
+                    "Cycle summary",
                     extra={
                         "cycle_id": cycle_id,
-                        "signals_found": len(signals),
+                        "markets_scanned": len(markets) if 'markets' in locals() else 0,
+                        "markets_filtered": filter_rejections,
+                        "markets_tradable": len(tradable_markets),
+                        "signals_generated": len(signals),
+                        "signal_rejections": signal_rejections,
                         "intents_created": created,
                         "intents_dedup_skipped": skipped_dedup,
                         "intents_risk_rejected": rejected,
@@ -513,6 +475,7 @@ class TradingScheduler:
                         "exit_intents_created": exit_created,
                         "exit_intents_dedup_skipped": exit_skipped,
                         "execution": execution_summary or {"processed": 0, "executed": 0, "failed": 0, "dry_run": self.settings.dry_run},
+                        "balance": balance_summary or {},
                     },
                 )
 
