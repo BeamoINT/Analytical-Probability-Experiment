@@ -203,23 +203,51 @@ class TradingScheduler:
 
             # Live mode: limit universe size to keep 10s cadence and avoid rate limits.
             gamma_enrich_diag: dict[str, Any] | None = None
+            markets_for_data = tradable_markets  # Default: use tradable markets
+            
             if self.settings.mode == "live":
-                tradable_markets = tradable_markets[:10]
-                logger.info(f"Live mode universe capped to {len(tradable_markets)} markets")
+                # Enrich markets based on ML settings
+                if self.settings.enable_ml and self.settings.ml_data_collection_limit > 0:
+                    # ML MODE: Enrich more markets for comprehensive data collection
+                    # Sort by volume and take top N
+                    markets_sorted = sorted(
+                        tradable_markets,
+                        key=lambda m: m.volume or 0,
+                        reverse=True
+                    )
+                    markets_to_enrich = markets_sorted[:min(self.settings.ml_data_collection_limit, len(markets_sorted))]
+                    tradable_for_trading = markets_sorted[:10]  # Still trade on top 10 only
+                    
+                    logger.info(
+                        f"ML mode: enriching {len(markets_to_enrich)} markets for data collection, "
+                        f"trading on {len(tradable_for_trading)}"
+                    )
+                else:
+                    # STANDARD MODE: Enrich only tradable markets
+                    markets_to_enrich = tradable_markets[:10]
+                    tradable_for_trading = markets_to_enrich
+                    logger.info(f"Live mode universe capped to {len(tradable_for_trading)} markets")
 
-                # Enrich markets with outcomes (token_ids + Gamma prices) using public Gamma endpoints.
-                tradable_markets, gamma_enrich_diag = await self._enrich_markets_with_outcomes(tradable_markets)
-                self._persist_market_outcomes(tradable_markets, db_session)
-                zero_outcomes = sum(1 for m in tradable_markets if not m.outcomes)
+                # Enrich markets with outcomes (token_ids + Gamma prices)
+                markets_for_data, gamma_enrich_diag = await self._enrich_markets_with_outcomes(markets_to_enrich)
+                self._persist_market_outcomes(markets_for_data, db_session)
+                
+                zero_outcomes = sum(1 for m in markets_for_data if not m.outcomes)
                 if zero_outcomes:
                     logger.warning(
                         "Some markets missing outcomes after Gamma enrichment",
                         extra={"markets_missing_outcomes": zero_outcomes},
                     )
+                
+                # Update tradable_markets for trading (subset of enriched markets)
+                if self.settings.enable_ml:
+                    tradable_markets = [m for m in markets_for_data if m in tradable_for_trading]
+                else:
+                    tradable_markets = markets_for_data
 
-            # Step 3: Fetch orderbooks and trades
+            # Step 3: Fetch orderbooks and trades for enriched markets
             orderbooks, trades, clob_diag = await self._fetch_market_data(
-                tradable_markets, db_session
+                markets_for_data, db_session
             )
             logger.info(
                 f"Market data refreshed: orderbooks={len(orderbooks)}, trades={len(trades)}"
@@ -277,17 +305,29 @@ class TradingScheduler:
                 extra={"signal_rejections": signal_rejections},
             )
             
-            # Collect ML training data (if enabled)
+            # Collect ML training data from BROAD MARKET SET (if enabled)
+            # This learns from many markets, not just ones we trade
             if self.settings.enable_ml:
                 try:
+                    # Use markets_for_data (enriched, broader than tradable_markets)
+                    # This gives us 5-10x more training data
                     collected = self.strategy.collect_training_data(
-                        markets=tradable_markets,
+                        markets=markets_for_data,  # Enriched markets (30-50 vs 10 tradable)
                         orderbooks=orderbooks,
                         trades=trades,
                         cycle_id=cycle_id,
                     )
                     if collected > 0:
-                        logger.debug(f"Collected {collected} ML training examples")
+                        logger.info(
+                            f"Collected {collected} ML training examples from {len(markets_for_data)} markets "
+                            f"(trading on {len(tradable_markets)} markets)",
+                            extra={
+                                "cycle_id": cycle_id,
+                                "examples_collected": collected,
+                                "markets_tracked": len(markets_for_data),
+                                "markets_traded": len(tradable_markets),
+                            }
+                        )
                 except Exception as e:
                     logger.warning(f"ML data collection failed: {e}")
             if signals:

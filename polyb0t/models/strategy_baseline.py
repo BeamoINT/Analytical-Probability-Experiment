@@ -490,10 +490,13 @@ class BaselineStrategy:
     ) -> int:
         """Collect training data from current cycle (for ML learning).
         
+        IMPORTANT: Collects from ALL markets, not just tradable ones.
+        This enables learning from the entire market landscape.
+        
         Args:
-            markets: Current markets.
-            orderbooks: Current orderbooks.
-            trades: Recent trades.
+            markets: ALL markets (not just tradable subset).
+            orderbooks: Current orderbooks (may be partial).
+            trades: Recent trades (may be partial).
             cycle_id: Current cycle ID.
             
         Returns:
@@ -507,34 +510,57 @@ class BaselineStrategy:
             prices = {}
             market_ids = {}
             
+            # Process ALL markets for comprehensive learning
             for market in markets:
                 for idx, outcome in enumerate(market.outcomes):
                     token_id = outcome.token_id
+                    if not token_id:
+                        continue
+                    
                     orderbook = orderbooks.get(token_id)
                     token_trades = trades.get(token_id, [])
                     
-                    # Get current price
+                    # Get current price (prioritize orderbook, fallback to Gamma)
+                    current_price = None
+                    
                     if orderbook and orderbook.bids and orderbook.asks:
                         current_price = (orderbook.bids[0].price + orderbook.asks[0].price) / 2
                     elif token_trades:
                         current_price = token_trades[-1].price
-                    elif outcome.price:
+                    elif outcome.price is not None:
                         current_price = outcome.price
-                    else:
+                    
+                    # Skip if no price available at all
+                    if current_price is None or current_price <= 0 or current_price >= 1:
                         continue
                     
-                    # Compute ML features
-                    ml_features = self.ml_feature_engine.compute_features(
-                        market=market,
-                        outcome_idx=idx,
-                        orderbook=orderbook,
-                        recent_trades=token_trades,
-                        current_price=current_price,
-                    )
-                    
-                    features_dict[token_id] = ml_features
-                    prices[token_id] = current_price
-                    market_ids[token_id] = market.condition_id
+                    # Compute ML features (handles missing orderbook gracefully)
+                    try:
+                        ml_features = self.ml_feature_engine.compute_features(
+                            market=market,
+                            outcome_idx=idx,
+                            orderbook=orderbook,  # May be None
+                            recent_trades=token_trades,  # May be empty
+                            current_price=current_price,
+                        )
+                        
+                        # Add market metadata for better learning
+                        ml_features['market_volume'] = float(market.volume or 0)
+                        ml_features['market_liquidity'] = float(market.liquidity or 0)
+                        ml_features['market_active'] = float(market.active)
+                        
+                        features_dict[token_id] = ml_features
+                        prices[token_id] = current_price
+                        market_ids[token_id] = market.condition_id
+                        
+                    except Exception as e:
+                        # Log but continue - don't let one bad market stop collection
+                        logger.debug(f"Failed to compute features for {token_id}: {e}")
+                        continue
+            
+            if not features_dict:
+                logger.debug("No features collected this cycle (no valid market data)")
+                return 0
             
             # Store for future labeling
             collected = self.ml_data_collector.collect_cycle_data(
@@ -547,7 +573,7 @@ class BaselineStrategy:
             return collected
             
         except Exception as e:
-            logger.error(f"Failed to collect training data: {e}")
+            logger.error(f"Failed to collect training data: {e}", exc_info=True)
             return 0
     
     def get_ml_status(self) -> dict:

@@ -223,6 +223,10 @@ class Settings(BaseSettings):
         default=False,
         description="Use ensemble of models instead of single model"
     )
+    ml_data_collection_limit: int = Field(
+        default=50,
+        description="Max markets to collect data from per cycle (0 = unlimited)"
+    )
     
     # Logging
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = Field(
