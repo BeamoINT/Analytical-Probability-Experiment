@@ -261,10 +261,17 @@ POLYBOT_ML_VALIDATION_THRESHOLD_R2=0.03  # 3% R² minimum
 # Prediction Blending
 POLYBOT_ML_PREDICTION_BLEND_WEIGHT=0.7  # 70% ML, 30% baseline
 
-# Data Retention (LARGE CAPACITY)
-POLYBOT_ML_DATA_RETENTION_DAYS=730  # Keep 2 years of data (~15GB max DB)
-POLYBOT_ML_MAX_TRAINING_EXAMPLES=5000000  # Use up to 5M examples for training
+# Data Retention (DEEP LEARNING CAPACITY - 75GB)
+POLYBOT_ML_DATA_RETENTION_DAYS=1095  # Keep 3 years of data (~75GB max DB)
+POLYBOT_ML_MAX_TRAINING_EXAMPLES=25000000  # Use up to 25M examples for training
 POLYBOT_ML_DATA_COLLECTION_LIMIT=50  # Track 50 markets per cycle
+
+# Dense Price Collection (NEW)
+POLYBOT_ML_PRICE_SNAPSHOT_INTERVAL_MINUTES=15  # Collect every 15 minutes
+POLYBOT_ML_ENABLE_BACKFILL=true  # Backfill missing data on restart
+
+# Auto-Enable (NEW)
+POLYBOT_ML_AUTO_ENABLE_THRESHOLD=2000  # Auto-enable ML at 2,000 examples
 
 # Advanced
 POLYBOT_ML_USE_ENSEMBLE=false  # Use single model (simpler)

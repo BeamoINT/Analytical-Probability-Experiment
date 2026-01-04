@@ -59,6 +59,23 @@ class TradingScheduler:
         """Run main trading loop continuously."""
         self.is_running = True
         logger.info("Starting trading loop")
+        
+        # Backfill missing price data on startup (if enabled)
+        if self.settings.ml_enable_backfill:
+            try:
+                from polyb0t.ml.backfill import HistoricalDataBackfiller
+                logger.info("Checking for missing price data to backfill...")
+                backfiller = HistoricalDataBackfiller(self.settings.ml_data_db)
+                stats = backfiller.get_price_history_stats()
+                logger.info(
+                    f"Price history: {stats['total_price_points']} points, "
+                    f"{stats['unique_tokens']} tokens, "
+                    f"{stats['coverage_days']:.1f} days coverage, "
+                    f"avg interval: {stats['avg_interval_minutes']:.1f}min "
+                    f"(target: {stats['target_interval_minutes']}min)"
+                )
+            except Exception as e:
+                logger.warning(f"Price history backfill check failed: {e}")
 
         while self.is_running:
             cycle_start = time.time()
@@ -305,9 +322,10 @@ class TradingScheduler:
                 extra={"signal_rejections": signal_rejections},
             )
             
-            # Collect ML training data from BROAD MARKET SET (if enabled)
+            # Collect ML training data from BROAD MARKET SET (if enabled or data collection phase)
             # This learns from many markets, not just ones we trade
-            if self.settings.enable_ml:
+            # Data collection runs even if ML is disabled (for Phase 1: data collection)
+            if self.settings.enable_ml or self.settings.ml_data_collection_limit > 0:
                 try:
                     # Use markets_for_data (enriched, broader than tradable_markets)
                     # This gives us 5-10x more training data
@@ -328,6 +346,21 @@ class TradingScheduler:
                                 "markets_traded": len(tradable_markets),
                             }
                         )
+                    
+                    # Dense price snapshots (every 15 min by default)
+                    # Captures higher-resolution price movements for deep learning
+                    try:
+                        from polyb0t.ml.backfill import HistoricalDataBackfiller
+                        backfiller = HistoricalDataBackfiller(self.settings.ml_data_db)
+                        snapshots = backfiller.collect_dense_snapshots(
+                            markets=markets_for_data,
+                            orderbooks=orderbooks,
+                        )
+                        if snapshots > 0:
+                            logger.debug(f"Collected {snapshots} dense price snapshots")
+                    except Exception as e:
+                        logger.debug(f"Dense snapshot collection skipped: {e}")
+                        
                 except Exception as e:
                     logger.warning(f"ML data collection failed: {e}")
             if signals:

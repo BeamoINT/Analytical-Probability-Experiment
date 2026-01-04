@@ -14,6 +14,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
+from polyb0t.config import get_settings
+from polyb0t.ml.auto_enable import check_and_auto_enable
 from polyb0t.ml.data import DataCollector
 from polyb0t.ml.model import PricePredictor
 
@@ -132,6 +134,19 @@ class ModelUpdater:
                     f"Data statistics: {stats['examples_with_targets']} usable examples, "
                     f"{stats['labeling_rate']:.1%} labeled"
                 )
+                
+                # Check if ML should be auto-enabled
+                settings = get_settings()
+                if not settings.enable_ml:
+                    auto_enabled = check_and_auto_enable(
+                        labeled_examples=stats['examples_with_targets'],
+                        threshold=settings.ml_auto_enable_threshold,
+                    )
+                    if auto_enabled:
+                        logger.warning(
+                            "⚠️  RESTART REQUIRED: ML has been auto-enabled in .env. "
+                            "Restart the bot to activate ML predictions."
+                        )
                 
                 if stats['examples_with_targets'] < self.min_total_examples:
                     logger.info(

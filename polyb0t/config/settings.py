@@ -228,12 +228,24 @@ class Settings(BaseSettings):
         description="Max markets to collect data from per cycle (0 = unlimited)"
     )
     ml_max_training_examples: int = Field(
-        default=5_000_000,
+        default=25_000_000,
         description="Max training examples to use (larger = more memory, better models)"
     )
     ml_data_retention_days: int = Field(
-        default=730,
-        description="How long to keep training data (days). 730 days = ~15GB max DB size"
+        default=1095,
+        description="How long to keep training data (days). 1095 days (3 years) = ~75GB max DB size"
+    )
+    ml_price_snapshot_interval_minutes: int = Field(
+        default=15,
+        description="Collect dense price snapshots every N minutes for deep learning"
+    )
+    ml_enable_backfill: bool = Field(
+        default=True,
+        description="Backfill missing price data when bot restarts"
+    )
+    ml_auto_enable_threshold: int = Field(
+        default=2000,
+        description="Auto-enable ML when this many labeled examples are collected (0=never)"
     )
     
     # Logging

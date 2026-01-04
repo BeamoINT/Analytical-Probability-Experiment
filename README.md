@@ -27,15 +27,28 @@ This bot supports two modes:
 
 ## 🎯 What It Does
 
-PolyB0T is an autonomous trading bot that:
+PolyB0T is an **institutional-grade autonomous trading bot** with **deep learning** capabilities:
 
 1. **Discovers Markets**: Fetches active Polymarket markets via Gamma API
 2. **Filters Universe**: Identifies tradable markets resolving in 30-60 days with sufficient liquidity
 3. **Analyzes Opportunities**: Computes features, implied probabilities, and edge calculations
 4. **Generates Signals**: Uses a baseline value-based strategy with explainable logic
-5. **Manages Risk**: Enforces strict position sizing, exposure limits, and drawdown controls
-6. **Simulates Trading**: Paper trades with realistic fill simulation including slippage and fees
-7. **Tracks Performance**: Comprehensive logging, metrics, and daily reports
+5. **🧠 Machine Learning**: Learns from market data and adapts predictions over time
+6. **Manages Risk**: Enforces strict position sizing, exposure limits, and drawdown controls
+7. **Simulates Trading**: Paper trades with realistic fill simulation including slippage and fees
+8. **Tracks Performance**: Comprehensive logging, metrics, and daily reports
+
+### 🧠 Deep Learning Features
+
+- **75GB database capacity** - stores 3 years of market history
+- **25M training examples** - institutional-scale learning
+- **Dense 15-min price snapshots** - captures intraday movements
+- **Automatic backfill** - no data loss when stopped/restarted
+- **Auto-enable ML** - activates automatically when ready (2,000+ examples)
+- **Continuous online learning** - retrains every 6 hours, hot-swaps models
+- **Broad market tracking** - learns from 50+ markets simultaneously
+
+See **[DEEP_LEARNING_UPGRADE.md](DEEP_LEARNING_UPGRADE.md)** for complete details.
 
 ## 🏗️ Architecture
 
