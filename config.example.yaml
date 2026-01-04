@@ -1,0 +1,53 @@
+# Example configuration file for PolyB0T
+# Copy to config.yaml and customize as needed
+# Environment variables take precedence over this file
+
+# Market Blacklist (manual exclusion list)
+# Add condition IDs of markets to exclude from trading
+blacklist:
+  # - "condition_id_1"
+  # - "condition_id_2"
+  # Example reasons to blacklist:
+  # - Ambiguous resolution criteria
+  # - Low volume/liquidity
+  # - Potential manipulation concerns
+  # - Testing or practice markets
+
+# Strategy Parameters
+strategy:
+  # Shrinkage factor for probability adjustment (0-1)
+  # Higher = more conservative (closer to 0.5)
+  shrinkage_factor: 0.3
+
+  # Momentum weight in model probability
+  momentum_weight: 0.2
+
+  # Mean reversion weight
+  mean_reversion_weight: 0.1
+
+# Risk Management
+risk:
+  # Enable/disable specific risk checks
+  check_duplicate_positions: true
+  check_correlated_markets: false  # Future enhancement
+
+  # Category-specific exposure limits (future enhancement)
+  category_limits:
+    # "Politics": 5.0  # Max 5% in political markets
+    # "Sports": 8.0    # Max 8% in sports markets
+
+# Logging
+logging:
+  # Additional logging configuration
+  log_to_file: false
+  log_file_path: "logs/polybot.log"
+  log_rotation: "1 day"
+  log_retention: "30 days"
+
+# Advanced Features (future enhancements)
+advanced:
+  # Enable experimental features
+  enable_ml_features: false
+  enable_sentiment_analysis: false
+  enable_correlation_tracking: false
+

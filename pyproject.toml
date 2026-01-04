@@ -1,0 +1,71 @@
+[tool.poetry]
+name = "polyb0t"
+version = "0.1.0"
+description = "Autonomous Polymarket paper trading bot with risk management"
+authors = ["Your Name <your.email@example.com>"]
+readme = "README.md"
+packages = [{include = "polyb0t"}]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+fastapi = "^0.109.0"
+uvicorn = {extras = ["standard"], version = "^0.27.0"}
+pydantic = "^2.5.0"
+pydantic-settings = "^2.1.0"
+sqlalchemy = "^2.0.25"
+alembic = "^1.13.0"
+psycopg2-binary = "^2.9.9"
+httpx = "^0.26.0"
+tenacity = "^8.2.3"
+python-dateutil = "^2.8.2"
+pyyaml = "^6.0.1"
+click = "^8.1.7"
+structlog = "^24.1.0"
+python-json-logger = "^2.0.7"
+pandas = "^2.1.4"
+numpy = "^1.26.3"
+python-dotenv = "^1.0.0"
+py-clob-client = "^0.23.0"
+web3 = "^6.0.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.4.4"
+pytest-asyncio = "^0.23.3"
+pytest-cov = "^4.1.0"
+mypy = "^1.8.0"
+ruff = "^0.1.14"
+black = "^23.12.1"
+types-pyyaml = "^6.0.12"
+types-python-dateutil = "^2.8.19"
+
+[tool.poetry.scripts]
+polyb0t = "polyb0t.cli.main:cli"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+select = ["E", "F", "I", "N", "W", "UP"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
