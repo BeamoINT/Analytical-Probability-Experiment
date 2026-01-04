@@ -190,6 +190,40 @@ class Settings(BaseSettings):
         description="Funder address (usually same as user_address for EOA; different for proxy/Safe)"
     )
 
+    # Machine Learning
+    enable_ml: bool = Field(
+        default=False,
+        description="Enable ML predictions (requires trained model)"
+    )
+    ml_model_dir: str = Field(
+        default="models",
+        description="Directory containing ML models"
+    )
+    ml_data_db: str = Field(
+        default="data/training_data.db",
+        description="Database for training data collection"
+    )
+    ml_retrain_interval_hours: int = Field(
+        default=6,
+        description="Hours between automatic model retraining"
+    )
+    ml_min_training_examples: int = Field(
+        default=1000,
+        description="Minimum examples before first training"
+    )
+    ml_validation_threshold_r2: float = Field(
+        default=0.03,
+        description="Minimum R² to accept new model (0.03 = 3% variance explained)"
+    )
+    ml_prediction_blend_weight: float = Field(
+        default=0.7,
+        description="Weight for ML predictions (0.7 = 70% ML, 30% baseline)"
+    )
+    ml_use_ensemble: bool = Field(
+        default=False,
+        description="Use ensemble of models instead of single model"
+    )
+    
     # Logging
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = Field(
         default="INFO", description="Logging level"

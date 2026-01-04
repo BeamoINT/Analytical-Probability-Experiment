@@ -276,6 +276,20 @@ class TradingScheduler:
                 f"Signals computed: {len(signals)}",
                 extra={"signal_rejections": signal_rejections},
             )
+            
+            # Collect ML training data (if enabled)
+            if self.settings.enable_ml:
+                try:
+                    collected = self.strategy.collect_training_data(
+                        markets=tradable_markets,
+                        orderbooks=orderbooks,
+                        trades=trades,
+                        cycle_id=cycle_id,
+                    )
+                    if collected > 0:
+                        logger.debug(f"Collected {collected} ML training examples")
+                except Exception as e:
+                    logger.warning(f"ML data collection failed: {e}")
             if signals:
                 sample = []
                 for s in signals[:3]:

@@ -94,6 +94,16 @@ class BaselineStrategy:
         
         # Minimum net edge threshold (after fees/slippage)
         self.min_net_edge = 0.02  # Require at least 2% net edge
+        
+        # ML components (optional)
+        self.ml_feature_engine = None
+        self.ml_model_manager = None
+        self.ml_data_collector = None
+        self.ml_model_updater = None
+        
+        # Initialize ML if enabled
+        if self.settings.enable_ml:
+            self._initialize_ml_components()
 
     def generate_signals(
         self,
@@ -306,12 +316,58 @@ class BaselineStrategy:
         )
         return signal
 
+    def _initialize_ml_components(self) -> None:
+        """Initialize ML components (model manager, data collector, updater)."""
+        try:
+            from pathlib import Path
+            from polyb0t.ml.features import AdvancedFeatureEngine
+            from polyb0t.ml.manager import ModelManager
+            from polyb0t.ml.data import DataCollector
+            from polyb0t.ml.updater import ModelUpdater
+            
+            # Advanced feature engine
+            self.ml_feature_engine = AdvancedFeatureEngine()
+            
+            # Model manager (hot-swappable inference)
+            model_dir = Path(self.settings.ml_model_dir)
+            self.ml_model_manager = ModelManager(
+                model_dir=model_dir,
+                use_ensemble=self.settings.ml_use_ensemble,
+                fallback_enabled=True,
+            )
+            
+            # Data collector
+            self.ml_data_collector = DataCollector(self.settings.ml_data_db)
+            
+            # Model updater (background learning)
+            self.ml_model_updater = ModelUpdater(
+                data_collector=self.ml_data_collector,
+                model_dir=model_dir,
+                retrain_interval_hours=self.settings.ml_retrain_interval_hours,
+                min_total_examples=self.settings.ml_min_training_examples,
+                validation_threshold_r2=self.settings.ml_validation_threshold_r2,
+            )
+            
+            # Start background learning
+            self.ml_model_updater.start()
+            
+            logger.info("ML components initialized and learning started")
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize ML components: {e}")
+            # Disable ML on failure
+            self.settings.enable_ml = False
+            self.ml_feature_engine = None
+            self.ml_model_manager = None
+            self.ml_data_collector = None
+            self.ml_model_updater = None
+    
     def _compute_model_probability(
         self,
         p_market: float,
         features: dict[str, Any],
     ) -> float:
-        """Compute model probability estimate.
+        """Compute model probability estimate (ML-enhanced if enabled).
 
         Args:
             p_market: Market implied probability.
@@ -319,6 +375,55 @@ class BaselineStrategy:
 
         Returns:
             Model probability estimate (0-1).
+        """
+        # Baseline prediction
+        baseline_prob = self._compute_baseline_probability(p_market, features)
+        
+        # If ML disabled or not available, return baseline
+        if not self.settings.enable_ml or self.ml_model_manager is None:
+            return baseline_prob
+        
+        # Try ML prediction
+        try:
+            import pandas as pd
+            
+            # Convert features to DataFrame for ML model
+            ml_features_df = pd.DataFrame([features])
+            
+            # Get ML prediction (predicted future return)
+            predicted_return = self.ml_model_manager.predict(ml_features_df)
+            
+            # Convert return prediction to probability
+            # Predicted return is change from current price
+            p_ml = p_market + predicted_return
+            p_ml = max(0.01, min(0.99, p_ml))
+            
+            # Blend ML with baseline for robustness
+            blend_weight = self.settings.ml_prediction_blend_weight
+            p_model = blend_weight * p_ml + (1 - blend_weight) * baseline_prob
+            
+            # Clamp final prediction
+            p_model = max(0.01, min(0.99, p_model))
+            
+            return p_model
+            
+        except Exception as e:
+            logger.warning(f"ML prediction failed, using baseline: {e}")
+            return baseline_prob
+    
+    def _compute_baseline_probability(
+        self,
+        p_market: float,
+        features: dict[str, Any],
+    ) -> float:
+        """Compute baseline probability (no ML).
+
+        Args:
+            p_market: Market implied probability.
+            features: Feature dictionary.
+
+        Returns:
+            Baseline probability estimate (0-1).
         """
         # Start with shrinkage toward 0.5 (reduces overconfidence)
         prior = 0.5
@@ -375,4 +480,105 @@ class BaselineStrategy:
             confidence += 0.1
 
         return min(1.0, confidence)
+    
+    def collect_training_data(
+        self,
+        markets: list[Market],
+        orderbooks: dict[str, OrderBook],
+        trades: dict[str, list[Trade]],
+        cycle_id: str,
+    ) -> int:
+        """Collect training data from current cycle (for ML learning).
+        
+        Args:
+            markets: Current markets.
+            orderbooks: Current orderbooks.
+            trades: Recent trades.
+            cycle_id: Current cycle ID.
+            
+        Returns:
+            Number of examples collected.
+        """
+        if not self.settings.enable_ml or self.ml_data_collector is None or self.ml_feature_engine is None:
+            return 0
+        
+        try:
+            features_dict = {}
+            prices = {}
+            market_ids = {}
+            
+            for market in markets:
+                for idx, outcome in enumerate(market.outcomes):
+                    token_id = outcome.token_id
+                    orderbook = orderbooks.get(token_id)
+                    token_trades = trades.get(token_id, [])
+                    
+                    # Get current price
+                    if orderbook and orderbook.bids and orderbook.asks:
+                        current_price = (orderbook.bids[0].price + orderbook.asks[0].price) / 2
+                    elif token_trades:
+                        current_price = token_trades[-1].price
+                    elif outcome.price:
+                        current_price = outcome.price
+                    else:
+                        continue
+                    
+                    # Compute ML features
+                    ml_features = self.ml_feature_engine.compute_features(
+                        market=market,
+                        outcome_idx=idx,
+                        orderbook=orderbook,
+                        recent_trades=token_trades,
+                        current_price=current_price,
+                    )
+                    
+                    features_dict[token_id] = ml_features
+                    prices[token_id] = current_price
+                    market_ids[token_id] = market.condition_id
+            
+            # Store for future labeling
+            collected = self.ml_data_collector.collect_cycle_data(
+                features_dict=features_dict,
+                prices=prices,
+                cycle_id=cycle_id,
+                market_ids=market_ids,
+            )
+            
+            return collected
+            
+        except Exception as e:
+            logger.error(f"Failed to collect training data: {e}")
+            return 0
+    
+    def get_ml_status(self) -> dict:
+        """Get ML system status.
+        
+        Returns:
+            Dictionary with ML status information.
+        """
+        if not self.settings.enable_ml:
+            return {'enabled': False}
+        
+        status = {'enabled': True}
+        
+        # Model status
+        if self.ml_model_manager:
+            status['model'] = self.ml_model_manager.get_model_info()
+        
+        # Data collection status
+        if self.ml_data_collector:
+            status['data'] = self.ml_data_collector.get_statistics()
+        
+        # Updater status
+        if self.ml_model_updater:
+            status['updater'] = self.ml_model_updater.get_status()
+        
+        return status
+    
+    def shutdown_ml(self) -> None:
+        """Gracefully shutdown ML components."""
+        if self.ml_model_updater:
+            logger.info("Stopping ML updater...")
+            self.ml_model_updater.stop()
+            logger.info("ML updater stopped")
 
