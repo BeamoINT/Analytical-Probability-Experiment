@@ -152,6 +152,15 @@ pip install -r requirements.txt  # Generate from pyproject.toml if needed
 
 3. **Configure environment**
 
+Recommended: use the repo’s committed defaults + a machine-level secrets file.
+
+- Read: `docs/SECRETS_AND_AUTOSTART.md`
+- Run once per machine:
+
+```bash
+bash scripts/bootstrap_env.sh
+```
+
 ```bash
 cp .env.example .env
 # Edit .env with your settings

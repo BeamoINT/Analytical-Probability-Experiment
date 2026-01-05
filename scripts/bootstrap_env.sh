@@ -18,17 +18,43 @@ else
   fi
 fi
 
-if [[ ! -f ".env.local" ]]; then
-  cat > .env.local <<'EOF'
-# Local secrets for this machine (NEVER COMMIT)
-# Example:
+SECRETS_DIR="${HOME}/.polyb0t"
+SECRETS_FILE="${SECRETS_DIR}/secrets.env"
+
+mkdir -p "${SECRETS_DIR}"
+
+if [[ ! -f "${SECRETS_FILE}" ]]; then
+  cat > "${SECRETS_FILE}" <<'EOF'
+# Machine-level secrets (NEVER COMMIT)
+# The bot loads env files in this order:
+#   env.live  -> .env -> .env.local
+# Recommended: keep ALL secrets in this file and symlink .env.local to it.
+#
+# Required for live trading:
 # POLYBOT_POLYGON_PRIVATE_KEY=0x...
 # POLYBOT_CLOB_API_KEY=...
 # POLYBOT_CLOB_API_SECRET=...
 # POLYBOT_CLOB_PASSPHRASE=...
+#
+# Proxy mode (typical for Polymarket built-in wallet):
+# POLYBOT_USER_ADDRESS=0x<proxy_wallet>
+# POLYBOT_FUNDER_ADDRESS=0x<proxy_wallet>
+# POLYBOT_SIGNATURE_TYPE=1
+#
+# Optional but recommended:
+# POLYBOT_POLYGON_RPC_URL=https://polygon-rpc.com
 EOF
-  echo "Created .env.local template (add secrets here)"
+  echo "Created ${SECRETS_FILE} template (add secrets here)"
 else
-  echo ".env.local already exists - leaving it unchanged."
+  echo "${SECRETS_FILE} already exists - leaving it unchanged."
+fi
+
+if [[ -L ".env.local" ]]; then
+  echo ".env.local symlink already exists."
+elif [[ -f ".env.local" ]]; then
+  echo ".env.local exists (file). Not overwriting. Consider symlinking it to ${SECRETS_FILE}."
+else
+  ln -s "${SECRETS_FILE}" .env.local
+  echo "Symlinked .env.local -> ${SECRETS_FILE}"
 fi
 
