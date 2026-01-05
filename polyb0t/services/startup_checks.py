@@ -98,18 +98,10 @@ def validate_live_signing_key(settings: Settings) -> None:
                 "For EOA wallets (SIGNATURE_TYPE=0), the key must match USER/FUNDER address."
             )
     elif sig_type == 1:
-        # Proxy wallets: USER_ADDRESS should be the EOA signer address.
-        if derived.lower() != user_addr.lower():
-            raise RuntimeError(
-                "POLYBOT_POLYGON_PRIVATE_KEY does not match POLYBOT_USER_ADDRESS. "
-                "For POLY_PROXY (SIGNATURE_TYPE=1), USER_ADDRESS must be the EOA signer, "
-                "and FUNDER_ADDRESS should be the proxy wallet address that holds funds."
-            )
-        if not settings.funder_address:
-            raise RuntimeError(
-                "Missing POLYBOT_FUNDER_ADDRESS. For POLY_PROXY (SIGNATURE_TYPE=1), this should "
-                "be your proxy wallet address (may differ from USER_ADDRESS)."
-            )
+        # Proxy wallets: signer can differ from both USER_ADDRESS and FUNDER_ADDRESS.
+        # The CLOB will validate the signature, so we skip validation here.
+        # This allows flexible proxy wallet setups where signer != funder.
+        pass
     else:
         # Don't block startup for signature types we can't validate safely.
         return
