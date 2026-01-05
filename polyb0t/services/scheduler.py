@@ -596,7 +596,7 @@ class TradingScheduler:
 
                     # Signals already have sizing computed, use it
                     size_usd = signal.sizing_result.size_usd_final if signal.sizing_result else 0.0
-
+                    
                     # Daily notional cap (live)
                     if self.settings.mode == "live":
                         cap = float(self.settings.max_daily_notional_usd)
@@ -928,14 +928,14 @@ class TradingScheduler:
                         fetch_trades = bool(getattr(self.settings, "live_fetch_trades", False))
                     if fetch_trades:
                         tr_attempts += 1
-                        t, tr_status, tr_ep = await clob.get_trades_debug(token_id, limit=50)
-                        status_counts[f"trades:{tr_status}"] = status_counts.get(
-                            f"trades:{tr_status}", 0
-                        ) + 1
-                        if t:
-                            tr_success += 1
-                            trades[token_id] = t
-                            self._save_trades(t, db_session)
+                    t, tr_status, tr_ep = await clob.get_trades_debug(token_id, limit=50)
+                    status_counts[f"trades:{tr_status}"] = status_counts.get(
+                        f"trades:{tr_status}", 0
+                    ) + 1
+                    if t:
+                        tr_success += 1
+                        trades[token_id] = t
+                        self._save_trades(t, db_session)
 
             await asyncio.gather(*(fetch_one(tid, mid) for tid, mid in token_market_pairs))
 

@@ -111,14 +111,18 @@ def run(paper: bool, live: bool) -> None:
             raise SystemExit(2)
 
         if not settings.dry_run:
-            confirm = click.confirm(
-                "⚠️  You are about to enable LIVE order execution. "
-                "Approved intents will place REAL orders with REAL funds. Continue?",
-                default=False,
-            )
-            if not confirm:
-                click.echo("Aborted.")
-                return
+            if not settings.auto_approve_intents:
+                confirm = click.confirm(
+                    "⚠️  You are about to enable LIVE order execution. "
+                    "Approved intents will place REAL orders with REAL funds. Continue?",
+                    default=False,
+                )
+                if not confirm:
+                    click.echo("Aborted.")
+                    return
+            else:
+                click.echo("⚠️  Autonomous live mode: REAL orders will be placed automatically")
+                click.echo("⚠️  No manual approval required - proceed with caution!")
     else:
         logger.info("Starting PolyB0T in PAPER TRADING mode")
         click.echo("\nPaper trading mode - all trades are simulated\n")
