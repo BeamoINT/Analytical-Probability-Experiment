@@ -32,9 +32,9 @@ class PositionSizer:
         self.min_kelly_fraction = 0.05  # Minimum Kelly
         self.max_kelly_fraction = 0.50  # Maximum Kelly (half Kelly max)
         
-        # Bankroll allocation limits
-        self.max_pct_per_trade = 0.15  # Max 15% of bankroll per trade
-        self.max_pct_total_exposure = 0.40  # Max 40% total exposure
+        # Bankroll allocation limits (USER CONFIGURED: aggressive)
+        self.max_pct_per_trade = 0.45  # Max 45% of available cash per trade
+        self.max_pct_total_exposure = 0.90  # Max 90% total portfolio exposure
         
         # Edge-based scaling
         self.edge_scale_min = 0.02  # Minimum edge for min sizing
@@ -83,13 +83,12 @@ class PositionSizer:
         # Scale with confidence
         confidence_adjusted = kelly_size * confidence
 
-        # Cap 1: Max percentage of bankroll per trade
-        max_per_trade = total_bankroll * self.max_pct_per_trade
+        # Cap 1: Max percentage of AVAILABLE CASH per trade (user config: 45%)
+        max_per_trade = available_usdc * self.max_pct_per_trade
         after_per_trade_cap = min(confidence_adjusted, max_per_trade)
 
-        # Cap 2: Max percentage of available (don't over-commit available)
-        max_available_commit = available_usdc * 0.95  # Keep 5% cushion
-        after_available_cap = min(after_per_trade_cap, max_available_commit)
+        # Cap 2: Ensure we don't exceed available (already handled by Cap 1)
+        after_available_cap = after_per_trade_cap
 
         # Cap 3: Total exposure limit
         max_total_exposure = total_bankroll * self.max_pct_total_exposure

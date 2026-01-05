@@ -84,10 +84,10 @@ class Settings(BaseSettings):
     )
     usdc_decimals: int = Field(default=6, description="USDC decimals (default 6)")
 
-    # Live absolute risk/limits (tiny safe defaults)
+    # Live absolute risk/limits (configured for percentage-based sizing)
     min_order_usd: float = Field(default=1.0, description="Min USD notional per order (live)")
-    max_order_usd: float = Field(default=5.0, description="Max USD notional per order (live)")
-    max_total_exposure_usd: float = Field(default=25.0, description="Max total exposure USD (live)")
+    max_order_usd: float = Field(default=10000.0, description="Max USD notional per order - set high to allow percentage-based sizing")
+    max_total_exposure_usd: float = Field(default=100000.0, description="Max total exposure USD - set high to allow percentage-based sizing")
     max_open_orders: int = Field(default=3, description="Max open orders allowed (live)")
     max_daily_notional_usd: float = Field(default=50.0, description="Max daily notional USD (live)")
     kill_switch_on_errors: int = Field(
