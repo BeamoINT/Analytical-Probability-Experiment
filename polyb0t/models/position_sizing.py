@@ -71,27 +71,24 @@ class PositionSizer:
         # Total bankroll (available + reserved)
         total_bankroll = available_usdc + reserved_usdc
 
-        # Kelly fraction scales with edge (conservative)
-        kelly_frac = self._compute_kelly_fraction(edge_net, confidence)
-
-        # Kelly suggests: size = bankroll * kelly_fraction * edge
-        # For binary outcome with edge e and confidence c:
-        # kelly = (p_win * b - p_lose) / b
-        # Simplified: kelly ≈ edge (for small edges)
-        kelly_size = total_bankroll * kelly_frac * abs(edge_net)
-
-        # Scale with confidence
-        confidence_adjusted = kelly_size * confidence
-
+        # USER AGGRESSIVE SIZING: Use full 45% cap for any edge above threshold
+        # Edge threshold is already 5%, so if we're here, edge is good enough
+        # Scale: 5% edge = 100% of cap (user wants aggressive sizing)
+        edge_scale = min(1.0, abs(edge_net) / 0.05)  # 5% edge = full size
+        
+        # Use full 45% cap, scaled by confidence
+        sized_amount = available_usdc * self.max_pct_per_trade * confidence * edge_scale
+        
         # Cap 1: Max percentage of AVAILABLE CASH per trade (user config: 45%)
         max_per_trade = available_usdc * self.max_pct_per_trade
-        after_per_trade_cap = min(confidence_adjusted, max_per_trade)
+        after_per_trade_cap = min(sized_amount, max_per_trade)
         
         logger.debug(
             f"Sizing calculation: available={available_usdc:.2f}, "
             f"max_pct={self.max_pct_per_trade:.2f}, "
             f"max_per_trade={max_per_trade:.2f}, "
-            f"kelly={kelly_size:.2f}, "
+            f"edge_scale={edge_scale:.3f}, "
+            f"sized={sized_amount:.2f}, "
             f"after_cap={after_per_trade_cap:.2f}"
         )
 
@@ -115,7 +112,7 @@ class PositionSizer:
 
         # Determine primary reason for final size
         reason = self._determine_sizing_reason(
-            kelly_size=kelly_size,
+            kelly_size=sized_amount,
             after_per_trade_cap=after_per_trade_cap,
             after_available_cap=after_available_cap,
             after_exposure_cap=after_exposure_cap,
@@ -125,16 +122,17 @@ class PositionSizer:
         )
 
         return SizingResult(
-            size_usd_raw=kelly_size,
+            size_usd_raw=sized_amount,
             size_usd_final=size_final,
             sizing_reason=reason,
-            kelly_fraction=kelly_frac,
+            kelly_fraction=edge_scale * confidence,  # Effective fraction used
             edge_contribution=abs(edge_net),
             metadata={
                 "total_bankroll": total_bankroll,
                 "available_usdc": available_usdc,
                 "reserved_usdc": reserved_usdc,
-                "confidence_adjusted": confidence_adjusted,
+                "edge_scale": edge_scale,
+                "sized_amount": sized_amount,
                 "after_per_trade_cap": after_per_trade_cap,
                 "after_available_cap": after_available_cap,
                 "after_exposure_cap": after_exposure_cap,
