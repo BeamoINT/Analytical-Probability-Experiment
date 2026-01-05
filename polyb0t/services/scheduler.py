@@ -171,6 +171,7 @@ class TradingScheduler:
                     logger.warning(f"Balance snapshot unavailable: {e}")
 
                 # Account state snapshot (best-effort; may require auth). Used for open orders/positions.
+                held_long_token_ids: set[str] = set()
                 try:
                     from polyb0t.data.account_state import AccountStateProvider
                     from polyb0t.data.storage import AccountStateDB
@@ -178,6 +179,19 @@ class TradingScheduler:
                     async with AccountStateProvider() as provider:
                         state = await provider.fetch_account_state()
                     if state:
+                        # Track LONG holdings so we can safely allow SELL intents that reduce existing
+                        # positions (including positions opened manually by the user).
+                        try:
+                            held_long_token_ids = {
+                                p.token_id
+                                for p in (state.positions or [])
+                                if getattr(p, "token_id", None)
+                                and float(getattr(p, "quantity", 0) or 0) > 0
+                                and str(getattr(p, "side", "LONG")).upper() == "LONG"
+                            }
+                        except Exception:
+                            held_long_token_ids = set()
+
                         db_session.add(
                             AccountStateDB(
                                 cycle_id=cycle_id,
@@ -591,15 +605,29 @@ class TradingScheduler:
                         daily_notional_used = 0.0
 
                 for signal in sorted(signals, key=lambda s: abs(s.edge), reverse=True):
-                    # Safety: do not propose SELL to open positions unless explicitly allowed.
-                    # This prevents accidentally proposing to sell user-held/manual positions.
-                    if signal.side == "SELL" and not bool(getattr(self.settings, "live_allow_open_sell_intents", False)):
-                        rejected += 1
-                        logger.info(
-                            "Signal skipped: OPEN_POSITION SELL intents disabled (live_allow_open_sell_intents=false)",
-                            extra={"token_id": signal.token_id, "market_id": signal.market_id, "edge": signal.edge},
-                        )
-                        continue
+                    # Safety: SELL can be ambiguous in live trading:
+                    # - It can reduce/close an existing LONG position (including manual positions).
+                    # - Or it can open/increase a SHORT position (dangerous if unintended).
+                    #
+                    # Default behavior (live_allow_open_sell_intents=false):
+                    # - Allow SELL intents ONLY when the account currently holds the token LONG
+                    #   (i.e., this SELL is likely reducing an existing position).
+                    # When live_allow_open_sell_intents=true:
+                    # - Allow SELL intents even if it would open a SHORT.
+                    if signal.side == "SELL" and not bool(
+                        getattr(self.settings, "live_allow_open_sell_intents", False)
+                    ):
+                        if signal.token_id not in held_long_token_ids:
+                            rejected += 1
+                            logger.info(
+                                "Signal skipped: OPEN_POSITION SELL would open SHORT (live_allow_open_sell_intents=false)",
+                                extra={
+                                    "token_id": signal.token_id,
+                                    "market_id": signal.market_id,
+                                    "edge": signal.edge,
+                                },
+                            )
+                            continue
 
                     # Signals already have sizing computed, use it
                     size_usd = signal.sizing_result.size_usd_final if signal.sizing_result else 0.0

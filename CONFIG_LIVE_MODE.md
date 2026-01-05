@@ -96,6 +96,22 @@ POLYBOT_DRY_RUN=false
 - **Requires explicit confirmation** at startup
 - Only enable after extensive dry-run testing
 
+## Allowing SELL intents (including manual positions)
+
+SELL can either:
+- **Reduce/close an existing LONG** position (including positions you opened manually), or
+- **Open/increase a SHORT** position.
+
+By default, PolyB0T will only allow SELL intents when you currently hold that token **LONG** (so it can reduce/close manual positions without opening new shorts).
+
+If you want to also allow SELL intents that could open shorts, set:
+
+```bash
+POLYBOT_LIVE_ALLOW_OPEN_SELL_INTENTS=true
+```
+
+⚠️ Enabling this means the bot may propose/execute SELL orders that reduce or fully close positions you opened yourself.
+
 ## Kill Switches
 
 Automated safety halts trigger when:
