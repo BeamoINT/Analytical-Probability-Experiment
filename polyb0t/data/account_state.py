@@ -254,7 +254,7 @@ class AccountStateProvider:
         Note:
             Uses py-clob-client to fetch trades and reconstruct positions.
         """
-        logger.debug("_fetch_positions called - starting position reconstruction")
+        logger.info("🔍 _fetch_positions called - starting position reconstruction with orderbook filtering")
         try:
             import asyncio
             from collections import defaultdict
@@ -308,28 +308,56 @@ class AccountStateProvider:
                     position_data[asset_id]["market_id"] = market_id
             
             # Convert to AccountPosition objects (only positions with quantity > 0)
+            # Also filter out resolved markets by checking if orderbook exists
             positions = []
-            for token_id, data in position_data.items():
-                # Only include positions with positive quantity and value >= $0.10
-                # This filters out dust positions and resolved markets
-                if data["quantity"] > 0.001 and data["cost"] >= 0.10:
-                    avg_price = data["cost"] / data["quantity"] if data["quantity"] > 0 else 0
-                    position = AccountPosition(
-                        token_id=token_id,
-                        market_id=data["market_id"],
-                        side="LONG",  # All reconstructed positions are LONG
-                        quantity=data["quantity"],
-                        avg_price=avg_price,
-                        current_price=None,  # Will be fetched separately if needed
-                    )
-                    positions.append(position)
+            tokens_to_check = [
+                (token_id, data) 
+                for token_id, data in position_data.items()
+                if data["quantity"] > 0.001 and data["cost"] >= 0.10
+            ]
             
-            logger.info(f"Reconstructed {len(positions)} positions from {len(trades)} trades")
+            logger.debug(f"Found {len(tokens_to_check)} positions with $0.10+ value, checking orderbooks...")
+            
+            # Check orderbook for each position to filter out resolved markets
+            async with httpx.AsyncClient(timeout=5.0) as http_client:
+                for token_id, data in tokens_to_check:
+                    try:
+                        # Check if token has an active orderbook (not resolved)
+                        response = await http_client.get(
+                            f"{settings.clob_base_url}/book?token_id={token_id}"
+                        )
+                        
+                        if response.status_code == 200:
+                            book = response.json()
+                            # Only include if orderbook has bids or asks
+                            has_bids = book.get("bids") and len(book["bids"]) > 0
+                            has_asks = book.get("asks") and len(book["asks"]) > 0
+                            
+                            if has_bids or has_asks:
+                                avg_price = data["cost"] / data["quantity"] if data["quantity"] > 0 else 0
+                                position = AccountPosition(
+                                    token_id=token_id,
+                                    market_id=data["market_id"],
+                                    side="LONG",
+                                    quantity=data["quantity"],
+                                    avg_price=avg_price,
+                                    current_price=None,
+                                )
+                                positions.append(position)
+                            else:
+                                logger.debug(f"Skipping token {token_id[:16]}... - empty orderbook (resolved market)")
+                        else:
+                            logger.debug(f"Skipping token {token_id[:16]}... - no orderbook (resolved market)")
+                    except Exception as e:
+                        logger.debug(f"Error checking orderbook for {token_id[:16]}...: {e}")
+            
+            logger.info(f"Reconstructed {len(positions)} ACTIVE positions from {len(trades)} trades (filtered out {len(tokens_to_check) - len(positions)} resolved markets)")
             return positions
 
         except Exception as e:
-            logger.error(f"CRITICAL: Error fetching positions from trades: {e}", exc_info=True)
+            logger.error(f"CRITICAL: Error in _fetch_positions: {e}", exc_info=True)
             logger.error(f"Exception type: {type(e).__name__}, args: {e.args}")
+            logger.error("Falling back to empty position list")
             return []
 
     async def _fetch_open_orders(self) -> list[AccountOrder]:
