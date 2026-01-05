@@ -706,22 +706,32 @@ class TradingScheduler:
                         continue
 
                     # Market diversification guardrail: limit positions per market
-                    # Count existing positions in this market (only for BUY signals opening new positions)
+                    # Count existing positions + pending/approved intents in this market (only for BUY signals opening new positions)
                     if signal.side == "BUY" and signal.market_id and account_state:
                         positions_in_market = [
                             p for p in account_state.positions
                             if p.market_id == signal.market_id
                         ]
+                        
+                        # Also count pending/approved BUY intents for this market from current cycle
+                        pending_intents_in_market = [
+                            intent for intent in created_intents
+                            if intent.market_id == signal.market_id and intent.side == "BUY"
+                        ]
+                        
+                        total_count = len(positions_in_market) + len(pending_intents_in_market)
                         max_positions = int(getattr(self.settings, "max_positions_per_market", 4))
                         
                         # Check if we're already at the limit
-                        if len(positions_in_market) >= max_positions:
+                        if total_count >= max_positions:
                             rejected += 1
                             logger.info(
                                 "Signal rejected: max_positions_per_market reached",
                                 extra={
                                     "market_id": signal.market_id,
                                     "positions_in_market": len(positions_in_market),
+                                    "pending_intents_in_market": len(pending_intents_in_market),
+                                    "total_count": total_count,
                                     "max_positions_per_market": max_positions,
                                     "token_id": signal.token_id,
                                 },

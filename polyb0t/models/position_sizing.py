@@ -34,7 +34,7 @@ class PositionSizer:
         
         # Dynamic position sizing limits
         self.min_pct_per_trade = 0.05  # Min 5% of available cash per trade
-        self.max_pct_per_trade = 0.45  # Max 45% of available cash per trade
+        self.max_pct_per_trade = 0.15  # Max 15% of available cash per trade (user limit)
         self.max_pct_total_exposure = 0.90  # Hard cap: max 90% total portfolio exposure (not a target)
         
         # Edge-based scaling for dynamic sizing
@@ -72,22 +72,22 @@ class PositionSizer:
         # Total bankroll (available + reserved)
         total_bankroll = available_usdc + reserved_usdc
 
-        # DYNAMIC SIZING: Scale position size between 5-45% based on edge quality
-        # Edge scaling: 4.5% edge → 5% position, 10% edge → 45% position
+        # DYNAMIC SIZING: Scale position size between 5-15% based on edge quality
+        # Edge scaling: 4.5% edge → 5% position, 10% edge → 15% position
         edge_abs = abs(edge_net)
         
         if edge_abs <= self.edge_scale_min:
             # At minimum edge threshold (4.5%), use minimum size (5%)
             edge_scale = 0.0
         elif edge_abs >= self.edge_scale_max:
-            # At or above 10% edge, use maximum size (45%)
+            # At or above 10% edge, use maximum size (15%)
             edge_scale = 1.0
         else:
             # Linear interpolation between min and max
             edge_range = self.edge_scale_max - self.edge_scale_min
             edge_scale = (edge_abs - self.edge_scale_min) / edge_range
         
-        # Calculate target percentage: interpolate between min (5%) and max (45%)
+        # Calculate target percentage: interpolate between min (5%) and max (15%)
         pct_range = self.max_pct_per_trade - self.min_pct_per_trade
         target_pct = self.min_pct_per_trade + (edge_scale * pct_range)
         
@@ -97,7 +97,7 @@ class PositionSizer:
         # Calculate dollar amount
         sized_amount = available_usdc * final_pct
         
-        # Cap at absolute maximum (45%)
+        # Cap at absolute maximum (15%)
         max_per_trade = available_usdc * self.max_pct_per_trade
         after_per_trade_cap = min(sized_amount, max_per_trade)
         
