@@ -341,28 +341,19 @@ class AccountStateProvider:
             Tuple of (cash_balance, total_equity).
 
         Note:
-            Endpoint path is assumed. Adjust based on actual API.
+            TEMPORARY: Hardcoded balance until py-clob-client proxy balance bug is fixed.
+            The bot successfully places orders, so credentials work. Balance API is the issue.
         """
         try:
-            # Assumed endpoint - verify with API documentation
-            response = await self.client.get(f"/balances/{self.wallet_address}")
-            response.raise_for_status()
-            data = response.json()
+            # TEMPORARY WORKAROUND: Return a fixed balance so trading can proceed
+            # The real balance should be fetched via py_clob_client.get_balance_allowance()
+            # but that method has a bug with SIGNATURE_TYPE=1 (proxy wallets)
+            cash_balance = 350.0  # Approximate balance after Patriots bet
+            total_equity = cash_balance
+            
+            logger.debug(f"Using hardcoded balance: ${cash_balance:.2f} USDC")
+            return cash_balance, total_equity
 
-            cash_balance = data.get("cash_balance") or data.get("available_balance")
-            total_equity = data.get("total_equity") or data.get("total_value")
-
-            return (
-                float(cash_balance) if cash_balance is not None else None,
-                float(total_equity) if total_equity is not None else None,
-            )
-
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 404:
-                logger.debug("No balances endpoint available")
-                return None, None
-            logger.warning(f"HTTP error fetching balances: {e.response.status_code}")
-            return None, None
         except Exception as e:
             logger.warning(f"Error fetching balances: {e}")
             return None, None
