@@ -260,3 +260,56 @@ class Reporter:
             f"drawdown={drawdown_pct:.2f}%"
         )
 
+    def save_pnl_snapshot_live(
+        self,
+        cycle_id: str,
+        total_usdc: float,
+        reserved_usdc: float,
+        available_usdc: float,
+    ) -> None:
+        """Save live mode balance snapshot (real on-chain balance).
+
+        Args:
+            cycle_id: Current cycle ID.
+            total_usdc: Total USDC balance.
+            reserved_usdc: Reserved USDC (for open orders/positions).
+            available_usdc: Available USDC for trading.
+        """
+        # Get historical max equity for drawdown calculation
+        max_equity_record = (
+            self.db_session.query(func.max(PnLSnapshotDB.total_equity)).scalar()
+        )
+        peak_equity = max(total_usdc, max_equity_record or total_usdc)
+
+        drawdown_pct = (
+            ((peak_equity - total_usdc) / peak_equity * 100)
+            if peak_equity > 0
+            else 0
+        )
+
+        snapshot = PnLSnapshotDB(
+            cycle_id=cycle_id,
+            timestamp=datetime.utcnow(),
+            total_equity=total_usdc,
+            cash_balance=available_usdc,
+            total_exposure=reserved_usdc,
+            unrealized_pnl=0.0,  # Not tracked in live mode yet
+            realized_pnl=0.0,    # Not tracked in live mode yet
+            num_positions=0,     # Would need to query account state
+            drawdown_pct=drawdown_pct,
+            meta_json={
+                "mode": "live",
+                "total_usdc": total_usdc,
+                "reserved_usdc": reserved_usdc,
+                "available_usdc": available_usdc,
+            },
+        )
+
+        self.db_session.add(snapshot)
+        self.db_session.commit()
+
+        logger.info(
+            f"Saved balance snapshot: total=${total_usdc:.2f} USDC, "
+            f"available=${available_usdc:.2f}, drawdown={drawdown_pct:.2f}%"
+        )
+

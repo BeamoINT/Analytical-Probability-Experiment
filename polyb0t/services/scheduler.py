@@ -135,9 +135,13 @@ class TradingScheduler:
             if self.settings.mode == "live":
                 # Hygiene: expire + backfill + collapse duplicates so dedup is DB-backed and stable.
                 # This enforces the invariant: <= 1 pending intent per fingerprint.
-                intent_manager.expire_old_intents()
+                expired_count = intent_manager.expire_old_intents()
                 intent_manager.backfill_missing_fingerprints(statuses=[IntentStatus.PENDING, IntentStatus.APPROVED])
-                intent_manager.cleanup_duplicate_pending_intents(mode="supersede")
+                dedup_count = intent_manager.cleanup_duplicate_pending_intents(mode="supersede")
+                if expired_count > 0 or dedup_count.get("deduped", 0) > 0:
+                    logger.info(
+                        f"Intent cleanup: expired={expired_count}, deduped={dedup_count.get('deduped', 0)}"
+                    )
 
                 # Balance snapshot (best-effort; safe, read-only). Used for sizing & observability.
                 try:
@@ -590,15 +594,29 @@ class TradingScheduler:
             current_prices = self._extract_current_prices(orderbooks)
             self.portfolio.update_market_prices(current_prices)
 
-            # Step 10: Save PnL snapshot
+            # Step 10: Save PnL snapshot (live mode uses real balance, paper mode uses portfolio)
             reporter = Reporter(db_session)
-            reporter.save_pnl_snapshot(self.portfolio, cycle_id)
-
-            logger.info(
-                f"Portfolio: equity=${self.portfolio.total_equity:.2f}, "
-                f"positions={self.portfolio.num_positions}, "
-                f"exposure=${self.portfolio.total_exposure:.2f}"
-            )
+            if self.settings.mode == "live" and balance_summary and "total_usdc" in balance_summary:
+                # Use real on-chain balance for live mode reporting
+                reporter.save_pnl_snapshot_live(
+                    cycle_id=cycle_id,
+                    total_usdc=balance_summary["total_usdc"],
+                    reserved_usdc=balance_summary["reserved_usdc"],
+                    available_usdc=balance_summary["available_usdc"],
+                )
+                logger.info(
+                    f"Account: balance=${balance_summary['total_usdc']:.2f} USDC, "
+                    f"reserved=${balance_summary['reserved_usdc']:.2f}, "
+                    f"available=${balance_summary['available_usdc']:.2f}"
+                )
+            else:
+                # Paper mode: use simulated portfolio
+                reporter.save_pnl_snapshot(self.portfolio, cycle_id)
+                logger.info(
+                    f"Portfolio: equity=${self.portfolio.total_equity:.2f}, "
+                    f"positions={self.portfolio.num_positions}, "
+                    f"exposure=${self.portfolio.total_exposure:.2f}"
+                )
 
         finally:
             db_session.close()

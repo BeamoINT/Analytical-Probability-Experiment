@@ -217,6 +217,12 @@ class BaselineStrategy:
         
         # Check raw edge threshold
         if abs(edge_raw) < self.settings.edge_threshold:
+            # Log rejection details for tuning
+            token_short = market.outcomes[outcome_idx].token_id[:12] if outcome_idx < len(market.outcomes) else "unknown"
+            logger.debug(
+                f"Edge below threshold: {token_short} edge={edge_raw:+.4f} vs threshold={self.settings.edge_threshold:.4f} "
+                f"(p_model={p_model:.3f}, p_market={p_market:.3f})"
+            )
             return None, "raw_edge_below_threshold"
 
         # Determine side
