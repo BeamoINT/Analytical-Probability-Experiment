@@ -406,27 +406,58 @@ class AccountStateProvider:
             return []
 
     async def _fetch_balances(self) -> tuple[float | None, float | None]:
-        """Fetch account balances.
+        """Fetch account balances by querying USDC balance on Polygon.
 
         Returns:
             Tuple of (cash_balance, total_equity).
-
-        Note:
-            TEMPORARY: Hardcoded balance until py-clob-client proxy balance bug is fixed.
-            The bot successfully places orders, so credentials work. Balance API is the issue.
         """
         try:
-            # TEMPORARY WORKAROUND: Return a fixed balance so trading can proceed
-            # The real balance should be fetched via py_clob_client.get_balance_allowance()
-            # but that method has a bug with SIGNATURE_TYPE=1 (proxy wallets)
-            # 
-            # UPDATE: Set to actual current balance from Polymarket dashboard.
-            # When you deposit more USDC, update this value!
-            cash_balance = 0.76  # User's actual USDC balance - UPDATE THIS WHEN YOU DEPOSIT MORE
-            total_equity = cash_balance
+            settings = get_settings()
+            wallet_address = settings.user_address or settings.funder_address
             
-            logger.debug(f"Using hardcoded balance: ${cash_balance:.2f} USDC")
-            return cash_balance, total_equity
+            if not wallet_address:
+                logger.warning("No wallet address configured for balance fetch")
+                return None, None
+            
+            # USDC contract on Polygon (USDC.e - the one Polymarket uses)
+            usdc_contract = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+            
+            # Use public Polygon RPC
+            rpc_url = "https://polygon-rpc.com"
+            
+            # ERC20 balanceOf function selector + padded address
+            # balanceOf(address) = 0x70a08231
+            padded_address = wallet_address.lower().replace("0x", "").zfill(64)
+            data = f"0x70a08231{padded_address}"
+            
+            payload = {
+                "jsonrpc": "2.0",
+                "method": "eth_call",
+                "params": [
+                    {
+                        "to": usdc_contract,
+                        "data": data
+                    },
+                    "latest"
+                ],
+                "id": 1
+            }
+            
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(rpc_url, json=payload)
+                result = response.json()
+            
+            if "result" in result and result["result"]:
+                # USDC has 6 decimals
+                balance_wei = int(result["result"], 16)
+                cash_balance = balance_wei / 1_000_000
+                total_equity = cash_balance
+                
+                logger.info(f"Fetched USDC balance from Polygon: ${cash_balance:.2f}")
+                return cash_balance, total_equity
+            else:
+                logger.warning(f"Failed to fetch balance from Polygon: {result}")
+                return None, None
 
         except Exception as e:
             logger.warning(f"Error fetching balances: {e}")
