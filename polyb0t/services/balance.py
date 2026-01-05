@@ -112,20 +112,26 @@ class BalanceService:
         """Conservative reserved amount.
 
         If we cannot precisely compute reserved for positions/open orders, we prefer being conservative:
-        - reserve PENDING + APPROVED intents that have not been executed/submitted yet
+        - reserve APPROVED intents that have not been executed/submitted yet
+        - if autonomous mode is enabled (auto-approve), also reserve PENDING intents because they are
+          expected to execute without human intervention
         """
         now = datetime.utcnow()
         total = 0.0
 
-        # 1) pending/approved but not executed intents (these are the exposure the user could approve)
-        pending_or_approved = (
+        # 1) intents not yet executed (best-effort reserved exposure)
+        statuses = ["APPROVED"]
+        if bool(getattr(self.settings, "auto_approve_intents", False)):
+            statuses.append("PENDING")
+
+        intents = (
             self.db_session.query(TradeIntentDB)
-            .filter(TradeIntentDB.status.in_(["PENDING", "APPROVED"]))
+            .filter(TradeIntentDB.status.in_(statuses))
             .filter(TradeIntentDB.executed_at.is_(None))
             .filter(TradeIntentDB.expires_at >= now)
             .all()
         )
-        for i in pending_or_approved:
+        for i in intents:
             v = i.size_usd if getattr(i, "size_usd", None) is not None else i.size
             if v:
                 total += float(v)
