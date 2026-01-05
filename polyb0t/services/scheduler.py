@@ -234,6 +234,10 @@ class TradingScheduler:
             markets_for_data = tradable_markets  # Default: use tradable markets
             
             if self.settings.mode == "live":
+                # Broad scan -> narrow enrichment/data-fetch to top-N by volume to avoid rate limits.
+                enrich_limit = int(getattr(self.settings, "live_enrich_markets_limit", 50))
+                clob_limit = int(getattr(self.settings, "live_clob_markets_limit", 50))
+
                 # Enrich markets based on ML settings
                 if self.settings.enable_ml and self.settings.ml_data_collection_limit > 0:
                     # ML MODE: Enrich more markets for comprehensive data collection
@@ -251,10 +255,24 @@ class TradingScheduler:
                         f"trading on {len(tradable_for_trading)}"
                     )
                 else:
-                    # STANDARD MODE: Enrich only tradable markets
-                    markets_to_enrich = tradable_markets[:10]
+                    # STANDARD MODE: scan broad, enrich only top-N by volume
+                    markets_sorted = sorted(
+                        tradable_markets,
+                        key=lambda m: m.volume or 0,
+                        reverse=True,
+                    )
+                    markets_to_enrich = markets_sorted[: min(enrich_limit, len(markets_sorted))]
                     tradable_for_trading = markets_to_enrich
-                    logger.info(f"Live mode universe capped to {len(tradable_for_trading)} markets")
+                    logger.info(
+                        "Live mode scan/enrich limits",
+                        extra={
+                            "markets_scanned": len(markets),
+                            "markets_tradable_initial": len(tradable_markets),
+                            "enrich_limit": enrich_limit,
+                            "clob_limit": clob_limit,
+                            "enriching": len(markets_to_enrich),
+                        },
+                    )
 
                 # Enrich markets with outcomes (token_ids + Gamma prices)
                 markets_for_data, gamma_enrich_diag = await self._enrich_markets_with_outcomes(markets_to_enrich)
@@ -272,6 +290,14 @@ class TradingScheduler:
                     tradable_markets = [m for m in markets_for_data if m in tradable_for_trading]
                 else:
                     tradable_markets = markets_for_data
+
+                # Final cap: only fetch CLOB data for top-N enriched markets (rate-limit safety)
+                if clob_limit > 0 and len(markets_for_data) > clob_limit:
+                    markets_for_data = sorted(
+                        markets_for_data,
+                        key=lambda m: m.volume or 0,
+                        reverse=True,
+                    )[:clob_limit]
 
             # Step 3: Fetch orderbooks and trades for enriched markets
             orderbooks, trades, clob_diag = await self._fetch_market_data(
@@ -725,7 +751,11 @@ class TradingScheduler:
             Tuple of (markets, diagnostics).
         """
         async with GammaClient() as gamma:
-            limit = 100 if self.settings.mode == "paper" else 50
+            if self.settings.mode == "paper":
+                limit = 100
+            else:
+                # Broad scan in live mode; downstream we cap enrichment/orderbook fetches.
+                limit = int(getattr(self.settings, "live_scan_markets_limit", 500))
             markets, diag = await gamma.list_markets_debug(active=True, closed=False, limit=limit)
 
             # Save to database
@@ -864,7 +894,11 @@ class TradingScheduler:
             },
         )
 
-        semaphore = asyncio.Semaphore(8)
+        # Rate-limit safety: throttle live-mode concurrency.
+        if self.settings.mode == "live":
+            semaphore = asyncio.Semaphore(int(getattr(self.settings, "live_clob_concurrency", 6)))
+        else:
+            semaphore = asyncio.Semaphore(8)
 
         async with CLOBClient() as clob:
 
@@ -888,16 +922,20 @@ class TradingScheduler:
                         orderbooks[token_id] = ob
                         self._save_orderbook(ob, market_id, db_session)
 
-                    # Fetch recent trades
-                    tr_attempts += 1
-                    t, tr_status, tr_ep = await clob.get_trades_debug(token_id, limit=50)
-                    status_counts[f"trades:{tr_status}"] = status_counts.get(
-                        f"trades:{tr_status}", 0
-                    ) + 1
-                    if t:
-                        tr_success += 1
-                        trades[token_id] = t
-                        self._save_trades(t, db_session)
+                    # Fetch recent trades (optional; many deployments return 404)
+                    fetch_trades = True
+                    if self.settings.mode == "live":
+                        fetch_trades = bool(getattr(self.settings, "live_fetch_trades", False))
+                    if fetch_trades:
+                        tr_attempts += 1
+                        t, tr_status, tr_ep = await clob.get_trades_debug(token_id, limit=50)
+                        status_counts[f"trades:{tr_status}"] = status_counts.get(
+                            f"trades:{tr_status}", 0
+                        ) + 1
+                        if t:
+                            tr_success += 1
+                            trades[token_id] = t
+                            self._save_trades(t, db_session)
 
             await asyncio.gather(*(fetch_one(tid, mid) for tid, mid in token_market_pairs))
 

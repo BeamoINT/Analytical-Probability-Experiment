@@ -98,6 +98,28 @@ class Settings(BaseSettings):
     loop_interval_seconds: int = Field(
         ..., description="Main loop interval (seconds) - live defaults to 10"
     )
+
+    # Live scanning / rate-limit controls
+    live_scan_markets_limit: int = Field(
+        default=500,
+        description="How many markets to fetch from Gamma in live mode (broad scan).",
+    )
+    live_enrich_markets_limit: int = Field(
+        default=50,
+        description="How many of the scanned markets to enrich with outcomes/token_ids (top by volume).",
+    )
+    live_clob_markets_limit: int = Field(
+        default=50,
+        description="How many markets to fetch orderbooks/trades for per cycle in live mode (top by volume).",
+    )
+    live_clob_concurrency: int = Field(
+        default=6,
+        description="Max concurrent CLOB HTTP requests per cycle in live mode (lower = safer on rate limits).",
+    )
+    live_fetch_trades: bool = Field(
+        default=False,
+        description="Fetch recent trades from CLOB in live mode (often 404); disable to reduce load.",
+    )
     order_timeout_seconds: int = Field(default=300, description="Order timeout (seconds)")
     slippage_bps: int = Field(default=10, description="Assumed slippage in basis points")
     fee_bps: int = Field(default=20, description="Trading fee in basis points")
