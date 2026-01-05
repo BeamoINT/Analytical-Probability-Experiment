@@ -566,6 +566,32 @@ class TradingScheduler:
                 if stale_expired:
                     logger.info(f"Expired stale open intents: {stale_expired}")
 
+                # If auto-trading is enabled, we should not leave old PENDING intents sitting around.
+                # Previous versions only auto-approved intents created in the current cycle, which
+                # means a restart could strand a backlog of PENDING intents forever (and then dedup
+                # prevents new ones). Here we sweep any existing PENDING intents, approve them, and
+                # let the executor pick them up.
+                if self.settings.mode == "live" and bool(self.settings.auto_approve_intents):
+                    try:
+                        pending = intent_manager.get_pending_intents()
+                        auto_approved_existing = 0
+                        for it in pending:
+                            try:
+                                if intent_manager.approve_intent(it.intent_id, approved_by="auto") is not None:
+                                    auto_approved_existing += 1
+                            except Exception:
+                                continue
+                        if auto_approved_existing:
+                            logger.info(
+                                "Auto-approved existing pending intents",
+                                extra={"count": auto_approved_existing, "cycle_id": cycle_id},
+                            )
+                            # Execute immediately in this cycle as well.
+                            if executor is not None and not bool(self.settings.dry_run):
+                                execution_summary = executor.process_approved_intents(cycle_id=cycle_id)
+                    except Exception:
+                        pass
+
                 # Create intents from signals (signals are already sized and validated)
                 created = 0
                 rejected = 0

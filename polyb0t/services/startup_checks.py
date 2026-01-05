@@ -76,16 +76,42 @@ def validate_live_signing_key(settings: Settings) -> None:
     except Exception:
         raise RuntimeError("Invalid POLYBOT_POLYGON_PRIVATE_KEY format.")
 
-    expected = settings.funder_address or settings.user_address
-    if not expected:
-        raise RuntimeError("Missing POLYBOT_USER_ADDRESS (and/or POLYBOT_FUNDER_ADDRESS).")
+    user_addr = settings.user_address
+    funder_addr = settings.funder_address or settings.user_address
+    if not user_addr:
+        raise RuntimeError("Missing POLYBOT_USER_ADDRESS.")
 
-    if derived.lower() != expected.lower():
-        raise RuntimeError(
-            "POLYBOT_POLYGON_PRIVATE_KEY does not match your configured address. "
-            "Fix by either: (1) setting POLYBOT_USER_ADDRESS/POLYBOT_FUNDER_ADDRESS to the "
-            "address for that private key, or (2) setting POLYBOT_POLYGON_PRIVATE_KEY for the "
-            "configured address."
-        )
+    sig_type = int(getattr(settings, "signature_type", 0) or 0)
+
+    # Signature type semantics:
+    # - 0 (EOA): signer address MUST match the trading address (user/funder).
+    # - 1 (POLY_PROXY): signer is an EOA, but `funder` may be a proxy contract address.
+    #   In this case signer != funder is expected; signer MUST match USER_ADDRESS.
+    # - 2 (SAFE): varies by Safe setup; we cannot validate robustly here.
+    if sig_type == 0:
+        expected = funder_addr
+        if not expected:
+            raise RuntimeError("Missing POLYBOT_USER_ADDRESS (and/or POLYBOT_FUNDER_ADDRESS).")
+        if derived.lower() != expected.lower():
+            raise RuntimeError(
+                "POLYBOT_POLYGON_PRIVATE_KEY does not match your configured trading address. "
+                "For EOA wallets (SIGNATURE_TYPE=0), the key must match USER/FUNDER address."
+            )
+    elif sig_type == 1:
+        # Proxy wallets: USER_ADDRESS should be the EOA signer address.
+        if derived.lower() != user_addr.lower():
+            raise RuntimeError(
+                "POLYBOT_POLYGON_PRIVATE_KEY does not match POLYBOT_USER_ADDRESS. "
+                "For POLY_PROXY (SIGNATURE_TYPE=1), USER_ADDRESS must be the EOA signer, "
+                "and FUNDER_ADDRESS should be the proxy wallet address that holds funds."
+            )
+        if not settings.funder_address:
+            raise RuntimeError(
+                "Missing POLYBOT_FUNDER_ADDRESS. For POLY_PROXY (SIGNATURE_TYPE=1), this should "
+                "be your proxy wallet address (may differ from USER_ADDRESS)."
+            )
+    else:
+        # Don't block startup for signature types we can't validate safely.
+        return
 
 
