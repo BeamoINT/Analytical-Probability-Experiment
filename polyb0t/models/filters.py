@@ -18,10 +18,10 @@ class MarketFilter:
         self.settings = get_settings()
         self.blacklist: set[str] = set()  # Manual blacklist for ambiguous markets
         
-        # Minimum orderbook depth thresholds (USD)
-        self.min_bid_depth_usd = 50.0  # Minimum bid side depth
-        self.min_ask_depth_usd = 50.0  # Minimum ask side depth
-        self.min_total_depth_usd = 100.0  # Minimum combined depth
+        # Minimum orderbook depth thresholds (USD) - lowered for more market opportunities
+        self.min_bid_depth_usd = 20.0  # Minimum bid side depth
+        self.min_ask_depth_usd = 20.0  # Minimum ask side depth
+        self.min_total_depth_usd = 50.0  # Minimum combined depth
         
     def load_blacklist(self, blacklist: list[str] | None = None) -> None:
         """Load manual blacklist of market IDs to exclude.
