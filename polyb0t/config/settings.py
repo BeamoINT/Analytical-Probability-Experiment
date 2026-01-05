@@ -89,7 +89,7 @@ class Settings(BaseSettings):
     max_order_usd: float = Field(default=10000.0, description="Max USD notional per order - set high to allow percentage-based sizing")
     max_total_exposure_usd: float = Field(default=100000.0, description="Max total exposure USD - set high to allow percentage-based sizing")
     max_open_orders: int = Field(default=3, description="Max open orders allowed (live)")
-    max_daily_notional_usd: float = Field(default=50.0, description="Max daily notional USD (live)")
+    max_daily_notional_usd: float = Field(default=200.0, description="Max daily notional USD (live)")
     kill_switch_on_errors: int = Field(
         default=5, description="Kill switch if >= N consecutive cycle errors"
     )
