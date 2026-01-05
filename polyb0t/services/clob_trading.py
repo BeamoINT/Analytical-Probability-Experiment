@@ -131,11 +131,13 @@ class CLOBTradingClient:
         except PolyApiException as e:
             # Includes status_code and parsed error payload (safe to store).
             raw = e.error_msg if isinstance(e.error_msg, dict) else {"text": str(e.error_msg)}
+            status_code = getattr(e, "status_code", None)
+            error_detail = str(e.error_msg) if e.error_msg else "Unknown error"
             return CLOBOrderResult(
                 success=False,
-                status_code=getattr(e, "status_code", None),
+                status_code=status_code,
                 order_id=None,
-                message=f"HTTP {getattr(e, 'status_code', None)} from CLOB",
+                message=f"HTTP {status_code} from CLOB: {error_detail}",
                 raw=raw if isinstance(raw, dict) else None,
             )
         except Exception as e:

@@ -348,7 +348,7 @@ class AccountStateProvider:
             # TEMPORARY WORKAROUND: Return a fixed balance so trading can proceed
             # The real balance should be fetched via py_clob_client.get_balance_allowance()
             # but that method has a bug with SIGNATURE_TYPE=1 (proxy wallets)
-            cash_balance = 350.0  # Approximate balance after Patriots bet
+            cash_balance = 358.0  # User's actual USDC balance
             total_equity = cash_balance
             
             logger.debug(f"Using hardcoded balance: ${cash_balance:.2f} USDC")
