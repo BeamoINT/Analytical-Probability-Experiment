@@ -100,12 +100,14 @@ def run(paper: bool, live: bool) -> None:
             startup_banner,
             validate_clock_utc,
             validate_db_connectivity,
+            validate_live_signing_key,
         )
 
         click.echo(startup_banner(settings))
         try:
             validate_clock_utc()
             validate_db_connectivity(settings.db_url)
+            validate_live_signing_key(settings)
         except Exception as e:
             click.echo(f"ERROR: Startup checks failed: {e}")
             raise SystemExit(2)

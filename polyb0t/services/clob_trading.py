@@ -1,4 +1,4 @@
-"""Best-effort authenticated CLOB trading client.
+"""Authenticated CLOB trading client (Polymarket).
 
 IMPORTANT:
 - This module is only used when `POLYBOT_MODE=live` and `POLYBOT_DRY_RUN=false`
@@ -6,21 +6,34 @@ IMPORTANT:
 - It never runs automatically.
 - It never prints secrets.
 
-This implementation uses a conservative "attempt and fail gracefully" approach because
-Polymarket CLOB auth requirements may vary. Any non-2xx response becomes a controlled error.
+This implementation delegates authentication + order signing to the official `py-clob-client`
+library (already included in dependencies). Any failure becomes a controlled error.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Any
+
+from py_clob_client.client import ClobClient
+from py_clob_client.clob_types import ApiCreds, OrderArgs, OrderType
+
+# py-clob-client uses `requests` internally; we use it here as well so we can
+# sign the *exact* JSON payload we send for POST /order.
 import base64
 import hashlib
 import hmac
 import json
 import time
-from dataclasses import dataclass
-from typing import Any
 
-import httpx
+import requests
+from py_clob_client.headers.headers import (
+    POLY_ADDRESS,
+    POLY_API_KEY,
+    POLY_PASSPHRASE,
+    POLY_SIGNATURE,
+    POLY_TIMESTAMP,
+)
 
 
 @dataclass(frozen=True)
@@ -33,7 +46,7 @@ class CLOBOrderResult:
 
 
 class CLOBTradingClient:
-    """Authenticated client for submitting/canceling LIMIT orders (best-effort)."""
+    """Authenticated client for submitting/canceling orders (best-effort)."""
 
     def __init__(
         self,
@@ -41,16 +54,39 @@ class CLOBTradingClient:
         api_key: str,
         api_secret: str,
         passphrase: str,
+        polygon_private_key: str,
+        chain_id: int = 137,
+        signature_type: int = 0,
+        funder: str | None = None,
         timeout: float = 20.0,
     ) -> None:
+        # NOTE: Never log secrets.
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.api_secret = api_secret
         self.passphrase = passphrase
-        self.client = httpx.Client(base_url=self.base_url, timeout=timeout)
+        self.polygon_private_key = polygon_private_key
+        self.chain_id = chain_id
+        self.signature_type = signature_type
+        self.funder = funder
+        self.timeout = timeout
+
+        self.client = ClobClient(
+            host=self.base_url,
+            chain_id=self.chain_id,
+            key=self.polygon_private_key,
+            creds=ApiCreds(
+                api_key=self.api_key,
+                api_secret=self.api_secret,
+                api_passphrase=self.passphrase,
+            ),
+            signature_type=self.signature_type,
+            funder=self.funder,
+        )
 
     def close(self) -> None:
-        self.client.close()
+        # py-clob-client doesn't expose a documented close hook; keep for parity.
+        return
 
     def submit_limit_order(
         self,
@@ -58,41 +94,71 @@ class CLOBTradingClient:
         side: str,
         price: float,
         size_usd: float,
+        fee_rate_bps: int = 0,
     ) -> CLOBOrderResult:
         """Submit a LIMIT order (best-effort).
 
-        NOTE: This may fail if Polymarket requires additional signing beyond API creds.
+        `py-clob-client` expects `size` in *shares* (outcome tokens), not USD.
+        For Polymarket, notional USD is roughly: shares * price.
         """
-        body = {
-            "token_id": token_id,
-            "side": side,
-            "type": "LIMIT",
-            "price": price,
-            "size": size_usd,
-        }
-        return self._request("POST", "/order", body)
-
-    def cancel_order(self, order_id: str) -> CLOBOrderResult:
-        """Cancel an order (best-effort)."""
-        return self._request("POST", "/order/cancel", {"order_id": order_id})
-
-    def _request(self, method: str, path: str, body: dict[str, Any] | None = None) -> CLOBOrderResult:
-        ts = str(int(time.time() * 1000))
-        body_str = json.dumps(body or {}, separators=(",", ":"), sort_keys=True)
-        sig = self._sign(ts, method.upper(), path, body_str)
-
-        headers = {
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "X-API-Key": self.api_key,
-            "X-API-Passphrase": self.passphrase,
-            "X-API-Timestamp": ts,
-            "X-API-Signature": sig,
-        }
         try:
-            resp = self.client.request(method, path, headers=headers, content=body_str)
+            p = float(price or 0.0)
+            usd = float(size_usd or 0.0)
+            if p <= 0 or usd <= 0:
+                return CLOBOrderResult(
+                    success=False,
+                    status_code=None,
+                    order_id=None,
+                    message="Invalid order params (price/size_usd must be > 0)",
+                    raw=None,
+                )
+
+            # Convert USD notional to share quantity.
+            size_shares = usd / p
+            order_args = OrderArgs(
+                token_id=token_id,
+                price=p,
+                size=float(size_shares),
+                side=str(side).upper(),
+                fee_rate_bps=int(fee_rate_bps or 0),
+            )
+            # Create & sign the order (Level 1 / wallet auth).
+            order = self.client.create_order(order_args)
+
+            # Build request body.
+            #
+            # NOTE: Polymarket's CLOB expects `owner` to be the signing address (POLY_ADDRESS),
+            # not the API key. Some client versions use `owner=<api_key>`; that yields 401 on
+            # modern deployments. Keep this aligned with the on-wire API.
+            body_dict = {
+                "order": order.dict(),
+                "owner": self.client.signer.address(),
+                "orderType": OrderType.GTC,
+            }
+            body_json = json.dumps(body_dict, separators=(",", ":"), ensure_ascii=False)
+
+            # Level-2 HMAC signing: timestamp(seconds) + method + path + body_json
+            ts = str(int(time.time()))
+            sig = self._hmac_signature(
+                secret=self.api_secret,
+                timestamp=ts,
+                method="POST",
+                request_path="/order",
+                body_json=body_json,
+            )
+
+            headers = {
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                POLY_ADDRESS: self.client.signer.address(),
+                POLY_SIGNATURE: sig,
+                POLY_TIMESTAMP: ts,
+                POLY_API_KEY: self.api_key,
+                POLY_PASSPHRASE: self.passphrase,
+            }
+
+            resp = requests.post(f"{self.base_url}/order", headers=headers, data=body_json, timeout=self.timeout)
             status = resp.status_code
-            data = None
             try:
                 data = resp.json()
             except Exception:
@@ -107,32 +173,79 @@ class CLOBTradingClient:
                     raw=data if isinstance(data, dict) else None,
                 )
 
-            # Try a few common order id fields
+            # Best-effort extraction across possible response shapes.
             order_id = None
             if isinstance(data, dict):
                 order_id = (
-                    data.get("order_id")
+                    data.get("orderID")
+                    or data.get("orderId")
+                    or data.get("order_id")
                     or data.get("id")
                     or (data.get("order") or {}).get("id")  # type: ignore[union-attr]
                 )
+
             return CLOBOrderResult(
                 success=True,
                 status_code=status,
                 order_id=str(order_id) if order_id is not None else None,
-                message="ok",
+                message="Order submitted",
                 raw=data if isinstance(data, dict) else None,
             )
         except Exception as e:
-            return CLOBOrderResult(success=False, status_code=None, order_id=None, message=str(e), raw=None)
+            # py-clob-client raises on non-2xx (including 401). Keep message controlled.
+            msg = str(e)
+            status = None
+            if "401" in msg:
+                status = 401
+            return CLOBOrderResult(
+                success=False,
+                status_code=status,
+                order_id=None,
+                message=msg,
+                raw=None,
+            )
 
-    def _sign(self, ts: str, method: str, path: str, body: str) -> str:
-        """HMAC signature (best-effort).
+    @staticmethod
+    def _hmac_signature(
+        *,
+        secret: str,
+        timestamp: str,
+        method: str,
+        request_path: str,
+        body_json: str | None,
+    ) -> str:
+        """Compute Polymarket Level-2 HMAC signature.
 
-        Many API-key systems sign: timestamp + method + path + body.
+        The secret is urlsafe-base64 decoded before HMAC-SHA256.
         """
-        msg = (ts + method + path + body).encode("utf-8")
-        secret = self.api_secret.encode("utf-8")
-        digest = hmac.new(secret, msg, hashlib.sha256).digest()
-        return base64.b64encode(digest).decode("utf-8")
+        base64_secret = base64.urlsafe_b64decode(secret)
+        msg = f"{timestamp}{method}{request_path}"
+        if body_json:
+            msg += body_json
+        digest = hmac.new(base64_secret, msg.encode("utf-8"), hashlib.sha256).digest()
+        return base64.urlsafe_b64encode(digest).decode("utf-8")
+
+    def cancel_order(self, order_id: str) -> CLOBOrderResult:
+        """Cancel an order (best-effort)."""
+        try:
+            res = self.client.cancel_orders([order_id])
+            raw: dict[str, Any] | None = res if isinstance(res, dict) else None
+            return CLOBOrderResult(
+                success=True,
+                status_code=200,
+                order_id=order_id,
+                message="cancel submitted",
+                raw=raw,
+            )
+        except Exception as e:
+            msg = str(e)
+            status = 401 if "401" in msg else None
+            return CLOBOrderResult(
+                success=False,
+                status_code=status,
+                order_id=order_id,
+                message=msg,
+                raw=None,
+            )
 
 

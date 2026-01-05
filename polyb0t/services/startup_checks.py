@@ -54,3 +54,38 @@ def validate_db_connectivity(db_url: str) -> None:
         session.close()
 
 
+def validate_live_signing_key(settings: Settings) -> None:
+    """Validate live execution signing key matches configured address.
+
+    When `mode=live` and `dry_run=false`, orders are signed. If the configured
+    private key does not correspond to the configured address, the CLOB will
+    reject orders with an "invalid signature" style error.
+    """
+    if settings.mode != "live" or bool(settings.dry_run):
+        return
+
+    if not settings.polygon_private_key:
+        raise RuntimeError(
+            "Missing POLYBOT_POLYGON_PRIVATE_KEY (required when POLYBOT_DRY_RUN=false)."
+        )
+
+    try:
+        from eth_account import Account
+
+        derived = Account.from_key(settings.polygon_private_key).address
+    except Exception:
+        raise RuntimeError("Invalid POLYBOT_POLYGON_PRIVATE_KEY format.")
+
+    expected = settings.funder_address or settings.user_address
+    if not expected:
+        raise RuntimeError("Missing POLYBOT_USER_ADDRESS (and/or POLYBOT_FUNDER_ADDRESS).")
+
+    if derived.lower() != expected.lower():
+        raise RuntimeError(
+            "POLYBOT_POLYGON_PRIVATE_KEY does not match your configured address. "
+            "Fix by either: (1) setting POLYBOT_USER_ADDRESS/POLYBOT_FUNDER_ADDRESS to the "
+            "address for that private key, or (2) setting POLYBOT_POLYGON_PRIVATE_KEY for the "
+            "configured address."
+        )
+
+
