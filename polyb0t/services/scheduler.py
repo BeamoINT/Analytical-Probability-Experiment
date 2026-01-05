@@ -409,14 +409,32 @@ class TradingScheduler:
                 try:
                     from polyb0t.data.account_state import AccountStateProvider
                     from polyb0t.execution.portfolio import Position
+                    from polyb0t.data.storage import TradeIntentDB
 
                     async with AccountStateProvider() as provider:
                         # Best-effort: may return empty if endpoints/auth not available.
                         account_state = await provider.fetch_account_state()
 
+                    # Only manage exits for positions that THIS BOT opened.
+                    # Heuristic: token_id is considered "bot-managed" if there exists an EXECUTED
+                    # OPEN_POSITION intent for that token_id.
+                    managed_tokens = {
+                        r[0]
+                        for r in (
+                            db_session.query(TradeIntentDB.token_id)
+                            .filter(TradeIntentDB.intent_type == "OPEN_POSITION")
+                            .filter(TradeIntentDB.status.in_(["EXECUTED", "EXECUTED_DRYRUN"]))
+                            .distinct()
+                            .all()
+                        )
+                        if r and r[0]
+                    }
+
                     # Convert observed account positions into Position objects (for exit logic only).
                     observed_positions: dict[str, Position] = {}
                     for p in account_state.positions:
+                        if p.token_id not in managed_tokens:
+                            continue
                         mk = str(p.market_id or "unknown")
                         observed_positions[p.token_id] = Position(
                             token_id=p.token_id,
@@ -506,23 +524,26 @@ class TradingScheduler:
                 rejected = 0
                 skipped_dedup = 0
                 for signal in sorted(signals, key=lambda s: abs(s.edge), reverse=True):
+                    # Safety: do not propose SELL to open positions unless explicitly allowed.
+                    # This prevents accidentally proposing to sell user-held/manual positions.
+                    if signal.side == "SELL" and not bool(getattr(self.settings, "live_allow_open_sell_intents", False)):
+                        rejected += 1
+                        logger.info(
+                            "Signal skipped: OPEN_POSITION SELL intents disabled (live_allow_open_sell_intents=false)",
+                            extra={"token_id": signal.token_id, "market_id": signal.market_id, "edge": signal.edge},
+                        )
+                        continue
+
                     # Signals already have sizing computed, use it
                     size_usd = signal.sizing_result.size_usd_final if signal.sizing_result else 0.0
                     
-                    # Additional risk manager check (legacy compatibility)
-                    risk_result = self.risk_manager.check_position(
-                        signal,
-                        self.portfolio.cash_balance,
-                        self.portfolio.get_position_dict(),
-                        self.portfolio.total_exposure,
-                    )
-                    if not risk_result.approved:
-                        rejected += 1
-                        logger.info(
-                            f"Signal rejected by risk manager: {risk_result.reason}",
-                            extra={"token_id": signal.token_id, "edge": signal.edge},
-                        )
-                        continue
+                    # Live mode: do NOT use legacy paper-portfolio risk checks (category exposure, etc.).
+                    # Those checks were designed for paper mode bankroll=$10k and will incorrectly reject
+                    # real-sized intents. Live mode safety is enforced by:
+                    # - PositionSizer caps (5–45% per trade, 90% total cap)
+                    # - balance-based reserved exposure
+                    # - max_open_orders and kill switches
+                    risk_result = None
 
                     # Exposure guardrail (final check)
                     reserved = float(balance_summary.get("reserved_usdc", 0.0) or 0.0) if balance_summary else 0.0
@@ -547,7 +568,7 @@ class TradingScheduler:
                     # Build enhanced risk checks with fill/sizing info
                     risk_checks = {
                         "approved": True,
-                        "max_position_size": risk_result.max_position_size,
+                        "max_position_size": getattr(risk_result, "max_position_size", None),
                         "sized_by_kelly": True,
                         "kelly_fraction": signal.sizing_result.kelly_fraction if signal.sizing_result else None,
                         "sizing_reason": signal.sizing_result.sizing_reason if signal.sizing_result else None,
@@ -596,21 +617,26 @@ class TradingScheduler:
 
             # Step 10: Save PnL snapshot (live mode uses real balance, paper mode uses portfolio)
             reporter = Reporter(db_session)
-            if self.settings.mode == "live" and balance_summary and "total_usdc" in balance_summary:
-                # Use real on-chain balance for live mode reporting
-                reporter.save_pnl_snapshot_live(
-                    cycle_id=cycle_id,
-                    total_usdc=balance_summary["total_usdc"],
-                    reserved_usdc=balance_summary["reserved_usdc"],
-                    available_usdc=balance_summary["available_usdc"],
-                )
-                logger.info(
-                    f"Account: balance=${balance_summary['total_usdc']:.2f} USDC, "
-                    f"reserved=${balance_summary['reserved_usdc']:.2f}, "
-                    f"available=${balance_summary['available_usdc']:.2f}"
-                )
+            if self.settings.mode == "live":
+                # Live mode should NEVER report paper equity. If balance is unavailable, skip reporting.
+                if balance_summary and "total_usdc" in balance_summary:
+                    reporter.save_pnl_snapshot_live(
+                        cycle_id=cycle_id,
+                        total_usdc=balance_summary["total_usdc"],
+                        reserved_usdc=balance_summary["reserved_usdc"],
+                        available_usdc=balance_summary["available_usdc"],
+                    )
+                    logger.info(
+                        f"Account: balance=${balance_summary['total_usdc']:.2f} USDC, "
+                        f"reserved=${balance_summary['reserved_usdc']:.2f}, "
+                        f"available=${balance_summary['available_usdc']:.2f}"
+                    )
+                else:
+                    logger.warning(
+                        "Live mode: balance unavailable; skipping PnL snapshot to avoid reporting paper equity",
+                        extra={"cycle_id": cycle_id, "balance_summary": balance_summary},
+                    )
             else:
-                # Paper mode: use simulated portfolio
                 reporter.save_pnl_snapshot(self.portfolio, cycle_id)
                 logger.info(
                     f"Portfolio: equity=${self.portfolio.total_equity:.2f}, "

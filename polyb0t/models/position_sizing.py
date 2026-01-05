@@ -32,13 +32,14 @@ class PositionSizer:
         self.min_kelly_fraction = 0.05  # Minimum Kelly
         self.max_kelly_fraction = 0.50  # Maximum Kelly (half Kelly max)
         
-        # Bankroll allocation limits (USER CONFIGURED: aggressive)
+        # Dynamic position sizing limits
+        self.min_pct_per_trade = 0.05  # Min 5% of available cash per trade
         self.max_pct_per_trade = 0.45  # Max 45% of available cash per trade
-        self.max_pct_total_exposure = 0.90  # Max 90% total portfolio exposure
+        self.max_pct_total_exposure = 0.90  # Hard cap: max 90% total portfolio exposure (not a target)
         
-        # Edge-based scaling
-        self.edge_scale_min = 0.02  # Minimum edge for min sizing
-        self.edge_scale_max = 0.10  # Edge for max sizing
+        # Edge-based scaling for dynamic sizing
+        self.edge_scale_min = 0.045  # 4.5% edge = minimum sizing (5%)
+        self.edge_scale_max = 0.10   # 10% edge = maximum sizing (45%)
         
     def compute_size(
         self,
@@ -71,25 +72,40 @@ class PositionSizer:
         # Total bankroll (available + reserved)
         total_bankroll = available_usdc + reserved_usdc
 
-        # USER AGGRESSIVE SIZING: Use full 45% cap for any edge above threshold
-        # Edge threshold is already 5%, so if we're here, edge is good enough
-        # Scale: 5% edge = 100% of cap (user wants aggressive sizing)
-        edge_scale = min(1.0, abs(edge_net) / 0.05)  # 5% edge = full size
+        # DYNAMIC SIZING: Scale position size between 5-45% based on edge quality
+        # Edge scaling: 4.5% edge → 5% position, 10% edge → 45% position
+        edge_abs = abs(edge_net)
         
-        # Use full 45% cap, scaled by confidence
-        sized_amount = available_usdc * self.max_pct_per_trade * confidence * edge_scale
+        if edge_abs <= self.edge_scale_min:
+            # At minimum edge threshold (4.5%), use minimum size (5%)
+            edge_scale = 0.0
+        elif edge_abs >= self.edge_scale_max:
+            # At or above 10% edge, use maximum size (45%)
+            edge_scale = 1.0
+        else:
+            # Linear interpolation between min and max
+            edge_range = self.edge_scale_max - self.edge_scale_min
+            edge_scale = (edge_abs - self.edge_scale_min) / edge_range
         
-        # Cap 1: Max percentage of AVAILABLE CASH per trade (user config: 45%)
+        # Calculate target percentage: interpolate between min (5%) and max (45%)
+        pct_range = self.max_pct_per_trade - self.min_pct_per_trade
+        target_pct = self.min_pct_per_trade + (edge_scale * pct_range)
+        
+        # Apply confidence scaling (high confidence = closer to target, low confidence = reduced)
+        final_pct = target_pct * confidence
+        
+        # Calculate dollar amount
+        sized_amount = available_usdc * final_pct
+        
+        # Cap at absolute maximum (45%)
         max_per_trade = available_usdc * self.max_pct_per_trade
         after_per_trade_cap = min(sized_amount, max_per_trade)
         
         logger.debug(
-            f"Sizing calculation: available={available_usdc:.2f}, "
-            f"max_pct={self.max_pct_per_trade:.2f}, "
-            f"max_per_trade={max_per_trade:.2f}, "
-            f"edge_scale={edge_scale:.3f}, "
-            f"sized={sized_amount:.2f}, "
-            f"after_cap={after_per_trade_cap:.2f}"
+            f"Dynamic sizing: edge={edge_abs:.4f} ({edge_abs*100:.1f}%), "
+            f"edge_scale={edge_scale:.3f}, target_pct={target_pct*100:.1f}%, "
+            f"confidence={confidence:.2f}, final_pct={final_pct*100:.1f}%, "
+            f"sized=${sized_amount:.2f}, max=${max_per_trade:.2f}"
         )
 
         # Cap 2: Ensure we don't exceed available (already handled by Cap 1)
@@ -105,9 +121,10 @@ class PositionSizer:
         max_order = float(self.settings.max_order_usd)
         size_final = max(0, min(after_exposure_cap, max_order))
         
+        actual_pct = (size_final / available_usdc * 100) if available_usdc > 0 else 0
         logger.info(
-            f"Final size: {size_final:.2f} USD (available: {available_usdc:.2f}, "
-            f"max_per_trade: {max_per_trade:.2f})"
+            f"Position size: ${size_final:.2f} ({actual_pct:.1f}% of ${available_usdc:.2f} available) "
+            f"[edge={edge_abs*100:.1f}%, confidence={confidence:.0%}]"
         )
 
         # Determine primary reason for final size
@@ -125,18 +142,23 @@ class PositionSizer:
             size_usd_raw=sized_amount,
             size_usd_final=size_final,
             sizing_reason=reason,
-            kelly_fraction=edge_scale * confidence,  # Effective fraction used
+            kelly_fraction=final_pct,  # Actual percentage used (0.05 to 0.45)
             edge_contribution=abs(edge_net),
             metadata={
                 "total_bankroll": total_bankroll,
                 "available_usdc": available_usdc,
                 "reserved_usdc": reserved_usdc,
+                "edge_abs": edge_abs,
                 "edge_scale": edge_scale,
+                "target_pct": target_pct,
+                "confidence": confidence,
+                "final_pct": final_pct,
                 "sized_amount": sized_amount,
                 "after_per_trade_cap": after_per_trade_cap,
                 "after_available_cap": after_available_cap,
                 "after_exposure_cap": after_exposure_cap,
                 "remaining_exposure_capacity": remaining_exposure_capacity,
+                "actual_pct": actual_pct,
             },
         )
 

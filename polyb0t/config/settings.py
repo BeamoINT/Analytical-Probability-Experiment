@@ -131,6 +131,17 @@ class Settings(BaseSettings):
         description="DANGER: Auto-approve intents (only for testing, never in production)",
     )
 
+    # Live safety: prevent the bot from proposing SELL orders unless closing bot-opened positions.
+    # Many users trade manually; this avoids the bot suggesting sells on positions it didn't open.
+    live_allow_open_sell_intents: bool = Field(
+        default=False,
+        description=(
+            "Allow OPEN_POSITION intents with side=SELL in live mode. "
+            "When false (default), the bot will only propose BUY intents to open positions; "
+            "SELL is reserved for closing bot-managed positions."
+        ),
+    )
+
     # Exit Management
     enable_take_profit: bool = Field(default=True, description="Enable take-profit proposals")
     take_profit_pct: float = Field(default=10.0, description="Take profit at % gain")
