@@ -30,6 +30,7 @@ web3 = "^6.0.0"
 lightgbm = "^4.1.0"
 scikit-learn = "^1.4.0"
 scipy = "^1.12.0"
+setuptools = "^80.9.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^7.4.4"
