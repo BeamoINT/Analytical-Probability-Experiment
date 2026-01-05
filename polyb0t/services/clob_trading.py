@@ -12,12 +12,15 @@ library (already included in dependencies). Any failure becomes a controlled err
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import ApiCreds, OrderArgs
 from py_clob_client.exceptions import PolyApiException
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
