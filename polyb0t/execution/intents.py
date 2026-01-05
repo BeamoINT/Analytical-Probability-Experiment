@@ -204,6 +204,7 @@ class IntentManager:
                     new_price=signal.p_market,
                     new_edge=signal.edge,
                     new_p_model=signal.p_model,
+                    new_size_usd=size,
                 )
             logger.debug(
                 "Skipped intent due to dedup/cooldown",
@@ -300,6 +301,7 @@ class IntentManager:
                     new_price=price,
                     new_edge=None,
                     new_p_model=None,
+                    new_size_usd=size,
                 )
             return None
 
@@ -676,6 +678,37 @@ class IntentManager:
 
         return count
 
+    def expire_stale_open_intents(self, active_fingerprints: set[str]) -> int:
+        """Expire pending OPEN_POSITION intents no longer backed by current signals.
+
+        Args:
+            active_fingerprints: Fingerprints for current-cycle signals.
+
+        Returns:
+            Number of intents expired.
+        """
+        now = datetime.utcnow()
+        pending = (
+            self.db_session.query(TradeIntentDB)
+            .filter(TradeIntentDB.status == IntentStatus.PENDING.value)
+            .filter(TradeIntentDB.intent_type == IntentType.OPEN_POSITION.value)
+            .filter(TradeIntentDB.expires_at >= now)
+            .all()
+        )
+
+        count = 0
+        for db_intent in pending:
+            fp = db_intent.fingerprint
+            if not fp or fp not in active_fingerprints:
+                db_intent.status = IntentStatus.EXPIRED.value
+                count += 1
+
+        if count:
+            self.db_session.commit()
+            logger.info(f"Expired {count} stale open intents")
+
+        return count
+
     def backfill_missing_fingerprints(
         self,
         statuses: list[IntentStatus] | None = None,
@@ -967,6 +1000,7 @@ class IntentManager:
         new_price: float | None,
         new_edge: float | None,
         new_p_model: float | None,
+        new_size_usd: float | None,
     ) -> bool:
         """Optionally update the existing pending intent's price/edge if materially changed.
 
@@ -999,8 +1033,19 @@ class IntentManager:
             if updated or abs(float(existing.p_model) - float(new_p_model)) >= self.settings.dedup_edge_delta:
                 existing.p_model = float(new_p_model)
                 updated = True
+        if new_size_usd is not None:
+            existing_size = (
+                float(existing.size_usd)
+                if getattr(existing, "size_usd", None) is not None
+                else float(existing.size)
+                if getattr(existing, "size", None) is not None
+                else None
+            )
+            if existing_size is None or abs(existing_size - float(new_size_usd)) >= 0.01:
+                existing.size = float(new_size_usd)
+                existing.size_usd = float(new_size_usd)
+                updated = True
 
         if updated:
             self.db_session.commit()
         return updated
-
