@@ -310,9 +310,9 @@ class AccountStateProvider:
             # Convert to AccountPosition objects (only positions with quantity > 0)
             positions = []
             for token_id, data in position_data.items():
-                # Only include positions with positive quantity and value > $1
+                # Only include positions with positive quantity and value >= $0.10
                 # This filters out dust positions and resolved markets
-                if data["quantity"] > 0.001 and data["cost"] >= 1.0:
+                if data["quantity"] > 0.001 and data["cost"] >= 0.10:
                     avg_price = data["cost"] / data["quantity"] if data["quantity"] > 0 else 0
                     position = AccountPosition(
                         token_id=token_id,
