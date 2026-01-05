@@ -558,22 +558,29 @@ class TradingScheduler:
                 skipped_dedup = 0
                 created_intent_ids: list[str] = []
 
-                # Daily notional guardrail (live mode) - important for autonomous mode.
-                # Note: this is a best-effort cap based on intents, not fills.
+                # Daily notional guardrail (live mode).
+                # Note: this is a best-effort cap based on recorded intents, not fills.
+                # IMPORTANT: Do NOT count EXECUTED_DRYRUN when dry_run=false (no real money was used).
                 daily_notional_used = 0.0
-                if self.settings.mode == "live":
+                if self.settings.mode == "live" and float(self.settings.max_daily_notional_usd) > 0:
                     try:
                         from datetime import timedelta
                         from polyb0t.data.storage import TradeIntentDB
 
                         today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
                         tomorrow = today + timedelta(days=1)
+                        statuses = ["EXECUTED"]
+                        if bool(self.settings.dry_run):
+                            statuses.append("EXECUTED_DRYRUN")
+                        # In autonomous mode, also count intents that are pending/approved (expected to execute).
+                        if bool(self.settings.auto_approve_intents):
+                            statuses.extend(["PENDING", "APPROVED"])
                         rows = (
                             db_session.query(TradeIntentDB)
                             .filter(TradeIntentDB.created_at >= today)
                             .filter(TradeIntentDB.created_at < tomorrow)
                             .filter(TradeIntentDB.intent_type == "OPEN_POSITION")
-                            .filter(TradeIntentDB.status.in_(["PENDING", "APPROVED", "EXECUTED", "EXECUTED_DRYRUN"]))
+                            .filter(TradeIntentDB.status.in_(statuses))
                             .all()
                         )
                         for r in rows:
