@@ -117,7 +117,9 @@ def main():
     # Get nonce
     nonce = w3.eth.get_transaction_count(wallet_address)
     
-    # Build transaction
+    # Build transaction with reasonable gas prices for Polygon
+    base_gas_price = w3.eth.gas_price
+    
     txn = usdc.functions.approve(
         Web3.to_checksum_address(CLOB_ADDRESS),
         MAX_UINT256
@@ -125,8 +127,8 @@ def main():
         'from': wallet_address,
         'nonce': nonce,
         'gas': 100000,
-        'maxFeePerGas': w3.eth.gas_price * 2,
-        'maxPriorityFeePerGas': w3.to_wei(50, 'gwei'),
+        'maxFeePerGas': min(base_gas_price * 2, w3.to_wei(100, 'gwei')),  # Cap at 100 gwei
+        'maxPriorityFeePerGas': w3.to_wei(30, 'gwei'),  # Standard Polygon priority
         'chainId': 137
     })
     
