@@ -324,12 +324,17 @@ class LiveExecutor:
                 api_key=self.settings.clob_api_key or "",
                 api_secret=self.settings.clob_api_secret or "",
                 passphrase=self.settings.clob_passphrase or "",
+                polygon_private_key=self.settings.polygon_private_key or "",
+                chain_id=int(self.settings.chain_id),
+                signature_type=int(self.settings.signature_type),
+                funder=(self.settings.funder_address or self.settings.user_address),
             )
             res = client.submit_limit_order(
                 token_id=intent.token_id,
                 side=intent.side or "SELL",
                 price=float(intent.price or 0.0),
                 size_usd=float(intent.size_usd or 0.0),
+                fee_rate_bps=int(self.settings.fee_bps),
             )
             client.close()
             if not res.success:
@@ -366,6 +371,10 @@ class LiveExecutor:
                 api_key=self.settings.clob_api_key or "",
                 api_secret=self.settings.clob_api_secret or "",
                 passphrase=self.settings.clob_passphrase or "",
+                polygon_private_key=self.settings.polygon_private_key or "",
+                chain_id=int(self.settings.chain_id),
+                signature_type=int(self.settings.signature_type),
+                funder=(self.settings.funder_address or self.settings.user_address),
             )
             res = client.cancel_order(str(target))
             client.close()
