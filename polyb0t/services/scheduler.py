@@ -21,7 +21,7 @@ from polyb0t.data.storage import (
     get_session,
 )
 from polyb0t.execution import PaperTradingSimulator, Portfolio
-from polyb0t.execution.intents import IntentManager, IntentStatus
+from polyb0t.execution.intents import IntentManager, IntentStatus, IntentType
 from polyb0t.execution.live_executor import LiveExecutor
 from polyb0t.models import BaselineStrategy, FeatureEngine, RiskManager
 from polyb0t.models.exit_manager import ExitManager
@@ -321,6 +321,23 @@ class TradingScheduler:
                 f"Signals computed: {len(signals)}",
                 extra={"signal_rejections": signal_rejections},
             )
+
+            stale_expired = 0
+            if self.settings.mode == "live":
+                active_fingerprints: set[str] = set()
+                for signal in signals:
+                    size_usd = signal.sizing_result.size_usd_final if signal.sizing_result else 0.0
+                    active_fingerprints.add(
+                        intent_manager._fingerprint_intent(
+                            intent_type=IntentType.OPEN_POSITION,
+                            market_id=signal.market_id,
+                            token_id=signal.token_id,
+                            side=signal.side,
+                            price=signal.p_market,
+                            size_usd=size_usd,
+                        )
+                    )
+                stale_expired = intent_manager.expire_stale_open_intents(active_fingerprints)
             
             # Collect ML training data from BROAD MARKET SET (if enabled or data collection phase)
             # This learns from many markets, not just ones we trade
@@ -477,6 +494,8 @@ class TradingScheduler:
                 expired = intent_manager.expire_old_intents()
                 if expired:
                     logger.info(f"Expired intents: {expired}")
+                if stale_expired:
+                    logger.info(f"Expired stale open intents: {stale_expired}")
 
                 # Create intents from signals (signals are already sized and validated)
                 created = 0
@@ -559,6 +578,7 @@ class TradingScheduler:
                         "intents_dedup_skipped": skipped_dedup,
                         "intents_risk_rejected": rejected,
                         "intents_expired": expired,
+                        "intents_stale_expired": stale_expired,
                         "exit_intents_created": exit_created,
                         "exit_intents_dedup_skipped": exit_skipped,
                         "execution": execution_summary or {"processed": 0, "executed": 0, "failed": 0, "dry_run": self.settings.dry_run},
@@ -950,4 +970,3 @@ class TradingScheduler:
         """Stop trading loop."""
         logger.info("Stopping trading loop")
         self.is_running = False
-

@@ -678,6 +678,37 @@ class IntentManager:
 
         return count
 
+    def expire_stale_open_intents(self, active_fingerprints: set[str]) -> int:
+        """Expire pending OPEN_POSITION intents no longer backed by current signals.
+
+        Args:
+            active_fingerprints: Fingerprints for current-cycle signals.
+
+        Returns:
+            Number of intents expired.
+        """
+        now = datetime.utcnow()
+        pending = (
+            self.db_session.query(TradeIntentDB)
+            .filter(TradeIntentDB.status == IntentStatus.PENDING.value)
+            .filter(TradeIntentDB.intent_type == IntentType.OPEN_POSITION.value)
+            .filter(TradeIntentDB.expires_at >= now)
+            .all()
+        )
+
+        count = 0
+        for db_intent in pending:
+            fp = db_intent.fingerprint
+            if not fp or fp not in active_fingerprints:
+                db_intent.status = IntentStatus.EXPIRED.value
+                count += 1
+
+        if count:
+            self.db_session.commit()
+            logger.info(f"Expired {count} stale open intents")
+
+        return count
+
     def backfill_missing_fingerprints(
         self,
         statuses: list[IntentStatus] | None = None,
