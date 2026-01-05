@@ -127,6 +127,7 @@ class TradingScheduler:
             execution_summary: dict[str, Any] | None = None
             balance_summary: dict[str, Any] | None = None
             account_state_summary: dict[str, Any] | None = None
+            executor: LiveExecutor | None = None
 
             # Live mode: process already-approved intents (human-in-the-loop).
             # This is the ONLY path to any order submission, and is hard-gated by:
@@ -203,6 +204,12 @@ class TradingScheduler:
                     logger.info(
                         "Dry-run live mode: no positions will be opened; intents are recommendations only",
                         extra={"cycle_id": cycle_id, "dry_run": True},
+                    )
+                if self.settings.auto_approve_intents:
+                    logger.warning(
+                        "AUTO-APPROVE ENABLED: intents will be approved automatically (no human gate). "
+                        "If dry_run=false and credentials are configured, this will place REAL orders.",
+                        extra={"cycle_id": cycle_id, "dry_run": self.settings.dry_run},
                     )
                 executor = LiveExecutor(db_session=db_session, intent_manager=intent_manager)
                 execution_summary = executor.process_approved_intents(cycle_id=cycle_id)
@@ -523,6 +530,33 @@ class TradingScheduler:
                 created = 0
                 rejected = 0
                 skipped_dedup = 0
+                created_intent_ids: list[str] = []
+
+                # Daily notional guardrail (live mode) - important for autonomous mode.
+                # Note: this is a best-effort cap based on intents, not fills.
+                daily_notional_used = 0.0
+                if self.settings.mode == "live":
+                    try:
+                        from datetime import timedelta
+                        from polyb0t.data.storage import TradeIntentDB
+
+                        today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+                        tomorrow = today + timedelta(days=1)
+                        rows = (
+                            db_session.query(TradeIntentDB)
+                            .filter(TradeIntentDB.created_at >= today)
+                            .filter(TradeIntentDB.created_at < tomorrow)
+                            .filter(TradeIntentDB.intent_type == "OPEN_POSITION")
+                            .filter(TradeIntentDB.status.in_(["PENDING", "APPROVED", "EXECUTED", "EXECUTED_DRYRUN"]))
+                            .all()
+                        )
+                        for r in rows:
+                            v = r.size_usd if getattr(r, "size_usd", None) is not None else r.size
+                            if v:
+                                daily_notional_used += float(v)
+                    except Exception:
+                        daily_notional_used = 0.0
+
                 for signal in sorted(signals, key=lambda s: abs(s.edge), reverse=True):
                     # Safety: do not propose SELL to open positions unless explicitly allowed.
                     # This prevents accidentally proposing to sell user-held/manual positions.
@@ -536,6 +570,21 @@ class TradingScheduler:
 
                     # Signals already have sizing computed, use it
                     size_usd = signal.sizing_result.size_usd_final if signal.sizing_result else 0.0
+
+                    # Daily notional cap (live)
+                    if self.settings.mode == "live":
+                        cap = float(self.settings.max_daily_notional_usd)
+                        if cap > 0 and (daily_notional_used + float(size_usd)) > cap:
+                            rejected += 1
+                            logger.info(
+                                "Signal rejected: would exceed max_daily_notional_usd",
+                                extra={
+                                    "daily_used_usd": daily_notional_used,
+                                    "size_usd": float(size_usd),
+                                    "cap_usd": cap,
+                                },
+                            )
+                            continue
                     
                     # Live mode: do NOT use legacy paper-portfolio risk checks (category exposure, etc.).
                     # Those checks were designed for paper mode bankroll=$10k and will incorrectly reject
@@ -588,6 +637,23 @@ class TradingScheduler:
                         skipped_dedup += 1
                     else:
                         created += 1
+                        created_intent_ids.append(intent.intent_id)
+                        if self.settings.mode == "live":
+                            daily_notional_used += float(size_usd)
+
+                # Autonomous mode: auto-approve and (if not dry-run) auto-execute newly created intents.
+                auto_approved = 0
+                auto_execution: dict[str, Any] | None = None
+                if self.settings.mode == "live" and self.settings.auto_approve_intents:
+                    for iid in created_intent_ids:
+                        try:
+                            if intent_manager.approve_intent(iid, approved_by="auto") is not None:
+                                auto_approved += 1
+                        except Exception:
+                            continue
+
+                    if executor is not None and not self.settings.dry_run and auto_approved:
+                        auto_execution = executor.process_approved_intents(cycle_id=cycle_id)
 
                 # Comprehensive cycle summary (single structured log)
                 logger.info(
@@ -602,6 +668,8 @@ class TradingScheduler:
                         "intents_created": created,
                         "intents_dedup_skipped": skipped_dedup,
                         "intents_risk_rejected": rejected,
+                        "intents_auto_approved": auto_approved,
+                        "intents_auto_execution": auto_execution,
                         "intents_expired": expired,
                         "intents_stale_expired": stale_expired,
                         "exit_intents_created": exit_created,
