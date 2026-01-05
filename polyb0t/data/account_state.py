@@ -419,11 +419,15 @@ class AccountStateProvider:
                 logger.warning("No wallet address configured for balance fetch")
                 return None, None
             
-            # USDC contract on Polygon (USDC.e - the one Polymarket uses)
-            usdc_contract = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
-            
-            # Use public Polygon RPC
-            rpc_url = "https://polygon-rpc.com"
+            # USDC contract on Polygon
+            usdc_contract = (
+                (settings.usdce_token_address or "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
+                .strip()
+            )
+
+            # RPC URL (prefer env-configured; fallback to public)
+            rpc_url = (settings.polygon_rpc_url or "https://polygon-rpc.com").strip()
+            usdc_decimals = int(getattr(settings, "usdc_decimals", 6) or 6)
             
             # ERC20 balanceOf function selector + padded address
             # balanceOf(address) = 0x70a08231
@@ -448,12 +452,14 @@ class AccountStateProvider:
                 result = response.json()
             
             if "result" in result and result["result"]:
-                # USDC has 6 decimals
                 balance_wei = int(result["result"], 16)
-                cash_balance = balance_wei / 1_000_000
+                cash_balance = balance_wei / (10 ** usdc_decimals)
                 total_equity = cash_balance
                 
-                logger.info(f"Fetched USDC balance from Polygon: ${cash_balance:.2f}")
+                logger.info(
+                    f"Fetched USDC balance from Polygon: ${cash_balance:.2f}",
+                    extra={"rpc_url": rpc_url, "token": usdc_contract, "decimals": usdc_decimals},
+                )
                 return cash_balance, total_equity
             else:
                 logger.warning(f"Failed to fetch balance from Polygon: {result}")
