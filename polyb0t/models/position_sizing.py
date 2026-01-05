@@ -86,6 +86,14 @@ class PositionSizer:
         # Cap 1: Max percentage of AVAILABLE CASH per trade (user config: 45%)
         max_per_trade = available_usdc * self.max_pct_per_trade
         after_per_trade_cap = min(confidence_adjusted, max_per_trade)
+        
+        logger.debug(
+            f"Sizing calculation: available={available_usdc:.2f}, "
+            f"max_pct={self.max_pct_per_trade:.2f}, "
+            f"max_per_trade={max_per_trade:.2f}, "
+            f"kelly={kelly_size:.2f}, "
+            f"after_cap={after_per_trade_cap:.2f}"
+        )
 
         # Cap 2: Ensure we don't exceed available (already handled by Cap 1)
         after_available_cap = after_per_trade_cap
@@ -99,6 +107,11 @@ class PositionSizer:
         min_order = float(self.settings.min_order_usd)
         max_order = float(self.settings.max_order_usd)
         size_final = max(0, min(after_exposure_cap, max_order))
+        
+        logger.info(
+            f"Final size: {size_final:.2f} USD (available: {available_usdc:.2f}, "
+            f"max_per_trade: {max_per_trade:.2f})"
+        )
 
         # Determine primary reason for final size
         reason = self._determine_sizing_reason(
