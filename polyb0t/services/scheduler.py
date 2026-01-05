@@ -597,6 +597,8 @@ class TradingScheduler:
                 rejected = 0
                 skipped_dedup = 0
                 created_intent_ids: list[str] = []
+                created_intents: list = []  # Full intent objects for market diversification checks
+                cycle_allocated_usd = 0.0  # Track cumulative spending within this cycle
 
                 # Daily notional guardrail (live mode).
                 # Note: this is a best-effort cap based on recorded intents, not fills.
@@ -738,6 +740,22 @@ class TradingScheduler:
                             )
                             continue
 
+                    # Check remaining available balance for this cycle
+                    # Prevents over-spending when multiple orders execute in same cycle
+                    initial_available = float(balance_summary.get("available_usdc", 0.0) or 0.0) if balance_summary else 0.0
+                    remaining_available = initial_available - cycle_allocated_usd
+                    if size_usd > remaining_available:
+                        rejected += 1
+                        logger.info(
+                            "Signal rejected: would exceed remaining available balance for this cycle",
+                            extra={
+                                "size_usd": size_usd,
+                                "remaining_available": remaining_available,
+                                "cycle_allocated_usd": cycle_allocated_usd,
+                            },
+                        )
+                        continue
+
                     # Build enhanced risk checks with fill/sizing info
                     risk_checks = {
                         "approved": True,
@@ -762,6 +780,8 @@ class TradingScheduler:
                     else:
                         created += 1
                         created_intent_ids.append(intent.intent_id)
+                        created_intents.append(intent)  # Store full intent for market diversification checks
+                        cycle_allocated_usd += float(size_usd)  # Track cumulative allocation
                         if self.settings.mode == "live":
                             daily_notional_used += float(size_usd)
 
