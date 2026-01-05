@@ -210,6 +210,8 @@ class LiveExecutor:
             extra=order_details,
         )
 
+        logger.info(f"About to submit order via CLOBTradingClient: {order_details}")
+        
         # Attempt best-effort submit (may fail depending on Polymarket auth requirements).
         try:
             from polyb0t.services.clob_trading import CLOBTradingClient
@@ -232,9 +234,12 @@ class LiveExecutor:
                 fee_rate_bps=int(self.settings.fee_bps),
             )
             client.close()
+            logger.info(f"CLOBTradingClient returned: success={res.success}, order_id={res.order_id}")
             if not res.success:
+                logger.error(f"Order rejected: {res.message}")
                 return {"success": False, "error": res.message, "status_code": res.status_code, "raw": res.raw}
             # If it succeeded, return the external order id
+            logger.info(f"✅ Order succeeded! orderID={res.order_id}")
             return {
                 "success": True,
                 "order_id": res.order_id,
@@ -242,6 +247,7 @@ class LiveExecutor:
                 "details": order_details,
             }
         except Exception as e:
+            logger.error(f"Exception in order submission: {type(e).__name__}: {e}", exc_info=True)
             return {"success": False, "error": f"Order submit error: {e}"}
 
         # For now, simulate successful order placement

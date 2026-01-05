@@ -630,7 +630,9 @@ class TradingScheduler:
                     except Exception:
                         daily_notional_used = 0.0
 
+                logger.info(f"Processing {len(signals)} signals. held_long_token_ids={held_long_token_ids}, live_allow_open_sell_intents={self.settings.live_allow_open_sell_intents}")
                 for signal in sorted(signals, key=lambda s: abs(s.edge), reverse=True):
+                    logger.info(f"Checking signal: token={signal.token_id[:20]}..., side={signal.side}, edge={signal.edge:.4f}")
                     # Safety: SELL can be ambiguous in live trading:
                     # - It can reduce/close an existing LONG position (including manual positions).
                     # - Or it can open/increase a SHORT position (dangerous if unintended).
@@ -640,20 +642,22 @@ class TradingScheduler:
                     #   (i.e., this SELL is likely reducing an existing position).
                     # When live_allow_open_sell_intents=true:
                     # - Allow SELL intents even if it would open a SHORT.
-                    if signal.side == "SELL" and not bool(
-                        getattr(self.settings, "live_allow_open_sell_intents", False)
-                    ):
-                        if signal.token_id not in held_long_token_ids:
-                            rejected += 1
-                            logger.info(
-                                "Signal skipped: OPEN_POSITION SELL would open SHORT (live_allow_open_sell_intents=false)",
-                                extra={
-                                    "token_id": signal.token_id,
-                                    "market_id": signal.market_id,
-                                    "edge": signal.edge,
-                                },
-                            )
-                            continue
+                    #
+                    # IMPORTANT: Polymarket does not support shorting (selling tokens you don't own).
+                    # If live_allow_open_sell_intents=false, skip ALL SELL signals unless we hold the token.
+                    if signal.side == "SELL":
+                        if not bool(getattr(self.settings, "live_allow_open_sell_intents", False)):
+                            if signal.token_id not in held_long_token_ids:
+                                rejected += 1
+                                logger.info(
+                                    "Signal skipped: OPEN_POSITION SELL would open SHORT (live_allow_open_sell_intents=false)",
+                                    extra={
+                                        "token_id": signal.token_id,
+                                        "market_id": signal.market_id,
+                                        "edge": signal.edge,
+                                    },
+                                )
+                                continue
 
                     # Signals already have sizing computed, use it
                     size_usd = signal.sizing_result.size_usd_final if signal.sizing_result else 0.0

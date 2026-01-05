@@ -106,13 +106,30 @@ class CLOBTradingClient:
                 side=str(side).upper(),
                 fee_rate_bps=int(fee_rate_bps or 0),
             )
+            logger.info(f"Submitting order to CLOB: token={token_id[:20]}..., side={side}, price={p}, shares={size_shares:.2f}, USD={usd:.2f}")
             res = self.client.create_and_post_order(order_args)
+            logger.info(f"CLOB returned, parsing response...")
+
+            # Log the actual response for debugging
+            logger.info(f"CLOB response: {res}")
 
             # Best-effort extraction across possible response shapes.
             order_id = None
             raw: dict[str, Any] | None = None
             if isinstance(res, dict):
                 raw = res
+                # Check if response indicates failure
+                if res.get("success") is False:
+                    error_msg = res.get("errorMsg", res.get("error", "Order rejected"))
+                    logger.error(f"Order rejected by CLOB: {error_msg}, full response: {res}")
+                    return CLOBOrderResult(
+                        success=False,
+                        status_code=400,
+                        order_id=None,
+                        message=f"Order rejected: {error_msg}",
+                        raw=raw,
+                    )
+                
                 order_id = (
                     res.get("orderID")
                     or res.get("orderId")
@@ -121,6 +138,7 @@ class CLOBTradingClient:
                     or (res.get("order") or {}).get("id")  # type: ignore[union-attr]
                 )
 
+            logger.info(f"Order submitted successfully, orderID: {order_id}")
             return CLOBOrderResult(
                 success=True,
                 status_code=200,
@@ -133,6 +151,7 @@ class CLOBTradingClient:
             raw = e.error_msg if isinstance(e.error_msg, dict) else {"text": str(e.error_msg)}
             status_code = getattr(e, "status_code", None)
             error_detail = str(e.error_msg) if e.error_msg else "Unknown error"
+            logger.error(f"PolyApiException caught: status={status_code}, error={error_detail}, raw={raw}")
             return CLOBOrderResult(
                 success=False,
                 status_code=status_code,
