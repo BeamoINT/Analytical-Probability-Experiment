@@ -705,6 +705,29 @@ class TradingScheduler:
                         )
                         continue
 
+                    # Market diversification guardrail: limit positions per market
+                    # Count existing positions in this market (only for BUY signals opening new positions)
+                    if signal.side == "BUY" and signal.market_id and account_state:
+                        positions_in_market = [
+                            p for p in account_state.positions
+                            if p.market_id == signal.market_id
+                        ]
+                        max_positions = int(getattr(self.settings, "max_positions_per_market", 4))
+                        
+                        # Check if we're already at the limit
+                        if len(positions_in_market) >= max_positions:
+                            rejected += 1
+                            logger.info(
+                                "Signal rejected: max_positions_per_market reached",
+                                extra={
+                                    "market_id": signal.market_id,
+                                    "positions_in_market": len(positions_in_market),
+                                    "max_positions_per_market": max_positions,
+                                    "token_id": signal.token_id,
+                                },
+                            )
+                            continue
+
                     # Build enhanced risk checks with fill/sizing info
                     risk_checks = {
                         "approved": True,

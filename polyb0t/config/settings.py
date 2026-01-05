@@ -71,6 +71,9 @@ class Settings(BaseSettings):
     max_notional_per_market: float = Field(
         default=1000.0, description="Max dollar exposure per market"
     )
+    max_positions_per_market: int = Field(
+        default=4, description="Max number of positions allowed per market (diversification limit)"
+    )
 
     # Live Balance / Chain Configuration
     chain_id: int = Field(default=137, description="Chain ID for on-chain balance checks (Polygon=137)")

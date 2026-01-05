@@ -246,47 +246,89 @@ class AccountStateProvider:
             )
 
     async def _fetch_positions(self) -> list[AccountPosition]:
-        """Fetch account positions.
+        """Fetch account positions by reconstructing from trades.
 
         Returns:
             List of AccountPosition objects.
 
         Note:
-            Endpoint path is assumed. Adjust based on actual API.
+            Uses py-clob-client to fetch trades and reconstruct positions.
         """
+        logger.debug("_fetch_positions called - starting position reconstruction")
         try:
-            # Assumed endpoint - verify with API documentation
-            response = await self.client.get(f"/positions/{self.wallet_address}")
-            response.raise_for_status()
-            data = response.json()
-
+            import asyncio
+            from collections import defaultdict
+            from py_clob_client.client import ClobClient
+            from py_clob_client.clob_types import ApiCreds
+            
+            settings = get_settings()
+            logger.debug(f"Got settings: chain_id={settings.chain_id}, signature_type={settings.signature_type}")
+            
+            # Create CLOB client (synchronous)
+            clob_client = ClobClient(
+                host=settings.clob_base_url,
+                chain_id=int(settings.chain_id),
+                key=settings.polygon_private_key,
+                creds=ApiCreds(
+                    api_key=settings.clob_api_key,
+                    api_secret=settings.clob_api_secret,
+                    api_passphrase=settings.clob_passphrase,
+                ),
+                signature_type=int(settings.signature_type),
+                funder=settings.funder_address,
+            )
+            
+            # Fetch all trades (run sync code in executor to avoid blocking)
+            loop = asyncio.get_event_loop()
+            trades = await loop.run_in_executor(None, clob_client.get_trades)
+            
+            # Reconstruct positions from trades
+            position_data = defaultdict(lambda: {
+                "quantity": 0.0,
+                "cost": 0.0,
+                "market_id": None,
+            })
+            
+            for trade in trades:
+                asset_id = trade.get("asset_id")
+                side = trade.get("side")  # BUY or SELL
+                size = float(trade.get("size", 0))
+                price = float(trade.get("price", 0))
+                market_id = trade.get("market")
+                
+                if side == "BUY":
+                    position_data[asset_id]["quantity"] += size
+                    position_data[asset_id]["cost"] += size * price
+                elif side == "SELL":
+                    position_data[asset_id]["quantity"] -= size
+                    position_data[asset_id]["cost"] -= size * price
+                
+                # Store market_id
+                if market_id and not position_data[asset_id]["market_id"]:
+                    position_data[asset_id]["market_id"] = market_id
+            
+            # Convert to AccountPosition objects (only positions with quantity > 0)
             positions = []
-            position_list = data if isinstance(data, list) else data.get("positions", [])
-
-            for item in position_list:
-                try:
+            for token_id, data in position_data.items():
+                # Only include positions with positive quantity (threshold 0.001)
+                if data["quantity"] > 0.001:
+                    avg_price = data["cost"] / data["quantity"] if data["quantity"] > 0 else 0
                     position = AccountPosition(
-                        token_id=item.get("token_id", ""),
-                        market_id=item.get("market_id"),
-                        side=item.get("side", "LONG"),
-                        quantity=float(item.get("quantity", 0)),
-                        avg_price=float(item.get("avg_price", 0)),
-                        current_price=item.get("current_price"),
+                        token_id=token_id,
+                        market_id=data["market_id"],
+                        side="LONG",  # All reconstructed positions are LONG
+                        quantity=data["quantity"],
+                        avg_price=avg_price,
+                        current_price=None,  # Will be fetched separately if needed
                     )
                     positions.append(position)
-                except Exception as e:
-                    logger.warning(f"Failed to parse position: {e}", extra={"item": item})
-
+            
+            logger.info(f"Reconstructed {len(positions)} positions from {len(trades)} trades")
             return positions
 
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 404:
-                logger.debug("No positions endpoint available or no positions found")
-                return []
-            logger.warning(f"HTTP error fetching positions: {e.response.status_code}")
-            return []
         except Exception as e:
-            logger.warning(f"Error fetching positions: {e}")
+            logger.error(f"CRITICAL: Error fetching positions from trades: {e}", exc_info=True)
+            logger.error(f"Exception type: {type(e).__name__}, args: {e.args}")
             return []
 
     async def _fetch_open_orders(self) -> list[AccountOrder]:
