@@ -608,16 +608,16 @@ class TradingScheduler:
                     if self.settings.mode == "live":
                         cap = float(self.settings.max_daily_notional_usd)
                         if cap > 0 and (daily_notional_used + float(size_usd)) > cap:
-                        rejected += 1
-                        logger.info(
+                            rejected += 1
+                            logger.info(
                                 "Signal rejected: would exceed max_daily_notional_usd",
                                 extra={
                                     "daily_used_usd": daily_notional_used,
                                     "size_usd": float(size_usd),
                                     "cap_usd": cap,
                                 },
-                        )
-                        continue
+                            )
+                            continue
                     
                     # Live mode: do NOT use legacy paper-portfolio risk checks (category exposure, etc.).
                     # Those checks were designed for paper mode bankroll=$10k and will incorrectly reject
@@ -738,12 +738,12 @@ class TradingScheduler:
                         extra={"cycle_id": cycle_id, "balance_summary": balance_summary},
                     )
             else:
-            reporter.save_pnl_snapshot(self.portfolio, cycle_id)
-            logger.info(
-                f"Portfolio: equity=${self.portfolio.total_equity:.2f}, "
-                f"positions={self.portfolio.num_positions}, "
-                f"exposure=${self.portfolio.total_exposure:.2f}"
-            )
+                reporter.save_pnl_snapshot(self.portfolio, cycle_id)
+                logger.info(
+                    f"Portfolio: equity=${self.portfolio.total_equity:.2f}, "
+                    f"positions={self.portfolio.num_positions}, "
+                    f"exposure=${self.portfolio.total_exposure:.2f}"
+                )
 
         finally:
             db_session.close()
@@ -905,7 +905,7 @@ class TradingScheduler:
         if self.settings.mode == "live":
             semaphore = asyncio.Semaphore(int(getattr(self.settings, "live_clob_concurrency", 6)))
         else:
-        semaphore = asyncio.Semaphore(8)
+            semaphore = asyncio.Semaphore(8)
 
         async with CLOBClient() as clob:
 
@@ -934,7 +934,7 @@ class TradingScheduler:
                     if self.settings.mode == "live":
                         fetch_trades = bool(getattr(self.settings, "live_fetch_trades", False))
                     if fetch_trades:
-                    tr_attempts += 1
+                        tr_attempts += 1
                     t, tr_status, tr_ep = await clob.get_trades_debug(token_id, limit=50)
                     status_counts[f"trades:{tr_status}"] = status_counts.get(
                         f"trades:{tr_status}", 0
