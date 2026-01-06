@@ -169,6 +169,14 @@ class Settings(BaseSettings):
     )
 
     # Exit Management
+    manage_all_positions: bool = Field(
+        default=False,
+        description=(
+            "When true, the bot will manage exits for ALL positions in the account, "
+            "not just positions it opened. Useful if you want the bot to handle "
+            "take-profit/stop-loss for manually-opened positions too."
+        ),
+    )
     enable_take_profit: bool = Field(default=True, description="Enable take-profit proposals")
     take_profit_pct: float = Field(default=10.0, description="Take profit at % gain")
     enable_stop_loss: bool = Field(default=True, description="Enable stop-loss proposals")

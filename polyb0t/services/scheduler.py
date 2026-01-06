@@ -462,25 +462,31 @@ class TradingScheduler:
                         # Best-effort: may return empty if endpoints/auth not available.
                         account_state = await provider.fetch_account_state()
 
-                    # Only manage exits for positions that THIS BOT opened.
-                    # Heuristic: token_id is considered "bot-managed" if there exists an EXECUTED
-                    # OPEN_POSITION intent for that token_id.
-                    managed_tokens = {
-                        r[0]
-                        for r in (
-                            db_session.query(TradeIntentDB.token_id)
-                            .filter(TradeIntentDB.intent_type == "OPEN_POSITION")
-                            .filter(TradeIntentDB.status.in_(["EXECUTED", "EXECUTED_DRYRUN"]))
-                            .distinct()
-                            .all()
-                        )
-                        if r and r[0]
-                    }
+                    # Determine which positions to manage for exits.
+                    # If manage_all_positions=true, manage ALL positions in the account.
+                    # Otherwise, only manage positions that THIS BOT opened (tracked in DB).
+                    if self.settings.manage_all_positions:
+                        managed_tokens = None  # None means "manage all"
+                        logger.info("Exit management: managing ALL positions (manage_all_positions=true)")
+                    else:
+                        managed_tokens = {
+                            r[0]
+                            for r in (
+                                db_session.query(TradeIntentDB.token_id)
+                                .filter(TradeIntentDB.intent_type == "OPEN_POSITION")
+                                .filter(TradeIntentDB.status.in_(["EXECUTED", "EXECUTED_DRYRUN"]))
+                                .distinct()
+                                .all()
+                            )
+                            if r and r[0]
+                        }
+                        logger.debug(f"Exit management: tracking {len(managed_tokens)} bot-opened positions")
 
                     # Convert observed account positions into Position objects (for exit logic only).
                     observed_positions: dict[str, Position] = {}
                     for p in account_state.positions:
-                        if p.token_id not in managed_tokens:
+                        # If managed_tokens is None, manage all; otherwise filter to bot-opened only
+                        if managed_tokens is not None and p.token_id not in managed_tokens:
                             continue
                         mk = str(p.market_id or "unknown")
                         observed_positions[p.token_id] = Position(
