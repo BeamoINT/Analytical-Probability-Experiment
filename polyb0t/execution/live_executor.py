@@ -311,6 +311,43 @@ class LiveExecutor:
                 ),
             }
 
+        # Check if we actually have tokens to sell before attempting
+        try:
+            from py_clob_client.client import ClobClient
+            from py_clob_client.clob_types import ApiCreds, BalanceAllowanceParams, AssetType
+
+            check_client = ClobClient(
+                host=self.settings.clob_base_url,
+                chain_id=int(self.settings.chain_id),
+                key=self.settings.polygon_private_key or "",
+                creds=ApiCreds(
+                    api_key=self.settings.clob_api_key or "",
+                    api_secret=self.settings.clob_api_secret or "",
+                    api_passphrase=self.settings.clob_passphrase or "",
+                ),
+                signature_type=int(self.settings.signature_type),
+                funder=(self.settings.funder_address or self.settings.user_address),
+            )
+            balance_result = check_client.get_balance_allowance(
+                BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=intent.token_id)
+            )
+            token_balance = int(balance_result.get("balance", 0))
+            # Minimum order size is 5 shares, balance is in raw units (1e6 = 1 share)
+            min_sellable = 5 * 1_000_000  # 5 shares in raw units
+            if token_balance < min_sellable:
+                logger.info(
+                    f"Skipping CLOSE_POSITION: token balance too low ({token_balance / 1e6:.2f} shares, need ≥5)",
+                    extra={"token_id": intent.token_id[:20], "balance": token_balance},
+                )
+                return {
+                    "success": False,
+                    "error": f"Token balance too low to sell ({token_balance / 1e6:.2f} shares, minimum is 5)",
+                    "skip_retry": True,  # Don't keep retrying this
+                }
+        except Exception as e:
+            logger.warning(f"Could not check token balance before sell: {e}")
+            # Continue anyway - let the CLOB API reject if needed
+
         logger.warning(
             "LIVE CLOSE ORDER: attempting best-effort submit",
             extra=order_details,
