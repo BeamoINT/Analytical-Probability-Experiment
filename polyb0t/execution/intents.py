@@ -281,13 +281,16 @@ class IntentManager:
         """
         intent_id = str(uuid.uuid4())
 
+        # Convert shares to USD value for fingerprinting and dedup
+        size_usd_for_dedup = size * price
+
         fingerprint = self._fingerprint_intent(
             intent_type=IntentType.CLOSE_POSITION,
             market_id=market_id,
             token_id=token_id,
             side=side,
             price=price,
-            size_usd=size,
+            size_usd=size_usd_for_dedup,
         )
         skip_reason = self._should_skip_due_to_dedup(
             fingerprint=fingerprint,
@@ -301,9 +304,13 @@ class IntentManager:
                     new_price=price,
                     new_edge=None,
                     new_p_model=None,
-                    new_size_usd=size,
+                    new_size_usd=size_usd_for_dedup,
                 )
             return None
+
+        # Convert shares to USD value: size is in shares, we need USD for the order
+        # size_usd = shares * price (the notional value of the position being closed)
+        size_usd_value = size * price
 
         intent = TradeIntent(
             intent_id=intent_id,
@@ -312,12 +319,12 @@ class IntentManager:
             market_id=market_id,
             side=side,
             price=price,
-            size_usd=size,
+            size_usd=size_usd_value,
             edge=None,
             p_market=price,
             p_model=None,
             reason=reason,
-            risk_checks={"exit_intent": True},
+            risk_checks={"exit_intent": True, "size_shares": size},
             fingerprint=fingerprint,
         )
 
