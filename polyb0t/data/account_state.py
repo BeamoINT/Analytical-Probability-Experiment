@@ -246,112 +246,67 @@ class AccountStateProvider:
             )
 
     async def _fetch_positions(self) -> list[AccountPosition]:
-        """Fetch account positions by reconstructing from trades.
+        """Fetch account positions from Polymarket public data API.
 
         Returns:
             List of AccountPosition objects.
 
         Note:
-            Uses py-clob-client to fetch trades and reconstruct positions.
+            Uses public data-api.polymarket.com which doesn't require authentication.
+            This avoids the get_trades() 401 error.
         """
-        logger.info("🔍 _fetch_positions called - starting position reconstruction with orderbook filtering")
+        logger.info("🔍 _fetch_positions called - fetching from public data API")
         try:
-            import asyncio
-            from collections import defaultdict
-            from py_clob_client.client import ClobClient
-            from py_clob_client.clob_types import ApiCreds
-            
             settings = get_settings()
-            logger.debug(f"Got settings: chain_id={settings.chain_id}, signature_type={settings.signature_type}")
             
-            # Create CLOB client (synchronous)
-            clob_client = ClobClient(
-                host=settings.clob_base_url,
-                chain_id=int(settings.chain_id),
-                key=settings.polygon_private_key,
-                creds=ApiCreds(
-                    api_key=settings.clob_api_key,
-                    api_secret=settings.clob_api_secret,
-                    api_passphrase=settings.clob_passphrase,
-                ),
-                signature_type=int(settings.signature_type),
-                funder=settings.funder_address,
-            )
+            # Use the public data API (no auth needed)
+            # Works with either user_address or funder_address (proxy wallet)
+            wallet = settings.funder_address or settings.user_address
+            url = f"https://data-api.polymarket.com/positions?user={wallet.lower()}"
             
-            # Fetch all trades (run sync code in executor to avoid blocking)
-            loop = asyncio.get_event_loop()
-            trades = await loop.run_in_executor(None, clob_client.get_trades)
-            
-            # Reconstruct positions from trades
-            position_data = defaultdict(lambda: {
-                "quantity": 0.0,
-                "cost": 0.0,
-                "market_id": None,
-            })
-            
-            for trade in trades:
-                asset_id = trade.get("asset_id")
-                side = trade.get("side")  # BUY or SELL
-                size = float(trade.get("size", 0))
-                price = float(trade.get("price", 0))
-                market_id = trade.get("market")
+            async with httpx.AsyncClient(timeout=15.0) as http_client:
+                response = await http_client.get(url)
                 
-                if side == "BUY":
-                    position_data[asset_id]["quantity"] += size
-                    position_data[asset_id]["cost"] += size * price
-                elif side == "SELL":
-                    position_data[asset_id]["quantity"] -= size
-                    position_data[asset_id]["cost"] -= size * price
+                if response.status_code != 200:
+                    logger.error(f"Failed to fetch positions: HTTP {response.status_code}")
+                    return []
                 
-                # Store market_id
-                if market_id and not position_data[asset_id]["market_id"]:
-                    position_data[asset_id]["market_id"] = market_id
+                positions_data = response.json()
+                logger.debug(f"Raw API returned {len(positions_data)} positions")
             
-            # Convert to AccountPosition objects (only positions with quantity > 0)
-            # Also filter out resolved markets by checking if orderbook exists
+            # Convert to AccountPosition objects
+            # Filter: only include positions with positive size and value >= $0.10
             positions = []
-            tokens_to_check = [
-                (token_id, data) 
-                for token_id, data in position_data.items()
-                if data["quantity"] > 0.001 and data["cost"] >= 0.10
-            ]
+            for pos in positions_data:
+                size = float(pos.get("size", 0))
+                current_value = float(pos.get("currentValue", 0))
+                
+                # Skip dust positions and closed positions
+                if size <= 0.001 or current_value < 0.10:
+                    continue
+                
+                # Skip redeemable (resolved) positions
+                if pos.get("redeemable", False):
+                    continue
+                
+                # Extract data
+                token_id = pos.get("asset", "")
+                market_slug = pos.get("eventSlug", "")
+                avg_price = float(pos.get("avgPrice", 0))
+                cur_price = float(pos.get("curPrice", 0))
+                pnl = float(pos.get("cashPnl", 0))
+                
+                position = AccountPosition(
+                    token_id=token_id,
+                    market_id=market_slug,  # Using slug as market identifier
+                    side="LONG",  # All positions from this API are long
+                    quantity=size,
+                    avg_price=avg_price,
+                    current_price=cur_price,
+                )
+                positions.append(position)
             
-            logger.debug(f"Found {len(tokens_to_check)} positions with $0.10+ value, checking orderbooks...")
-            
-            # Check orderbook for each position to filter out resolved markets
-            async with httpx.AsyncClient(timeout=5.0) as http_client:
-                for token_id, data in tokens_to_check:
-                    try:
-                        # Check if token has an active orderbook (not resolved)
-                        response = await http_client.get(
-                            f"{settings.clob_base_url}/book?token_id={token_id}"
-                        )
-                        
-                        if response.status_code == 200:
-                            book = response.json()
-                            # Only include if orderbook has bids or asks
-                            has_bids = book.get("bids") and len(book["bids"]) > 0
-                            has_asks = book.get("asks") and len(book["asks"]) > 0
-                            
-                            if has_bids or has_asks:
-                                avg_price = data["cost"] / data["quantity"] if data["quantity"] > 0 else 0
-                                position = AccountPosition(
-                                    token_id=token_id,
-                                    market_id=data["market_id"],
-                                    side="LONG",
-                                    quantity=data["quantity"],
-                                    avg_price=avg_price,
-                                    current_price=None,
-                                )
-                                positions.append(position)
-                            else:
-                                logger.debug(f"Skipping token {token_id[:16]}... - empty orderbook (resolved market)")
-                        else:
-                            logger.debug(f"Skipping token {token_id[:16]}... - no orderbook (resolved market)")
-                    except Exception as e:
-                        logger.debug(f"Error checking orderbook for {token_id[:16]}...: {e}")
-            
-            logger.info(f"Reconstructed {len(positions)} ACTIVE positions from {len(trades)} trades (filtered out {len(tokens_to_check) - len(positions)} resolved markets)")
+            logger.info(f"Fetched {len(positions)} active positions (filtered from {len(positions_data)} total)")
             return positions
 
         except Exception as e:
