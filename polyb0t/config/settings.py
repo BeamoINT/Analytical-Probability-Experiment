@@ -3,7 +3,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -12,8 +12,7 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(
         env_prefix="POLYBOT_",
-        # Load committed defaults first, then allow local overrides.
-        env_file=("env.live", ".env", ".env.local"),
+        env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
     )
@@ -217,11 +216,6 @@ class Settings(BaseSettings):
     clob_passphrase: str | None = Field(
         default=None, description="CLOB API passphrase (NEVER commit or print)"
     )
-    # Back-compat: some env templates used POLYBOT_CLOB_API_PASSPHRASE
-    clob_api_passphrase: str | None = Field(
-        default=None,
-        description="(deprecated) Alias for clob_passphrase; use POLYBOT_CLOB_PASSPHRASE",
-    )
     
     # Polymarket Signature Configuration
     signature_type: int = Field(
@@ -328,13 +322,6 @@ class Settings(BaseSettings):
                 f"Loop interval {v}s is very aggressive. Consider 10s+ to avoid rate limits."
             )
         return v
-
-    @model_validator(mode="after")
-    def _backfill_legacy_env_names(self) -> "Settings":
-        """Backfill legacy env var names into canonical fields."""
-        if (self.clob_passphrase is None or str(self.clob_passphrase).strip() == "") and self.clob_api_passphrase:
-            self.clob_passphrase = self.clob_api_passphrase
-        return self
 
 
 @lru_cache
