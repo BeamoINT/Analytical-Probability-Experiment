@@ -249,8 +249,8 @@ class Settings(BaseSettings):
         description="Database for training data collection"
     )
     ml_retrain_interval_hours: int = Field(
-        default=6,
-        description="Hours between automatic model retraining"
+        default=72,
+        description="Hours between automatic model retraining (default: 72 = every 3 days)"
     )
     ml_min_training_examples: int = Field(
         default=1000,
