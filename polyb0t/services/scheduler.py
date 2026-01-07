@@ -497,6 +497,56 @@ class TradingScheduler:
                             avg_entry_price=float(p.avg_price),
                         )
 
+                    # Step 5a.5: Diversification cleanup - sell duplicate positions in same market
+                    # Group positions by market
+                    positions_by_market: dict[str, list] = {}
+                    for p in account_state.positions:
+                        mk = str(p.market_id or "unknown")
+                        if mk not in positions_by_market:
+                            positions_by_market[mk] = []
+                        positions_by_market[mk].append(p)
+                    
+                    # For markets with >1 position, keep best (highest value), sell rest
+                    diversification_sell_count = 0
+                    for market_id, positions in positions_by_market.items():
+                        if len(positions) <= self.settings.max_positions_per_market:
+                            continue  # Already within limit
+                        
+                        # Sort by current value (quantity * current_price), highest first
+                        positions_sorted = sorted(
+                            positions,
+                            key=lambda p: float(p.quantity or 0) * float(p.current_price or 0),
+                            reverse=True
+                        )
+                        
+                        # Keep the best N positions, sell the rest
+                        positions_to_keep = positions_sorted[:self.settings.max_positions_per_market]
+                        positions_to_sell = positions_sorted[self.settings.max_positions_per_market:]
+                        
+                        for p in positions_to_sell:
+                            try:
+                                # Create exit intent for this position
+                                intent = intent_manager.create_exit_intent(
+                                    token_id=p.token_id,
+                                    market_id=str(p.market_id),
+                                    side="SELL",
+                                    price=float(p.current_price or 0),
+                                    size=float(p.quantity or 0),
+                                    reason=f"Diversification cleanup: reducing to {self.settings.max_positions_per_market} position(s) per market",
+                                    cycle_id=cycle_id,
+                                )
+                                if intent:
+                                    diversification_sell_count += 1
+                                    logger.info(
+                                        f"Diversification cleanup: selling position in {market_id}",
+                                        extra={"token_id": p.token_id[:20], "quantity": p.quantity, "value": float(p.quantity or 0) * float(p.current_price or 0)}
+                                    )
+                            except Exception as e:
+                                logger.warning(f"Failed to create diversification exit intent: {e}")
+                    
+                    if diversification_sell_count > 0:
+                        logger.info(f"Diversification cleanup: created {diversification_sell_count} sell intents")
+
                     # Fallback prices from Gamma outcomes (public)
                     fallback_prices: dict[str, float] = {}
                     for m in tradable_markets:
