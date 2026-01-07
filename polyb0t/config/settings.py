@@ -69,10 +69,10 @@ class Settings(BaseSettings):
         default=20, description="Max orders allowed per hour (rate limit)"
     )
     max_notional_per_market: float = Field(
-        default=1000.0, description="Max dollar exposure per market"
+        default=50.0, description="Max dollar exposure per market (diversification limit)"
     )
     max_positions_per_market: int = Field(
-        default=4, description="Max number of positions allowed per market (diversification limit)"
+        default=1, description="Max number of positions allowed per market (1 = strict diversification)"
     )
 
     # Live Balance / Chain Configuration
@@ -291,6 +291,14 @@ class Settings(BaseSettings):
     ml_auto_enable_threshold: int = Field(
         default=2000,
         description="Auto-enable ML when this many labeled examples are collected (0=never)"
+    )
+    ml_full_takeover_r2_threshold: float = Field(
+        default=0.15,
+        description="When ML model R² exceeds this threshold, it fully takes over (1.0 blend weight)"
+    )
+    ml_full_takeover_min_examples: int = Field(
+        default=5000,
+        description="Minimum labeled examples before ML can fully take over"
     )
     
     # Logging

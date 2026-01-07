@@ -404,8 +404,22 @@ class BaselineStrategy:
             p_ml = p_market + predicted_return
             p_ml = max(0.01, min(0.99, p_ml))
             
-            # Blend ML with baseline for robustness
+            # Determine blend weight - check if ML should fully take over
             blend_weight = self.settings.ml_prediction_blend_weight
+            
+            # Check if ML model is performing well enough for full takeover
+            model_info = self.ml_model_manager.get_model_info()
+            model_r2 = model_info.get("r2_score", 0) if model_info else 0
+            training_examples = model_info.get("training_examples", 0) if model_info else 0
+            
+            if (model_r2 >= self.settings.ml_full_takeover_r2_threshold and 
+                training_examples >= self.settings.ml_full_takeover_min_examples):
+                # ML model is performing well - full takeover
+                blend_weight = 1.0
+                logger.debug(
+                    f"ML full takeover active: R²={model_r2:.3f}, examples={training_examples}"
+                )
+            
             p_model = blend_weight * p_ml + (1 - blend_weight) * baseline_prob
             
             # Clamp final prediction
