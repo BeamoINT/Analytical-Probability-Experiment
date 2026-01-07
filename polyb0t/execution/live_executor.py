@@ -316,6 +316,7 @@ class LiveExecutor:
             from py_clob_client.client import ClobClient
             from py_clob_client.clob_types import ApiCreds, BalanceAllowanceParams, AssetType
 
+            funder_addr = self.settings.funder_address or self.settings.user_address
             check_client = ClobClient(
                 host=self.settings.clob_base_url,
                 chain_id=int(self.settings.chain_id),
@@ -326,12 +327,25 @@ class LiveExecutor:
                     api_passphrase=self.settings.clob_passphrase or "",
                 ),
                 signature_type=int(self.settings.signature_type),
-                funder=(self.settings.funder_address or self.settings.user_address),
+                funder=funder_addr,
             )
             balance_result = check_client.get_balance_allowance(
                 BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=intent.token_id)
             )
             token_balance = int(balance_result.get("balance", 0))
+            token_allowance = int(balance_result.get("allowance", 0))
+            
+            # Log the balance check result for debugging
+            logger.info(
+                f"Balance check for CLOSE_POSITION: balance={token_balance / 1e6:.2f} shares, allowance={token_allowance / 1e6:.2f}",
+                extra={
+                    "token_id": intent.token_id[:20],
+                    "balance_raw": token_balance,
+                    "allowance_raw": token_allowance,
+                    "funder_address": funder_addr,
+                },
+            )
+            
             # Minimum order size is 5 shares, balance is in raw units (1e6 = 1 share)
             min_sellable = 5 * 1_000_000  # 5 shares in raw units
             if token_balance < min_sellable:
@@ -344,9 +358,28 @@ class LiveExecutor:
                     "error": f"Token balance too low to sell ({token_balance / 1e6:.2f} shares, minimum is 5)",
                     "skip_retry": True,  # Don't keep retrying this
                 }
+            
+            # Also check allowance - if not enough, the sell will fail
+            if token_allowance < token_balance:
+                logger.warning(
+                    f"Token allowance ({token_allowance / 1e6:.2f}) less than balance ({token_balance / 1e6:.2f}) - sell may fail",
+                    extra={"token_id": intent.token_id[:20]},
+                )
+            
+            # CRITICAL: Use actual balance for sell size, not the stale intent data
+            # This prevents "not enough balance" errors when position data is stale
+            actual_shares = token_balance / 1e6
+            actual_size_usd = actual_shares * float(intent.price or 0.0)
+            
+            # Update order_details to reflect actual values
+            order_details["actual_shares"] = actual_shares
+            order_details["actual_size_usd"] = actual_size_usd
+            order_details["intent_size_usd"] = float(intent.size_usd or 0.0)
+            
         except Exception as e:
-            logger.warning(f"Could not check token balance before sell: {e}")
-            # Continue anyway - let the CLOB API reject if needed
+            logger.warning(f"Could not check token balance before sell: {e}", exc_info=True)
+            # Fall back to intent values if balance check fails
+            actual_size_usd = float(intent.size_usd or 0.0)
 
         logger.warning(
             "LIVE CLOSE ORDER: attempting best-effort submit",
@@ -366,11 +399,12 @@ class LiveExecutor:
                 signature_type=int(self.settings.signature_type),
                 funder=(self.settings.funder_address or self.settings.user_address),
             )
+            # Use actual_size_usd which is based on real balance, not stale position data
             res = client.submit_limit_order(
                 token_id=intent.token_id,
                 side=intent.side or "SELL",
                 price=float(intent.price or 0.0),
-                size_usd=float(intent.size_usd or 0.0),
+                size_usd=actual_size_usd,
                 fee_rate_bps=int(self.settings.fee_bps),
             )
             client.close()
