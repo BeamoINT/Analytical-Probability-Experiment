@@ -172,6 +172,7 @@ class TradingScheduler:
 
                 # Account state snapshot (best-effort; may require auth). Used for open orders/positions.
                 held_long_token_ids: set[str] = set()
+                markets_with_existing_positions: set[str] = set()  # Blocks new buys for markets we already hold
                 try:
                     from polyb0t.data.account_state import AccountStateProvider
                     from polyb0t.data.storage import AccountStateDB
@@ -191,6 +192,24 @@ class TradingScheduler:
                             }
                         except Exception:
                             held_long_token_ids = set()
+                        
+                        # CRITICAL: Track markets where we already have positions
+                        # This prevents buying back into markets we just sold from
+                        # Once we have ANY position in a market, we don't open more until ALL are closed
+                        try:
+                            markets_with_existing_positions = {
+                                str(p.market_id)
+                                for p in (state.positions or [])
+                                if getattr(p, "market_id", None)
+                                and float(getattr(p, "quantity", 0) or 0) > 0
+                            }
+                            if markets_with_existing_positions:
+                                logger.info(
+                                    f"Markets with existing positions (blocked for new buys): {len(markets_with_existing_positions)} markets",
+                                    extra={"market_ids": list(markets_with_existing_positions)[:10]},  # Log first 10
+                                )
+                        except Exception:
+                            markets_with_existing_positions = set()
 
                         db_session.add(
                             AccountStateDB(
@@ -763,8 +782,24 @@ class TradingScheduler:
                         )
                         continue
 
-                    # Market diversification guardrail: limit positions per market
-                    # Count existing positions + pending/approved intents in this market (only for BUY signals opening new positions)
+                    # STRICT Market diversification: If we already have ANY position in a market,
+                    # block all new BUY intents for that market (even if we just sold some)
+                    # This prevents the "sell then buy back" loop
+                    if signal.side == "BUY" and signal.market_id:
+                        market_id_str = str(signal.market_id)
+                        if market_id_str in markets_with_existing_positions:
+                            rejected += 1
+                            logger.info(
+                                "Signal rejected: already have position in this market (strict diversification)",
+                                extra={
+                                    "market_id": signal.market_id,
+                                    "token_id": signal.token_id,
+                                    "reason": "markets_with_existing_positions block",
+                                },
+                            )
+                            continue
+                    
+                    # Secondary check: Count existing positions + pending intents (belt-and-suspenders)
                     if signal.side == "BUY" and signal.market_id and account_state:
                         positions_in_market = [
                             p for p in account_state.positions
