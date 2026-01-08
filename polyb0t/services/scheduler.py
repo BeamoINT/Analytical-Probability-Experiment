@@ -52,6 +52,13 @@ class TradingScheduler:
         self.risk_manager = RiskManager()
         self.strategy = BaselineStrategy()
         self.market_filter = MarketFilter()
+        
+        # Arbitrage scanner (optional)
+        self.arbitrage_scanner = None
+        if self.settings.enable_arbitrage_scanner:
+            from polyb0t.services.arbitrage_scanner import ArbitrageScanner
+            self.arbitrage_scanner = ArbitrageScanner()
+            logger.info("Arbitrage scanner enabled")
 
         logger.info("Trading scheduler initialized")
 
@@ -400,6 +407,61 @@ class TradingScheduler:
                 f"After all filtering: {len(tradable_markets)} tradable markets",
                 extra={"filter_rejections": filter_rejections},
             )
+
+            # Step 4.5: Scan for arbitrage opportunities (risk-free profit)
+            arbitrage_intents_created = 0
+            if self.arbitrage_scanner and self.settings.mode == "live":
+                try:
+                    # Convert orderbooks to dict format for arbitrage scanner
+                    ob_dicts: dict[str, dict[str, Any]] = {}
+                    for token_id, ob in orderbooks.items():
+                        if ob and hasattr(ob, 'bids') and hasattr(ob, 'asks'):
+                            ob_dicts[token_id] = {
+                                "bids": [{"price": l.price, "size": l.size} for l in (ob.bids or [])],
+                                "asks": [{"price": l.price, "size": l.size} for l in (ob.asks or [])],
+                            }
+                    
+                    # Scan all markets (not just tradable) for arbitrage
+                    arb_opportunities = self.arbitrage_scanner.scan_all(
+                        markets=markets_for_data,  # Broad market set
+                        orderbooks=ob_dicts,
+                    )
+                    
+                    if arb_opportunities:
+                        logger.warning(
+                            f"🎯 ARBITRAGE FOUND: {len(arb_opportunities)} opportunities!",
+                            extra={
+                                "opportunities": [o.to_dict() for o in arb_opportunities[:3]],
+                                "best_profit_pct": arb_opportunities[0].profit_pct,
+                            },
+                        )
+                        
+                        # Create intents for arbitrage opportunities
+                        for opp in arb_opportunities[:3]:  # Max 3 arbs per cycle
+                            try:
+                                arb_intents = self.arbitrage_scanner.create_arbitrage_intents(
+                                    opportunity=opp,
+                                    intent_manager=intent_manager,
+                                    cycle_id=cycle_id,
+                                    max_usd_per_arb=self.settings.arbitrage_max_usd_per_opportunity,
+                                )
+                                arbitrage_intents_created += len(arb_intents)
+                                
+                                # Auto-approve if configured (DANGER: use with caution)
+                                if self.settings.arbitrage_auto_execute:
+                                    for intent in arb_intents:
+                                        intent_manager.approve_intent(
+                                            intent.intent_id,
+                                            note="Auto-approved arbitrage (risk-free)",
+                                        )
+                                        logger.warning(f"Auto-approved arbitrage intent: {intent.intent_id[:8]}")
+                            except Exception as e:
+                                logger.error(f"Failed to create arb intent: {e}")
+                    else:
+                        logger.debug("No arbitrage opportunities found this cycle")
+                        
+                except Exception as e:
+                    logger.warning(f"Arbitrage scan failed: {e}")
 
             # Step 5: Generate trading signals with balance-aware sizing
             available_for_signals = float(balance_summary.get("available_usdc", 0.0) or 0.0) if balance_summary else 0.0

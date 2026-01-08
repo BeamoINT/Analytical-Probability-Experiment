@@ -241,6 +241,28 @@ class Settings(BaseSettings):
         default=1.5,
         description="Multiply position size by this when volume spike detected"
     )
+    
+    # Arbitrage Settings
+    enable_arbitrage_scanner: bool = Field(
+        default=True,
+        description="Scan markets for risk-free arbitrage opportunities"
+    )
+    arbitrage_min_profit_pct: float = Field(
+        default=1.0,
+        description="Minimum profit % after fees to execute arbitrage (1% = 0.01)"
+    )
+    arbitrage_min_profit_usd: float = Field(
+        default=0.50,
+        description="Minimum profit USD after fees to execute arbitrage"
+    )
+    arbitrage_max_usd_per_opportunity: float = Field(
+        default=100.0,
+        description="Maximum USD to allocate per arbitrage opportunity"
+    )
+    arbitrage_auto_execute: bool = Field(
+        default=False,
+        description="Automatically execute arbitrage (no approval needed). DANGER: Only enable if confident."
+    )
     enable_time_exit: bool = Field(
         default=True, description="Enable time-based exit proposals"
     )
