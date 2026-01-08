@@ -281,12 +281,11 @@ class LiveExecutor:
     ) -> dict[str, Any]:
         """Execute position closing order.
 
-        Uses "panic sell" (market sell at best bid) when:
-        - Price has dropped significantly from entry
-        - Always for diversification cleanup sells
-        - Always when stop_loss is triggered
+        Uses "panic sell" (market sell at best bid) ONLY when:
+        - Price has dropped significantly from entry (configurable threshold)
+        - Stop-loss triggered (reason contains "stop")
         
-        This ensures quick fills and prevents holding losing positions.
+        Otherwise uses normal limit orders for better fill prices.
 
         Args:
             intent: Trade intent.
@@ -319,7 +318,9 @@ class LiveExecutor:
         actual_shares = 0.0
         actual_size_usd = float(intent.size_usd or 0.0)
         best_bid = float(intent.price or 0.0)
-        use_market_sell = self.settings.enable_panic_sell  # Default to market sell for faster fills
+        use_market_sell = False  # Default: use limit orders
+        entry_price: float | None = None
+        price_drop_pct: float = 0.0
         
         # Check if we actually have tokens to sell before attempting
         try:
@@ -347,22 +348,44 @@ class LiveExecutor:
             token_balance = int(balance_result.get("balance", 0))
             token_allowance = int(balance_result.get("allowance", 0))
             
-            # Get best bid from orderbook for market sell pricing
+            # Get best bid from orderbook
             try:
                 orderbook = check_client.get_order_book(intent.token_id)
                 bids = orderbook.get("bids", [])
                 if bids:
-                    # Best bid is highest price someone will pay
                     best_bid = float(bids[0].get("price", intent.price or 0.01))
-                    logger.info(f"Best bid for market sell: {best_bid:.4f}", extra={"token_id": intent.token_id[:20]})
                 else:
-                    # No bids - use a very low price to ensure fill
                     best_bid = max(0.01, float(intent.price or 0.01) * 0.5)
                     logger.warning(f"No bids found, using floor price: {best_bid:.4f}")
             except Exception as e:
                 logger.warning(f"Could not fetch orderbook: {e}")
-                # Fall back to intent price with slippage
                 best_bid = max(0.01, float(intent.price or 0.01) * 0.95)
+            
+            # Get entry price from intent signal_data (if available)
+            if intent.signal_data and isinstance(intent.signal_data, dict):
+                entry_price = intent.signal_data.get("entry_price") or intent.signal_data.get("avg_price")
+            
+            # Determine if we should panic sell based on price drop
+            if self.settings.enable_panic_sell and entry_price and entry_price > 0:
+                price_drop_pct = ((entry_price - best_bid) / entry_price) * 100
+                
+                # Only panic sell if price dropped by more than threshold
+                if price_drop_pct >= self.settings.panic_sell_price_drop_pct:
+                    use_market_sell = True
+                    logger.warning(
+                        f"PANIC SELL triggered: price dropped {price_drop_pct:.1f}% (threshold: {self.settings.panic_sell_price_drop_pct}%)",
+                        extra={
+                            "entry_price": entry_price,
+                            "current_bid": best_bid,
+                            "drop_pct": price_drop_pct,
+                        },
+                    )
+            
+            # Also trigger panic sell if this is a stop-loss
+            reason = (intent.reason or "").lower()
+            if "stop" in reason or "loss" in reason:
+                use_market_sell = True
+                logger.info("Market sell triggered: stop-loss exit")
             
             # Log the balance check result
             logger.info(
@@ -373,6 +396,9 @@ class LiveExecutor:
                     "allowance_raw": token_allowance,
                     "funder_address": funder_addr,
                     "best_bid": best_bid,
+                    "entry_price": entry_price,
+                    "price_drop_pct": price_drop_pct,
+                    "use_market_sell": use_market_sell,
                 },
             )
             
@@ -399,15 +425,17 @@ class LiveExecutor:
             # CRITICAL: Use actual balance for sell size
             actual_shares = token_balance / 1e6
             
-            # Determine sell price: use best bid for market sell
-            sell_price = best_bid if use_market_sell else float(intent.price or 0.0)
-            
-            # Apply slippage tolerance for market sell to ensure fill
+            # Determine sell price based on market sell or limit sell
             if use_market_sell:
+                # Market sell: use best bid minus slippage for guaranteed fill
                 slippage_factor = 1.0 - (self.settings.panic_sell_min_fill_slippage_pct / 100.0)
-                sell_price = max(0.005, sell_price * slippage_factor)  # Minimum 0.5 cents
+                sell_price = max(0.005, best_bid * slippage_factor)
                 order_details["order_type"] = "MARKET_SELL"
                 order_details["slippage_applied"] = self.settings.panic_sell_min_fill_slippage_pct
+            else:
+                # Limit sell: use best bid (no additional slippage, let it sit)
+                sell_price = best_bid
+                order_details["order_type"] = "LIMIT_SELL"
             
             actual_size_usd = actual_shares * sell_price
             
@@ -417,6 +445,8 @@ class LiveExecutor:
             order_details["intent_size_usd"] = float(intent.size_usd or 0.0)
             order_details["sell_price"] = sell_price
             order_details["best_bid"] = best_bid
+            order_details["entry_price"] = entry_price
+            order_details["price_drop_pct"] = price_drop_pct
             order_details["use_market_sell"] = use_market_sell
             
         except Exception as e:
@@ -426,7 +456,7 @@ class LiveExecutor:
             sell_price = float(intent.price or 0.0)
 
         logger.warning(
-            f"LIVE CLOSE ORDER: {'MARKET SELL' if use_market_sell else 'LIMIT SELL'} @ {sell_price:.4f}",
+            f"LIVE CLOSE ORDER: {'PANIC SELL' if use_market_sell else 'LIMIT SELL'} @ {sell_price:.4f}",
             extra=order_details,
         )
 
@@ -444,7 +474,6 @@ class LiveExecutor:
                 funder=(self.settings.funder_address or self.settings.user_address),
             )
             
-            # Use market sell price (best bid with slippage) for faster fills
             res = client.submit_limit_order(
                 token_id=intent.token_id,
                 side=intent.side or "SELL",
@@ -455,7 +484,7 @@ class LiveExecutor:
             client.close()
             if not res.success:
                 return {"success": False, "error": res.message, "status_code": res.status_code, "raw": res.raw}
-            return {"success": True, "order_id": res.order_id, "message": f"Close order submitted ({'market' if use_market_sell else 'limit'})", "details": order_details}
+            return {"success": True, "order_id": res.order_id, "message": f"Close order submitted ({'panic' if use_market_sell else 'limit'})", "details": order_details}
         except Exception as e:
             return {"success": False, "error": f"Close submit error: {e}"}
 
