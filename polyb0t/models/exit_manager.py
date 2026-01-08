@@ -500,7 +500,7 @@ class ExitManager:
                 pnl=position.unrealized_pnl,
                 is_emergency=True,  # Flag for immediate market execution
             )
-        
+
         return None
 
     def _check_time_exit(
@@ -785,7 +785,7 @@ class ExitManager:
                 size=position.quantity,
                 pnl=position.unrealized_pnl,
             )
-        
+
         return None
 
     def create_exit_intents(

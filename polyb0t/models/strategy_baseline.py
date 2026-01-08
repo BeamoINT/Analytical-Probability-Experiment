@@ -436,6 +436,28 @@ class BaselineStrategy:
         if not fill_est or not fill_est.is_feasible:
             return None, "fill_not_feasible"
         
+        # === SLIPPAGE ABORT CHECK ===
+        # Abort if slippage would eat too much of our edge
+        if self.settings.enable_slippage_abort:
+            slippage_pct_of_edge = 0.0
+            if abs(edge_raw) > 0:
+                slippage_pct_of_edge = fill_est.slippage_bps / (abs(edge_raw) * 10000)
+            
+            max_slippage_ratio = self.settings.max_slippage_of_edge_pct / 100.0
+            
+            if slippage_pct_of_edge > max_slippage_ratio:
+                logger.debug(
+                    f"SLIPPAGE ABORT: slippage {fill_est.slippage_bps}bps would eat "
+                    f"{slippage_pct_of_edge*100:.0f}% of edge (max: {max_slippage_ratio*100:.0f}%)"
+                )
+                return None, f"slippage_exceeds_edge_ratio_{slippage_pct_of_edge*100:.0f}pct"
+            
+            if fill_est.slippage_bps > self.settings.absolute_max_slippage_bps:
+                logger.debug(
+                    f"SLIPPAGE ABORT: slippage {fill_est.slippage_bps}bps > max {self.settings.absolute_max_slippage_bps}bps"
+                )
+                return None, f"slippage_exceeds_absolute_max_{fill_est.slippage_bps}bps"
+        
         # Check net edge threshold (after fees/slippage)
         if abs(edge_net) < self.min_net_edge:
             return None, "net_edge_below_threshold"
@@ -500,7 +522,7 @@ class BaselineStrategy:
                     logger.info(
                         f"Volume spike boost: ${original_size:.2f} -> ${sizing_final.size_usd_final:.2f} "
                         f"(volume {microstructure_signal.volume_ratio:.1f}x normal)"
-                    )
+        )
         
         # Final size check
         if sizing_final.size_usd_final < self.settings.min_order_usd:
@@ -668,7 +690,16 @@ class BaselineStrategy:
         p_market: float,
         features: dict[str, Any],
     ) -> float:
-        """Compute baseline probability (no ML).
+        """Compute baseline probability using SMART heuristics.
+
+        CRITICAL FIX: The old approach was fundamentally flawed:
+        - Shrinkage to 0.5 ALWAYS created artificial edge (systematically wrong)
+        - Mean-reversion assumption is WRONG for prediction markets (markets are often right)
+        
+        NEW APPROACH: Only deviate from market when we have SPECIFIC EVIDENCE
+        - Use Smart Heuristics weighted scoring
+        - Only create edge when multiple signals agree
+        - Default to market price (efficient market baseline)
 
         Args:
             p_market: Market implied probability.
@@ -677,26 +708,86 @@ class BaselineStrategy:
         Returns:
             Baseline probability estimate (0-1).
         """
-        # Start with shrinkage toward 0.5 (reduces overconfidence)
-        prior = 0.5
-        p_base = (1 - self.shrinkage_factor) * p_market + self.shrinkage_factor * prior
-
-        # Momentum adjustment
+        # BASELINE: Market is efficient - start with market price
+        # Only deviate when we have STRONG evidence the market is wrong
+        p_model = p_market
+        
+        # === MICRO-ADJUSTMENT FACTORS ===
+        # Small adjustments based on specific signals (NOT systematic shrinkage)
+        
+        adjustment = 0.0
+        adjustment_reasons = []
+        
+        # 1. ORDER BOOK IMBALANCE (only if significant)
+        # If orderbook is heavily imbalanced, price may move in that direction
+        orderbook_imbalance = features.get("order_book_imbalance", 0.0)
+        if abs(orderbook_imbalance) > 0.4:  # Strong imbalance (40%+)
+            # Expect price to move toward the imbalanced side
+            ob_adj = orderbook_imbalance * 0.02  # Max 2% adjustment
+            adjustment += ob_adj
+            adjustment_reasons.append(f"ob_imbalance_{orderbook_imbalance:.2f}")
+        
+        # 2. INFORMATION SIGNAL (unusual volume without price move)
+        volume_ratio = features.get("volume_ratio", 1.0)
+        if volume_ratio > 2.0:  # 2x+ normal volume
+            # High volume often precedes moves - but which direction?
+            # Use orderbook imbalance to guess direction
+            vol_adj = 0.01 * np.sign(orderbook_imbalance) if abs(orderbook_imbalance) > 0.2 else 0
+            adjustment += vol_adj
+            if vol_adj != 0:
+                adjustment_reasons.append("volume_spike")
+        
+        # 3. MOMENTUM (follow the trend, but weakly)
         momentum = features.get("momentum", 0)
-        momentum_adj = self.momentum_weight * momentum
-
-        # Mean reversion: extreme prices tend to revert
-        distance_from_center = abs(p_market - 0.5)
-        mean_reversion_adj = -self.mean_reversion_weight * distance_from_center * np.sign(
-            p_market - 0.5
-        )
-
-        # Combine adjustments
-        p_model = p_base + momentum_adj + mean_reversion_adj
-
+        if abs(momentum) > 0.03:  # 3%+ momentum
+            # Follow momentum but cap adjustment
+            mom_adj = np.sign(momentum) * min(abs(momentum) * 0.3, 0.02)
+            adjustment += mom_adj
+            adjustment_reasons.append(f"momentum_{momentum:.2f}")
+        
+        # 4. PRICE LEVEL EDGE (ONLY at extremes, OPPOSITE of old logic)
+        # At extremes, the MARKET often underestimates resolution probability
+        # Price at 0.10 often resolves to 0 (market is RIGHT, not wrong)
+        # BUT: Very extreme prices (0.05 or 0.95) may have value
+        if p_market < 0.08:
+            # Very low price - maybe slight value in buying (contrarian)
+            adjustment += 0.01
+            adjustment_reasons.append("extreme_low_contrarian")
+        elif p_market > 0.92:
+            # Very high price - maybe slight value in selling (contrarian)
+            adjustment -= 0.01
+            adjustment_reasons.append("extreme_high_contrarian")
+        # NO adjustment for middle-range prices (market is usually right)
+        
+        # 5. SPREAD-BASED CAUTION
+        # Wide spread = less confident in market price
+        spread_pct = features.get("spread_pct", 0)
+        if spread_pct > 0.08:  # 8%+ spread
+            # Reduce any adjustment - market is illiquid
+            adjustment *= 0.5
+            adjustment_reasons.append("wide_spread_dampening")
+        
+        # Apply adjustment with STRICT LIMITS
+        # Maximum deviation from market: 3%
+        max_deviation = 0.03
+        adjustment = max(-max_deviation, min(max_deviation, adjustment))
+        
+        p_model = p_market + adjustment
+        
         # Clamp to valid range
         p_model = max(0.01, min(0.99, p_model))
-
+        
+        # Log if significant adjustment
+        if abs(adjustment) >= 0.01:
+            logger.debug(
+                f"Baseline probability adjusted: market={p_market:.3f} -> model={p_model:.3f} "
+                f"(adj={adjustment:+.3f}, reasons={adjustment_reasons})"
+            )
+        
+        # Store adjustment info in features for debugging
+        features["baseline_adjustment"] = adjustment
+        features["baseline_reasons"] = adjustment_reasons
+        
         return p_model
 
     def _compute_confidence(self, features: dict[str, Any]) -> float:

@@ -229,6 +229,50 @@ class Settings(BaseSettings):
         description="Max slippage below best bid to accept for panic sells (e.g., 2% below bid)"
     )
     
+    # SMART HEURISTICS (Weighted Scoring Engine)
+    enable_smart_heuristics: bool = Field(
+        default=True,
+        description="Enable weighted scoring engine instead of binary rules"
+    )
+    smart_min_score_to_trade: float = Field(
+        default=0.15,
+        description="Minimum normalized score (0-1) to execute a trade"
+    )
+    
+    # PRE-TRADE SLIPPAGE CONTROL
+    enable_slippage_abort: bool = Field(
+        default=True,
+        description="Abort trade if estimated slippage exceeds edge"
+    )
+    max_slippage_of_edge_pct: float = Field(
+        default=30.0,
+        description="Abort if slippage > this % of edge (30 = abort if slippage eats 30%+ of edge)"
+    )
+    absolute_max_slippage_bps: int = Field(
+        default=100,
+        description="Never accept slippage > this many basis points (100 = 1%)"
+    )
+    
+    # GLOBAL STOP-LOSS (Listen-Only Mode)
+    enable_global_stop_loss: bool = Field(
+        default=True,
+        description="Enter listen-only mode when daily drawdown exceeds limit"
+    )
+    global_stop_loss_pct: float = Field(
+        default=10.0,
+        description="Enter listen-only mode if daily loss exceeds this % (10 = 10%)"
+    )
+    listen_only_duration_hours: int = Field(
+        default=24,
+        description="How long to stay in listen-only mode after stop-loss trigger"
+    )
+    
+    # POST-MORTEM LOGGING
+    enable_trade_postmortem: bool = Field(
+        default=True,
+        description="Enable detailed post-mortem logging for every trade"
+    )
+    
     # Advanced Market Analysis Settings
     enable_market_edge_intelligence: bool = Field(
         default=True,

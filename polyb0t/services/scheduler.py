@@ -52,7 +52,7 @@ class TradingScheduler:
         self.risk_manager = RiskManager()
         self.strategy = BaselineStrategy()
         self.market_filter = MarketFilter()
-        
+
         # Arbitrage scanner (optional)
         self.arbitrage_scanner = None
         if self.settings.enable_arbitrage_scanner:
@@ -173,6 +173,24 @@ class TradingScheduler:
                             "available_usdc": snap.available_usdc,
                         },
                     )
+                    
+                    # === GLOBAL STOP-LOSS CHECK ===
+                    # Update smart heuristics engine with current equity
+                    if self.settings.enable_global_stop_loss:
+                        try:
+                            from polyb0t.models.smart_heuristics import get_smart_heuristics_engine
+                            heuristics = get_smart_heuristics_engine()
+                            heuristics.update_equity(snap.total_usdc)
+                            
+                            if heuristics.is_listen_only():
+                                logger.warning(
+                                    "🛑 LISTEN-ONLY MODE: Bot is in observation mode due to drawdown. "
+                                    "No new positions will be opened.",
+                                    extra={"cycle_id": cycle_id, "total_usdc": snap.total_usdc},
+                                )
+                        except Exception as e:
+                            logger.debug(f"Global stop-loss check failed: {e}")
+                            
                 except Exception as e:
                     balance_summary = {"error": str(e)}
                     logger.warning(f"Balance snapshot unavailable: {e}")
@@ -803,8 +821,35 @@ class TradingScheduler:
                     except Exception:
                         daily_notional_used = 0.0
 
-                logger.info(f"Processing {len(signals)} signals. held_long_token_ids={held_long_token_ids}, live_allow_open_sell_intents={self.settings.live_allow_open_sell_intents}")
+                # Check if in listen-only mode (global stop-loss triggered)
+                is_listen_only = False
+                if self.settings.enable_global_stop_loss:
+                    try:
+                        from polyb0t.models.smart_heuristics import get_smart_heuristics_engine
+                        heuristics = get_smart_heuristics_engine()
+                        is_listen_only = heuristics.is_listen_only()
+                    except Exception:
+                        pass
+                
+                if is_listen_only:
+                    logger.warning(
+                        f"LISTEN-ONLY MODE: Skipping {len(signals)} signals due to global stop-loss",
+                        extra={"cycle_id": cycle_id, "signals_count": len(signals)},
+                    )
+                    # Still log what we would have done
+                    for s in signals[:3]:
+                        logger.info(
+                            f"[LISTEN-ONLY] Would have: {s.side} {s.token_id[:12]} @ {s.p_market:.3f} "
+                            f"(edge: {s.edge:+.3f})"
+                        )
+                else:
+                    logger.info(f"Processing {len(signals)} signals. held_long_token_ids={held_long_token_ids}, live_allow_open_sell_intents={self.settings.live_allow_open_sell_intents}")
+                
                 for signal in sorted(signals, key=lambda s: abs(s.edge), reverse=True):
+                    # Skip all new positions in listen-only mode
+                    if is_listen_only:
+                        rejected += 1
+                        continue
                     logger.info(f"Checking signal: token={signal.token_id[:20]}..., side={signal.side}, edge={signal.edge:.4f}")
                     # Safety: SELL can be ambiguous in live trading:
                     # - It can reduce/close an existing LONG position (including manual positions).
@@ -821,16 +866,16 @@ class TradingScheduler:
                     if signal.side == "SELL":
                         if not bool(getattr(self.settings, "live_allow_open_sell_intents", False)):
                             if signal.token_id not in held_long_token_ids:
-                                rejected += 1
-                                logger.info(
+                        rejected += 1
+                        logger.info(
                                     "Signal skipped: OPEN_POSITION SELL would open SHORT (live_allow_open_sell_intents=false)",
                                     extra={
                                         "token_id": signal.token_id,
                                         "market_id": signal.market_id,
                                         "edge": signal.edge,
                                     },
-                                )
-                                continue
+                        )
+                        continue
 
                     # Signals already have sizing computed, use it
                     size_usd = signal.sizing_result.size_usd_final if signal.sizing_result else 0.0

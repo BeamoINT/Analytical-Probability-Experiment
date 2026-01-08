@@ -324,7 +324,7 @@ class IntentManager:
         }
         if entry_price is not None:
             signal_data["entry_price"] = entry_price
-        
+
         intent = TradeIntent(
             intent_id=intent_id,
             intent_type=IntentType.CLOSE_POSITION,
