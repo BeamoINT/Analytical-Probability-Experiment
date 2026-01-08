@@ -281,6 +281,13 @@ class LiveExecutor:
     ) -> dict[str, Any]:
         """Execute position closing order.
 
+        Uses "panic sell" (market sell at best bid) when:
+        - Price has dropped significantly from entry
+        - Always for diversification cleanup sells
+        - Always when stop_loss is triggered
+        
+        This ensures quick fills and prevents holding losing positions.
+
         Args:
             intent: Trade intent.
             cycle_id: Current cycle ID.
@@ -288,9 +295,6 @@ class LiveExecutor:
         Returns:
             Execution result.
         """
-        # Similar to open_position but for closing
-        # Would use same CLOB API but with opposite side
-
         order_details = {
             "token_id": intent.token_id,
             "market_id": intent.market_id,
@@ -311,6 +315,12 @@ class LiveExecutor:
                 ),
             }
 
+        # Initialize variables
+        actual_shares = 0.0
+        actual_size_usd = float(intent.size_usd or 0.0)
+        best_bid = float(intent.price or 0.0)
+        use_market_sell = self.settings.enable_panic_sell  # Default to market sell for faster fills
+        
         # Check if we actually have tokens to sell before attempting
         try:
             from py_clob_client.client import ClobClient
@@ -329,13 +339,32 @@ class LiveExecutor:
                 signature_type=int(self.settings.signature_type),
                 funder=funder_addr,
             )
+            
+            # Get token balance
             balance_result = check_client.get_balance_allowance(
                 BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=intent.token_id)
             )
             token_balance = int(balance_result.get("balance", 0))
             token_allowance = int(balance_result.get("allowance", 0))
             
-            # Log the balance check result for debugging
+            # Get best bid from orderbook for market sell pricing
+            try:
+                orderbook = check_client.get_order_book(intent.token_id)
+                bids = orderbook.get("bids", [])
+                if bids:
+                    # Best bid is highest price someone will pay
+                    best_bid = float(bids[0].get("price", intent.price or 0.01))
+                    logger.info(f"Best bid for market sell: {best_bid:.4f}", extra={"token_id": intent.token_id[:20]})
+                else:
+                    # No bids - use a very low price to ensure fill
+                    best_bid = max(0.01, float(intent.price or 0.01) * 0.5)
+                    logger.warning(f"No bids found, using floor price: {best_bid:.4f}")
+            except Exception as e:
+                logger.warning(f"Could not fetch orderbook: {e}")
+                # Fall back to intent price with slippage
+                best_bid = max(0.01, float(intent.price or 0.01) * 0.95)
+            
+            # Log the balance check result
             logger.info(
                 f"Balance check for CLOSE_POSITION: balance={token_balance / 1e6:.2f} shares, allowance={token_allowance / 1e6:.2f}",
                 extra={
@@ -343,6 +372,7 @@ class LiveExecutor:
                     "balance_raw": token_balance,
                     "allowance_raw": token_allowance,
                     "funder_address": funder_addr,
+                    "best_bid": best_bid,
                 },
             )
             
@@ -366,23 +396,37 @@ class LiveExecutor:
                     extra={"token_id": intent.token_id[:20]},
                 )
             
-            # CRITICAL: Use actual balance for sell size, not the stale intent data
-            # This prevents "not enough balance" errors when position data is stale
+            # CRITICAL: Use actual balance for sell size
             actual_shares = token_balance / 1e6
-            actual_size_usd = actual_shares * float(intent.price or 0.0)
+            
+            # Determine sell price: use best bid for market sell
+            sell_price = best_bid if use_market_sell else float(intent.price or 0.0)
+            
+            # Apply slippage tolerance for market sell to ensure fill
+            if use_market_sell:
+                slippage_factor = 1.0 - (self.settings.panic_sell_min_fill_slippage_pct / 100.0)
+                sell_price = max(0.005, sell_price * slippage_factor)  # Minimum 0.5 cents
+                order_details["order_type"] = "MARKET_SELL"
+                order_details["slippage_applied"] = self.settings.panic_sell_min_fill_slippage_pct
+            
+            actual_size_usd = actual_shares * sell_price
             
             # Update order_details to reflect actual values
             order_details["actual_shares"] = actual_shares
             order_details["actual_size_usd"] = actual_size_usd
             order_details["intent_size_usd"] = float(intent.size_usd or 0.0)
+            order_details["sell_price"] = sell_price
+            order_details["best_bid"] = best_bid
+            order_details["use_market_sell"] = use_market_sell
             
         except Exception as e:
             logger.warning(f"Could not check token balance before sell: {e}", exc_info=True)
             # Fall back to intent values if balance check fails
             actual_size_usd = float(intent.size_usd or 0.0)
+            sell_price = float(intent.price or 0.0)
 
         logger.warning(
-            "LIVE CLOSE ORDER: attempting best-effort submit",
+            f"LIVE CLOSE ORDER: {'MARKET SELL' if use_market_sell else 'LIMIT SELL'} @ {sell_price:.4f}",
             extra=order_details,
         )
 
@@ -399,18 +443,19 @@ class LiveExecutor:
                 signature_type=int(self.settings.signature_type),
                 funder=(self.settings.funder_address or self.settings.user_address),
             )
-            # Use actual_size_usd which is based on real balance, not stale position data
+            
+            # Use market sell price (best bid with slippage) for faster fills
             res = client.submit_limit_order(
                 token_id=intent.token_id,
                 side=intent.side or "SELL",
-                price=float(intent.price or 0.0),
+                price=sell_price,
                 size_usd=actual_size_usd,
                 fee_rate_bps=int(self.settings.fee_bps),
             )
             client.close()
             if not res.success:
                 return {"success": False, "error": res.message, "status_code": res.status_code, "raw": res.raw}
-            return {"success": True, "order_id": res.order_id, "message": "Close order submitted", "details": order_details}
+            return {"success": True, "order_id": res.order_id, "message": f"Close order submitted ({'market' if use_market_sell else 'limit'})", "details": order_details}
         except Exception as e:
             return {"success": False, "error": f"Close submit error: {e}"}
 

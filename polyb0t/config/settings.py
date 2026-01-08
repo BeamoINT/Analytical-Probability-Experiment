@@ -181,6 +181,24 @@ class Settings(BaseSettings):
     take_profit_pct: float = Field(default=10.0, description="Take profit at % gain")
     enable_stop_loss: bool = Field(default=True, description="Enable stop-loss proposals")
     stop_loss_pct: float = Field(default=5.0, description="Stop loss at % loss")
+    
+    # Panic Sell / Market Sell Settings
+    enable_panic_sell: bool = Field(
+        default=True,
+        description="Sell at market (best bid) instead of limit when price drops fast"
+    )
+    panic_sell_price_drop_pct: float = Field(
+        default=10.0,
+        description="Trigger panic sell if price dropped by this % from entry"
+    )
+    panic_sell_order_age_seconds: int = Field(
+        default=300,
+        description="Convert unfilled limit sell to market sell after this many seconds"
+    )
+    panic_sell_min_fill_slippage_pct: float = Field(
+        default=2.0,
+        description="Max slippage below best bid to accept for panic sells (e.g., 2% below bid)"
+    )
     enable_time_exit: bool = Field(
         default=True, description="Enable time-based exit proposals"
     )

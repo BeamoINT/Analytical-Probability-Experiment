@@ -233,6 +233,28 @@ class TradingScheduler:
                 except Exception as e:
                     account_state_summary = {"error": str(e)}
 
+                # Handle stale orders: cancel old unfilled sell orders and resubmit at market price
+                # This prevents holding losing positions while waiting for limit orders to fill
+                if self.settings.enable_panic_sell and not self.settings.dry_run:
+                    try:
+                        from polyb0t.services.stale_order_manager import StaleOrderManager
+                        
+                        stale_manager = StaleOrderManager()
+                        stale_result = stale_manager.process_stale_orders()
+                        
+                        if stale_result.get("resubmitted", 0) > 0:
+                            logger.info(
+                                f"Stale order refresh: {stale_result['resubmitted']} orders resubmitted at market price",
+                                extra=stale_result,
+                            )
+                        elif stale_result.get("stale_orders", 0) > 0:
+                            logger.warning(
+                                f"Stale orders detected but resubmit failed",
+                                extra=stale_result,
+                            )
+                    except Exception as e:
+                        logger.warning(f"Stale order check failed: {e}")
+
                 if self.settings.dry_run:
                     logger.info(
                         "Dry-run live mode: no positions will be opened; intents are recommendations only",
