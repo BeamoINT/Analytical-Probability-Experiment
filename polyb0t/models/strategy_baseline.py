@@ -264,8 +264,8 @@ class BaselineStrategy:
                     orderbook=ob_dict,
                     current_price=p_market,
                     price_history=price_history,
-                    volume_24h=float(features.get("volume_24h", 0) or market.volume_24h or 0),
-                    avg_volume=float(features.get("avg_volume", 0) or market.volume_24h or 1),
+                    volume_24h=float(features.get("volume_24h", 0) or market.volume or 0),
+                    avg_volume=float(features.get("avg_volume", 0) or market.volume or 1),
                 )
                 
                 # Store microstructure data in features
