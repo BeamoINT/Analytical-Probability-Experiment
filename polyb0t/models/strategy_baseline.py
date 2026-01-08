@@ -95,6 +95,20 @@ class BaselineStrategy:
         # Minimum net edge threshold (after fees/slippage)
         self.min_net_edge = 0.02  # Require at least 2% net edge
         
+        # Microstructure analysis (advanced signals)
+        self.microstructure_analyzer = None
+        self.kelly_sizer = None
+        if self.settings.enable_microstructure_analysis:
+            from polyb0t.models.market_microstructure import (
+                MicrostructureAnalyzer,
+                KellyCriterionSizer,
+            )
+            self.microstructure_analyzer = MicrostructureAnalyzer()
+            if self.settings.enable_kelly_sizing:
+                self.kelly_sizer = KellyCriterionSizer(
+                    kelly_fraction=self.settings.kelly_fraction
+                )
+        
         # ML components (optional)
         self.ml_feature_engine = None
         self.ml_model_manager = None
@@ -228,8 +242,104 @@ class BaselineStrategy:
         # Determine side
         side = "BUY" if edge_raw > 0 else "SELL"
         
+        # === MICROSTRUCTURE ANALYSIS ===
+        # Check order book imbalance, momentum, and entry timing
+        microstructure_signal = None
+        if self.microstructure_analyzer and orderbook:
+            try:
+                # Convert orderbook to dict format
+                ob_dict = {
+                    "bids": [{"price": l.price, "size": l.size} for l in (orderbook.bids or [])],
+                    "asks": [{"price": l.price, "size": l.size} for l in (orderbook.asks or [])],
+                }
+                
+                # Get price history from features if available
+                price_history = features.get("price_history", [])
+                if not price_history and features.get("last_price"):
+                    # Create minimal price history
+                    price_history = [{"price": p_market}, {"price": features.get("last_price", p_market)}]
+                
+                microstructure_signal = self.microstructure_analyzer.analyze(
+                    token_id=market.outcomes[outcome_idx].token_id,
+                    orderbook=ob_dict,
+                    current_price=p_market,
+                    price_history=price_history,
+                    volume_24h=float(features.get("volume_24h", 0) or market.volume_24h or 0),
+                    avg_volume=float(features.get("avg_volume", 0) or market.volume_24h or 1),
+                )
+                
+                # Store microstructure data in features
+                features["microstructure"] = microstructure_signal.to_dict()
+                features["order_book_imbalance"] = microstructure_signal.order_book_imbalance
+                features["is_falling_knife"] = microstructure_signal.is_falling_knife
+                features["is_pump"] = microstructure_signal.is_pump
+                features["entry_score"] = microstructure_signal.entry_score
+                
+                # === REJECT FALLING KNIVES ===
+                if side == "BUY" and self.settings.avoid_falling_knives:
+                    if microstructure_signal.is_falling_knife:
+                        logger.info(
+                            f"Rejecting signal: falling knife detected (24h momentum: {microstructure_signal.price_momentum_24h:.1%})",
+                            extra={"token_id": market.outcomes[outcome_idx].token_id[:20]},
+                        )
+                        return None, "falling_knife_detected"
+                
+                # === REJECT CHASING PUMPS ===
+                if side == "BUY" and self.settings.avoid_chasing_pumps:
+                    if microstructure_signal.is_pump:
+                        logger.info(
+                            f"Rejecting signal: pump detected, don't chase (24h momentum: {microstructure_signal.price_momentum_24h:.1%})",
+                            extra={"token_id": market.outcomes[outcome_idx].token_id[:20]},
+                        )
+                        return None, "pump_chasing_rejected"
+                
+                # === CHECK ORDER BOOK IMBALANCE ===
+                if side == "BUY" and self.settings.min_orderbook_imbalance > 0:
+                    if microstructure_signal.order_book_imbalance < self.settings.min_orderbook_imbalance:
+                        logger.debug(
+                            f"Rejecting: orderbook imbalance {microstructure_signal.order_book_imbalance:.2f} "
+                            f"< threshold {self.settings.min_orderbook_imbalance:.2f}"
+                        )
+                        return None, "orderbook_imbalance_unfavorable"
+                
+                # === CHECK SPREAD ===
+                if microstructure_signal.spread_pct > self.settings.max_spread_for_entry:
+                    logger.debug(
+                        f"Rejecting: spread {microstructure_signal.spread_pct:.2%} too wide "
+                        f"(max: {self.settings.max_spread_for_entry:.2%})"
+                    )
+                    return None, "spread_too_wide"
+                
+                # === CHECK LIQUIDITY DEPTH ===
+                if microstructure_signal.bid_depth_usd < self.settings.min_liquidity_depth_usd:
+                    logger.debug(
+                        f"Rejecting: bid depth ${microstructure_signal.bid_depth_usd:.0f} "
+                        f"< minimum ${self.settings.min_liquidity_depth_usd:.0f}"
+                    )
+                    return None, "insufficient_liquidity"
+                
+                # === SHOULD WAIT FOR BETTER ENTRY ===
+                if microstructure_signal.should_wait:
+                    logger.info(
+                        f"Rejecting signal: {microstructure_signal.wait_reason}",
+                        extra={"token_id": market.outcomes[outcome_idx].token_id[:20]},
+                    )
+                    return None, "bad_entry_timing"
+                    
+            except Exception as e:
+                logger.warning(f"Microstructure analysis failed: {e}")
+                # Continue without microstructure analysis
+        
         # Confidence based on data quality
         confidence = self._compute_confidence(features)
+        
+        # Boost confidence if microstructure signals align
+        if microstructure_signal:
+            # If entry_score is positive and aligns with our edge, boost confidence
+            if (edge_raw > 0 and microstructure_signal.entry_score > 0.3) or \
+               (edge_raw < 0 and microstructure_signal.entry_score < -0.3):
+                confidence = min(1.0, confidence * 1.2)
+                features["confidence_boosted"] = "microstructure_alignment"
 
         # Estimate initial position size for fill estimation
         sizing = self.position_sizer.compute_size(
@@ -271,6 +381,60 @@ class BaselineStrategy:
             reserved_usdc=reserved_usdc,
         )
         
+        # === KELLY CRITERION SIZING ===
+        # Use Kelly for optimal position sizing if enabled
+        kelly_size_usd = sizing_final.size_usd_final
+        if self.kelly_sizer and side == "BUY":
+            try:
+                kelly_result = self.kelly_sizer.calculate_position_size(
+                    bankroll=available_usdc + reserved_usdc,
+                    market_price=p_market,
+                    estimated_probability=p_model,
+                    max_position_pct=self.settings.max_position_pct / 100.0,
+                    min_edge=self.settings.min_net_edge,
+                )
+                
+                if kelly_result["should_bet"]:
+                    kelly_size_usd = kelly_result["recommended_size_usd"]
+                    features["kelly_recommended_pct"] = kelly_result["recommended_pct"]
+                    features["kelly_edge_pct"] = kelly_result["edge_pct"]
+                    features["kelly_full_fraction"] = kelly_result["full_kelly_fraction"]
+                    
+                    # Use the smaller of position sizer and Kelly (conservative)
+                    if kelly_size_usd < sizing_final.size_usd_final:
+                        sizing_final.size_usd_final = kelly_size_usd
+                        sizing_final.sizing_reason = f"kelly_optimal_{kelly_result['recommended_pct']:.1f}pct"
+                        features["sizing_method"] = "kelly_criterion"
+                    else:
+                        features["sizing_method"] = "position_sizer"
+                else:
+                    # Kelly says don't bet - but we passed edge threshold, so use small size
+                    features["kelly_no_bet_reason"] = kelly_result.get("reason", "unknown")
+                    features["sizing_method"] = "position_sizer_override_kelly"
+                    
+            except Exception as e:
+                logger.warning(f"Kelly sizing failed: {e}")
+                features["sizing_method"] = "position_sizer_kelly_error"
+        
+        # === VOLUME SPIKE BOOST ===
+        # Increase size when unusual volume detected (early accumulation signal)
+        if microstructure_signal and self.settings.enable_volume_spike_boost:
+            if microstructure_signal.is_volume_spike and side == "BUY":
+                original_size = sizing_final.size_usd_final
+                boosted_size = original_size * self.settings.volume_spike_size_multiplier
+                
+                # Cap at maximum
+                max_size = (available_usdc + reserved_usdc) * (self.settings.max_position_pct / 100.0)
+                sizing_final.size_usd_final = min(boosted_size, max_size)
+                
+                if sizing_final.size_usd_final > original_size:
+                    features["volume_spike_boost_applied"] = True
+                    features["volume_spike_ratio"] = microstructure_signal.volume_ratio
+                    logger.info(
+                        f"Volume spike boost: ${original_size:.2f} -> ${sizing_final.size_usd_final:.2f} "
+                        f"(volume {microstructure_signal.volume_ratio:.1f}x normal)"
+                    )
+        
         # Final size check
         if sizing_final.size_usd_final < self.settings.min_order_usd:
             return None, f"final_size_below_minimum_{sizing_final.sizing_reason}"
@@ -282,6 +446,7 @@ class BaselineStrategy:
         features["fill_levels_consumed"] = fill_est.levels_consumed
         features["sizing_reason"] = sizing_final.sizing_reason
         features["kelly_fraction"] = sizing_final.kelly_fraction
+        features["final_size_usd"] = sizing_final.size_usd_final
 
         outcome = market.outcomes[outcome_idx]
         return TradingSignal(

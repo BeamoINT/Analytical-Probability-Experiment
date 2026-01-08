@@ -199,6 +199,48 @@ class Settings(BaseSettings):
         default=2.0,
         description="Max slippage below best bid to accept for panic sells (e.g., 2% below bid)"
     )
+    
+    # Advanced Market Analysis Settings
+    enable_microstructure_analysis: bool = Field(
+        default=True,
+        description="Enable advanced order book and momentum analysis"
+    )
+    enable_kelly_sizing: bool = Field(
+        default=True,
+        description="Use Kelly Criterion for optimal position sizing"
+    )
+    kelly_fraction: float = Field(
+        default=0.25,
+        description="Fraction of full Kelly to use (0.25 = quarter Kelly, more conservative)"
+    )
+    avoid_falling_knives: bool = Field(
+        default=True,
+        description="Avoid buying when price dropped >15% in 24h"
+    )
+    avoid_chasing_pumps: bool = Field(
+        default=True,
+        description="Avoid buying when price increased >20% in 24h"
+    )
+    min_orderbook_imbalance: float = Field(
+        default=0.0,
+        description="Minimum order book imbalance to buy (-1 to 1, 0 = any, 0.3 = bullish)"
+    )
+    min_liquidity_depth_usd: float = Field(
+        default=100.0,
+        description="Minimum USD depth on bid side to consider market liquid"
+    )
+    max_spread_for_entry: float = Field(
+        default=0.05,
+        description="Maximum bid-ask spread to enter (5% = 0.05)"
+    )
+    enable_volume_spike_boost: bool = Field(
+        default=True,
+        description="Increase position size on volume spikes (early accumulation signal)"
+    )
+    volume_spike_size_multiplier: float = Field(
+        default=1.5,
+        description="Multiply position size by this when volume spike detected"
+    )
     enable_time_exit: bool = Field(
         default=True, description="Enable time-based exit proposals"
     )
