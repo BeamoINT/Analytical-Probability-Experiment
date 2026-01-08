@@ -264,6 +264,8 @@ class IntentManager:
         size: float,
         reason: str,
         cycle_id: str,
+        is_emergency: bool = False,
+        entry_price: float | None = None,
     ) -> TradeIntent | None:
         """Create exit intent.
 
@@ -273,8 +275,10 @@ class IntentManager:
             side: SELL (to close long) or BUY (to close short).
             price: Exit price.
             size: Position size to close.
-            reason: Exit reason (take-profit, stop-loss, time-based).
+            reason: Exit reason (take-profit, stop-loss, time-based, crash).
             cycle_id: Current cycle ID.
+            is_emergency: If True, execute immediately at market (crash protection).
+            entry_price: Original entry price (for PnL calculation).
 
         Returns:
             Created TradeIntent, or None if skipped due to dedup/cooldown.
@@ -312,6 +316,15 @@ class IntentManager:
         # size_usd = shares * price (the notional value of the position being closed)
         size_usd_value = size * price
 
+        # Build signal_data with exit context
+        signal_data = {
+            "exit_intent": True,
+            "size_shares": size,
+            "is_emergency": is_emergency,
+        }
+        if entry_price is not None:
+            signal_data["entry_price"] = entry_price
+        
         intent = TradeIntent(
             intent_id=intent_id,
             intent_type=IntentType.CLOSE_POSITION,
@@ -326,6 +339,7 @@ class IntentManager:
             reason=reason,
             risk_checks={"exit_intent": True, "size_shares": size},
             fingerprint=fingerprint,
+            signal_data=signal_data,
         )
 
         self._persist_intent(intent, cycle_id)

@@ -282,10 +282,15 @@ class LiveExecutor:
         """Execute position closing order.
 
         Uses "panic sell" (market sell at best bid) ONLY when:
+        - CRASH EXIT: Emergency flag is set (massive drop detected)
         - Price has dropped significantly from entry (configurable threshold)
         - Stop-loss triggered (reason contains "stop")
         
         Otherwise uses normal limit orders for better fill prices.
+        
+        CONSERVATIVE APPROACH:
+        - Normal exits use limit orders (wait for good price)
+        - Only crash/panic exits use market orders
 
         Args:
             intent: Trade intent.
@@ -318,9 +323,26 @@ class LiveExecutor:
         actual_shares = 0.0
         actual_size_usd = float(intent.size_usd or 0.0)
         best_bid = float(intent.price or 0.0)
-        use_market_sell = False  # Default: use limit orders
+        use_market_sell = False  # Default: use limit orders (conservative)
         entry_price: float | None = None
         price_drop_pct: float = 0.0
+        
+        # Check if this is an EMERGENCY (crash) exit - always use market sell
+        is_emergency = False
+        if intent.signal_data and isinstance(intent.signal_data, dict):
+            is_emergency = intent.signal_data.get("is_emergency", False)
+        
+        # Also check reason for CRASH_EXIT indicator
+        reason_lower = (intent.reason or "").lower()
+        if "crash" in reason_lower or "🚨" in (intent.reason or ""):
+            is_emergency = True
+        
+        if is_emergency:
+            use_market_sell = True
+            logger.warning(
+                f"🚨 EMERGENCY EXIT: Using immediate market sell",
+                extra={"token_id": intent.token_id[:20], "reason": intent.reason}
+            )
         
         # Check if we actually have tokens to sell before attempting
         try:

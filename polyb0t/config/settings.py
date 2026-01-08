@@ -180,7 +180,36 @@ class Settings(BaseSettings):
     enable_take_profit: bool = Field(default=True, description="Enable take-profit proposals")
     take_profit_pct: float = Field(default=10.0, description="Take profit at % gain")
     enable_stop_loss: bool = Field(default=True, description="Enable stop-loss proposals")
-    stop_loss_pct: float = Field(default=5.0, description="Stop loss at % loss")
+    stop_loss_pct: float = Field(default=15.0, description="Stop loss at % loss (conservative - only for sustained losses)")
+    
+    # Conservative Loss Management
+    # The bot should NOT sell at small losses - wait for potential recovery
+    stop_loss_confirmation_cycles: int = Field(
+        default=5,
+        description="Number of consecutive cycles position must be below stop-loss before selling (prevents panic on dips)"
+    )
+    loss_recovery_window_minutes: int = Field(
+        default=30,
+        description="Give position this many minutes to recover before considering stop-loss"
+    )
+    min_hold_time_minutes: int = Field(
+        default=15,
+        description="Never sell at a loss within this time of entry (avoid whipsaws)"
+    )
+    
+    # Crash Detection (Emergency Exit) - for MASSIVE rapid drops only
+    enable_crash_detection: bool = Field(
+        default=True,
+        description="Enable emergency exit when price crashes rapidly"
+    )
+    crash_threshold_pct: float = Field(
+        default=25.0,
+        description="Emergency exit if price drops by this % or more from entry"
+    )
+    crash_velocity_pct_per_minute: float = Field(
+        default=2.0,
+        description="Emergency exit if price is dropping faster than this % per minute"
+    )
     
     # Panic Sell / Market Sell Settings
     enable_panic_sell: bool = Field(
@@ -188,8 +217,8 @@ class Settings(BaseSettings):
         description="Sell at market (best bid) instead of limit when price drops fast"
     )
     panic_sell_price_drop_pct: float = Field(
-        default=10.0,
-        description="Trigger panic sell if price dropped by this % from entry"
+        default=25.0,
+        description="Trigger panic sell if price dropped by this % from entry (only for crashes)"
     )
     panic_sell_order_age_seconds: int = Field(
         default=300,

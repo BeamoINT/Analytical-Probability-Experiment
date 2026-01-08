@@ -666,6 +666,11 @@ class TradingScheduler:
                         fallback_prices=fallback_prices,
                     )
                     for prop in proposals:
+                        # Get entry price from position for PnL tracking
+                        entry_price = None
+                        if prop.token_id in observed_positions:
+                            entry_price = observed_positions[prop.token_id].avg_entry_price
+                        
                         intent = intent_manager.create_exit_intent(
                             token_id=prop.token_id,
                             market_id=prop.market_id,
@@ -674,11 +679,18 @@ class TradingScheduler:
                             size=prop.size,
                             reason=prop.reason,
                             cycle_id=cycle_id,
+                            is_emergency=prop.is_emergency,
+                            entry_price=entry_price,
                         )
                         if intent is None:
                             exit_skipped += 1
                         else:
                             exit_created += 1
+                            if prop.is_emergency:
+                                logger.warning(
+                                    f"🚨 CRASH EXIT intent created for {prop.token_id[:12]}",
+                                    extra={"exit_type": prop.exit_type, "reason": prop.reason}
+                                )
                 except Exception as e:
                     logger.warning(f"Exit intent proposal skipped due to error: {e}")
 
