@@ -866,16 +866,16 @@ class TradingScheduler:
                     if signal.side == "SELL":
                         if not bool(getattr(self.settings, "live_allow_open_sell_intents", False)):
                             if signal.token_id not in held_long_token_ids:
-                        rejected += 1
-                        logger.info(
+                                rejected += 1
+                                logger.info(
                                     "Signal skipped: OPEN_POSITION SELL would open SHORT (live_allow_open_sell_intents=false)",
                                     extra={
                                         "token_id": signal.token_id,
                                         "market_id": signal.market_id,
                                         "edge": signal.edge,
                                     },
-                        )
-                        continue
+                                )
+                                continue
 
                     # Signals already have sizing computed, use it
                     size_usd = signal.sizing_result.size_usd_final if signal.sizing_result else 0.0
