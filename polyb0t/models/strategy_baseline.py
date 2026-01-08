@@ -11,6 +11,7 @@ from polyb0t.data.models import Market, OrderBook, Trade
 from polyb0t.models.features import FeatureEngine
 from polyb0t.models.fill_estimation import FillPriceEstimator, FillEstimate
 from polyb0t.models.position_sizing import PositionSizer, SizingResult
+from polyb0t.models.market_edge import get_market_edge_engine, MarketEdgeEngine
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +95,15 @@ class BaselineStrategy:
         
         # Minimum net edge threshold (after fees/slippage)
         self.min_net_edge = 0.02  # Require at least 2% net edge
+        
+        # Market Edge Intelligence (smarter rules-based edge)
+        self.market_edge_engine: MarketEdgeEngine | None = None
+        if self.settings.enable_market_edge_intelligence:
+            try:
+                self.market_edge_engine = get_market_edge_engine()
+                logger.info("Market Edge Intelligence engine initialized")
+            except Exception as e:
+                logger.warning(f"Failed to initialize Market Edge engine: {e}")
         
         # Microstructure analysis (advanced signals)
         self.microstructure_analyzer = None
@@ -228,6 +238,63 @@ class BaselineStrategy:
 
         # Raw edge (mid-price based)
         edge_raw = p_model - p_market
+        
+        # === MARKET EDGE INTELLIGENCE ===
+        # Apply smarter edge calculation using multi-factor analysis
+        edge_score = None
+        if self.market_edge_engine:
+            try:
+                # Convert orderbook for edge engine
+                ob_dict = None
+                if orderbook:
+                    ob_dict = {
+                        "bids": [{"price": l.price, "size": l.size} for l in (orderbook.bids or [])],
+                        "asks": [{"price": l.price, "size": l.size} for l in (orderbook.asks or [])],
+                    }
+                
+                # Convert trades for edge engine
+                trades_dict = None
+                if recent_trades:
+                    trades_dict = [
+                        {"price": t.price, "size": t.size, "side": t.side, "timestamp": t.timestamp}
+                        for t in recent_trades
+                    ]
+                
+                # Get days to resolution
+                days_to_resolution = None
+                if market.end_date:
+                    days_to_resolution = (market.end_date - datetime.utcnow()).total_seconds() / 86400
+                
+                # Compute edge score with market intelligence
+                edge_score = self.market_edge_engine.compute_edge(
+                    token_id=market.outcomes[outcome_idx].token_id,
+                    current_price=p_market,
+                    p_model=p_model,
+                    orderbook=ob_dict,
+                    recent_trades=trades_dict,
+                    market_category=getattr(market, "category", None),
+                    days_to_resolution=days_to_resolution,
+                    volume_24h=float(features.get("volume_24h", 0) or market.volume or 0),
+                )
+                
+                # Store edge intelligence features
+                features.update(edge_score.to_dict())
+                
+                # Use composite edge if it provides stronger signal
+                if abs(edge_score.composite_edge) > abs(edge_raw) * 0.8:
+                    # Blend raw edge with composite edge
+                    edge_raw = 0.6 * edge_raw + 0.4 * edge_score.composite_edge
+                    features["edge_source"] = "market_intelligence_blend"
+                else:
+                    features["edge_source"] = "raw_model"
+                
+                # Boost confidence based on edge score confidence
+                if edge_score.confidence > 0.7:
+                    features["intelligence_confidence_boost"] = True
+                    
+            except Exception as e:
+                logger.debug(f"Market edge intelligence failed: {e}")
+                features["edge_source"] = "raw_model_fallback"
         
         # Check raw edge threshold
         if abs(edge_raw) < self.settings.edge_threshold:
@@ -733,6 +800,48 @@ class BaselineStrategy:
                         ml_features['market_volume'] = float(market.volume or 0)
                         ml_features['market_liquidity'] = float(market.liquidity or 0)
                         ml_features['market_active'] = float(market.active)
+                        
+                        # Add Market Edge Intelligence features for smarter learning
+                        if self.market_edge_engine:
+                            try:
+                                # Convert orderbook for edge engine
+                                ob_dict = None
+                                if orderbook and orderbook.bids and orderbook.asks:
+                                    ob_dict = {
+                                        "bids": [{"price": l.price, "size": l.size} for l in orderbook.bids],
+                                        "asks": [{"price": l.price, "size": l.size} for l in orderbook.asks],
+                                    }
+                                
+                                # Convert trades
+                                trades_dict = None
+                                if token_trades:
+                                    trades_dict = [
+                                        {"price": t.price, "size": t.size, "side": t.side, "timestamp": t.timestamp}
+                                        for t in token_trades
+                                    ]
+                                
+                                # Get days to resolution
+                                days_to_resolution = None
+                                if market.end_date:
+                                    days_to_resolution = (market.end_date - datetime.utcnow()).total_seconds() / 86400
+                                
+                                # Get all edge features for ML training
+                                edge_features = self.market_edge_engine.get_all_features(
+                                    token_id=token_id,
+                                    current_price=current_price,
+                                    p_model=current_price,  # Use market price as baseline
+                                    orderbook=ob_dict,
+                                    recent_trades=trades_dict,
+                                    market_category=getattr(market, "category", None),
+                                    days_to_resolution=days_to_resolution,
+                                    volume_24h=float(market.volume or 0),
+                                )
+                                
+                                # Merge edge features into ML features
+                                ml_features.update(edge_features)
+                                
+                            except Exception as e:
+                                logger.debug(f"Failed to compute edge features for {token_id}: {e}")
                         
                         features_dict[token_id] = ml_features
                         prices[token_id] = current_price

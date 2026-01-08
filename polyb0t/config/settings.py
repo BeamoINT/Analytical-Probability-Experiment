@@ -230,6 +230,10 @@ class Settings(BaseSettings):
     )
     
     # Advanced Market Analysis Settings
+    enable_market_edge_intelligence: bool = Field(
+        default=True,
+        description="Enable smart edge detection with contrarian, momentum, and multi-factor analysis"
+    )
     enable_microstructure_analysis: bool = Field(
         default=True,
         description="Enable advanced order book and momentum analysis"
