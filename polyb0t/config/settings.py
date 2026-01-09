@@ -69,7 +69,10 @@ class Settings(BaseSettings):
         default=20, description="Max orders allowed per hour (rate limit)"
     )
     max_notional_per_market: float = Field(
-        default=50.0, description="Max dollar exposure per market (diversification limit)"
+        default=100000.0, description="Max dollar exposure per market (set high to use percentage instead)"
+    )
+    max_market_exposure_pct: float = Field(
+        default=15.0, description="Max exposure per single market as % of portfolio (diversification)"
     )
     max_positions_per_market: int = Field(
         default=1, description="Max number of positions allowed per market (1 = strict diversification)"

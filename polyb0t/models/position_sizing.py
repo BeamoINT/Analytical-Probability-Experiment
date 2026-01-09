@@ -122,15 +122,19 @@ class PositionSizer:
         min_order = float(self.settings.min_order_usd)
         max_order = float(self.settings.max_order_usd)
         
-        # Cap 5: Per-market diversification limit (prevents all-in on one thing)
-        max_per_market = float(self.settings.max_notional_per_market)
+        # Cap 5: Per-market diversification limit (PERCENTAGE-BASED)
+        # Use the smaller of: fixed dollar limit OR percentage of portfolio
+        max_per_market_fixed = float(self.settings.max_notional_per_market)
+        max_per_market_pct = total_bankroll * (float(self.settings.max_market_exposure_pct) / 100.0)
+        max_per_market = min(max_per_market_fixed, max_per_market_pct)
         
         size_final = max(0, min(after_exposure_cap, max_order, max_per_market))
         
         actual_pct = (size_final / available_usdc * 100) if available_usdc > 0 else 0
+        market_pct = (size_final / total_bankroll * 100) if total_bankroll > 0 else 0
         logger.info(
-            f"Position size: ${size_final:.2f} ({actual_pct:.1f}% of ${available_usdc:.2f} available) "
-            f"[edge={edge_abs*100:.1f}%, confidence={confidence:.0%}, max_per_market=${max_per_market:.0f}]"
+            f"Position size: ${size_final:.2f} ({market_pct:.1f}% of ${total_bankroll:.2f} portfolio) "
+            f"[edge={edge_abs*100:.1f}%, max_per_market=${max_per_market:.0f} ({self.settings.max_market_exposure_pct}%)]"
         )
 
         # Determine primary reason for final size
