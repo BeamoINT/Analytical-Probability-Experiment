@@ -674,9 +674,29 @@ class TradingScheduler:
                         for o in m.outcomes:
                             if o.token_id and o.price is not None:
                                 fallback_prices[o.token_id] = float(o.price)
+                    
+                    # CRITICAL: Add position prices from account state (positions may not be in tradable_markets)
+                    for p in account_state.positions:
+                        if p.token_id and p.current_price and p.current_price > 0:
+                            fallback_prices[p.token_id] = float(p.current_price)
+                            logger.debug(f"Added position price: {p.token_id[:12]} @ {p.current_price:.3f}")
 
                     markets_by_id = {m.condition_id: m for m in tradable_markets}
                     exit_mgr = ExitManager()
+                    
+                    # Log position details for debugging exit logic
+                    for tok, pos in observed_positions.items():
+                        cur_price = fallback_prices.get(tok) or orderbooks.get(tok, None)
+                        if cur_price and hasattr(cur_price, 'bids') and cur_price.bids:
+                            cur_price = (cur_price.bids[0].price + cur_price.asks[0].price) / 2
+                        pnl_pct = 0
+                        if pos.avg_entry_price > 0 and cur_price:
+                            pnl_pct = ((cur_price - pos.avg_entry_price) / pos.avg_entry_price) * 100
+                        logger.info(
+                            f"Position check: {tok[:12]} entry=${pos.avg_entry_price:.3f} "
+                            f"current=${cur_price:.3f if cur_price else 'N/A'} pnl={pnl_pct:+.1f}%"
+                        )
+                    
                     proposals = exit_mgr.propose_exits(
                         positions=observed_positions,
                         markets=markets_by_id,
