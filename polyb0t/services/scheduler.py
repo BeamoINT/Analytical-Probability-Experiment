@@ -686,15 +686,17 @@ class TradingScheduler:
                     
                     # Log position details for debugging exit logic
                     for tok, pos in observed_positions.items():
-                        cur_price = fallback_prices.get(tok) or orderbooks.get(tok, None)
-                        if cur_price and hasattr(cur_price, 'bids') and cur_price.bids:
-                            cur_price = (cur_price.bids[0].price + cur_price.asks[0].price) / 2
-                        pnl_pct = 0
+                        cur_price = fallback_prices.get(tok)
+                        ob = orderbooks.get(tok)
+                        if ob and hasattr(ob, 'bids') and ob.bids and ob.asks:
+                            cur_price = (ob.bids[0].price + ob.asks[0].price) / 2
+                        pnl_pct = 0.0
                         if pos.avg_entry_price > 0 and cur_price:
                             pnl_pct = ((cur_price - pos.avg_entry_price) / pos.avg_entry_price) * 100
+                        cur_str = f"${cur_price:.3f}" if cur_price else "N/A"
                         logger.info(
                             f"Position check: {tok[:12]} entry=${pos.avg_entry_price:.3f} "
-                            f"current=${cur_price:.3f if cur_price else 'N/A'} pnl={pnl_pct:+.1f}%"
+                            f"current={cur_str} pnl={pnl_pct:+.1f}%"
                         )
                     
                     proposals = exit_mgr.propose_exits(
