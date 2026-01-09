@@ -233,7 +233,35 @@ class BaselineStrategy:
 
         features["p_market_source"] = p_market_source
 
-        # Model probability
+        # === RUN MICROSTRUCTURE ANALYSIS FIRST ===
+        # This populates order_book_imbalance, entry_score, etc. BEFORE model probability
+        if self.microstructure_analyzer and orderbook:
+            try:
+                ob_dict = {
+                    "bids": [{"price": l.price, "size": l.size} for l in (orderbook.bids or [])],
+                    "asks": [{"price": l.price, "size": l.size} for l in (orderbook.asks or [])],
+                }
+                price_history = features.get("price_history", [])
+                if not price_history and features.get("last_price"):
+                    price_history = [{"price": p_market}, {"price": features.get("last_price", p_market)}]
+                
+                early_microstructure = self.microstructure_analyzer.analyze(
+                    token_id=market.outcomes[outcome_idx].token_id,
+                    orderbook=ob_dict,
+                    current_price=p_market,
+                    price_history=price_history,
+                )
+                # Store in features for baseline probability calculation
+                features["order_book_imbalance"] = early_microstructure.order_book_imbalance
+                features["entry_score"] = early_microstructure.entry_score
+                features["momentum"] = early_microstructure.price_momentum_24h
+                features["volume_ratio"] = early_microstructure.volume_ratio
+                features["is_falling_knife"] = early_microstructure.is_falling_knife
+                features["is_pump"] = early_microstructure.is_pump
+            except Exception as e:
+                logger.debug(f"Early microstructure analysis failed: {e}")
+
+        # Model probability (now has microstructure features available)
         p_model = self._compute_model_probability(p_market, features)
 
         # Raw edge (mid-price based)
