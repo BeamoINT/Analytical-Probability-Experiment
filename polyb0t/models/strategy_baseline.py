@@ -690,12 +690,11 @@ class BaselineStrategy:
         p_market: float,
         features: dict[str, Any],
     ) -> float:
-        """Compute baseline probability with EVIDENCE-BASED adjustments.
+        """Compute baseline probability with market microstructure signals.
 
-        APPROACH: Start with market price, adjust based on CONCRETE SIGNALS.
-        - No blind shrinkage to 0.5 (that was the bug causing losses)
-        - Adjustments scale with signal strength
-        - Multiple agreeing signals = larger adjustment
+        APPROACH: Start with market price, adjust based on orderbook and momentum.
+        - Lower thresholds to actually generate trades
+        - Small but consistent edges from market inefficiencies
 
         Args:
             p_market: Market implied probability.
@@ -710,25 +709,24 @@ class BaselineStrategy:
         signal_strength = 0.0  # Track how much evidence we have
         
         # === SIGNAL 1: ORDER BOOK IMBALANCE ===
-        # Heavy bid side = buyers waiting = price likely to rise
+        # Any imbalance > 10% is meaningful
         orderbook_imbalance = features.get("order_book_imbalance", 0.0)
-        if abs(orderbook_imbalance) > 0.25:  # 25%+ imbalance
-            ob_adj = orderbook_imbalance * 0.04  # Up to 4% adjustment
+        if abs(orderbook_imbalance) > 0.10:  # 10%+ imbalance (lowered from 25%)
+            ob_adj = orderbook_imbalance * 0.05  # Up to 5% adjustment
             adjustment += ob_adj
             signal_strength += abs(orderbook_imbalance)
             adjustment_reasons.append(f"ob_imbalance_{orderbook_imbalance:.2f}")
         
         # === SIGNAL 2: VOLUME SPIKE (information signal) ===
         volume_ratio = features.get("volume_ratio", 1.0)
-        if volume_ratio > 1.5:  # 1.5x+ normal volume
+        if volume_ratio > 1.2:  # 1.2x+ normal volume (lowered from 1.5)
             # High volume = something is happening
-            # Direction: use orderbook imbalance or momentum
-            direction = np.sign(orderbook_imbalance) if abs(orderbook_imbalance) > 0.15 else 0
+            direction = np.sign(orderbook_imbalance) if abs(orderbook_imbalance) > 0.05 else 0
             if direction == 0:
                 momentum = features.get("momentum", 0)
-                direction = np.sign(momentum) if abs(momentum) > 0.02 else 0
+                direction = np.sign(momentum) if abs(momentum) > 0.005 else 0
             
-            vol_adj = direction * min((volume_ratio - 1.0) * 0.02, 0.03)
+            vol_adj = direction * min((volume_ratio - 1.0) * 0.03, 0.04)
             adjustment += vol_adj
             if vol_adj != 0:
                 signal_strength += 0.3
@@ -736,61 +734,64 @@ class BaselineStrategy:
         
         # === SIGNAL 3: MOMENTUM ===
         momentum = features.get("momentum", 0)
-        if abs(momentum) > 0.02:  # 2%+ momentum
+        if abs(momentum) > 0.005:  # 0.5%+ momentum (lowered from 2%)
             # Follow momentum - trend continuation
-            mom_adj = np.sign(momentum) * min(abs(momentum) * 0.5, 0.03)
+            mom_adj = np.sign(momentum) * min(abs(momentum) * 1.0, 0.04)
             adjustment += mom_adj
-            signal_strength += min(abs(momentum) * 2, 0.4)
-            adjustment_reasons.append(f"momentum_{momentum:+.2f}")
+            signal_strength += min(abs(momentum) * 5, 0.5)
+            adjustment_reasons.append(f"momentum_{momentum:+.3f}")
         
         # === SIGNAL 4: MICROSTRUCTURE SIGNALS ===
-        # Entry score from microstructure analysis
         entry_score = features.get("entry_score", 0)
-        if abs(entry_score) > 0.3:
-            micro_adj = entry_score * 0.02
+        if abs(entry_score) > 0.1:  # lowered from 0.3
+            micro_adj = entry_score * 0.03
             adjustment += micro_adj
-            signal_strength += abs(entry_score) * 0.3
+            signal_strength += abs(entry_score) * 0.4
             adjustment_reasons.append(f"entry_score_{entry_score:.2f}")
         
         # === SIGNAL 5: EDGE INTELLIGENCE (if available) ===
         composite_edge = features.get("edge_composite", 0)
-        if abs(composite_edge) > 0.02:
-            intel_adj = composite_edge * 0.5  # Blend in 50% of intelligence edge
+        if abs(composite_edge) > 0.005:  # lowered from 0.02
+            intel_adj = composite_edge * 0.8  # Blend in 80% of intelligence edge
             adjustment += intel_adj
-            signal_strength += abs(composite_edge) * 2
+            signal_strength += abs(composite_edge) * 3
             adjustment_reasons.append(f"intel_edge_{composite_edge:+.3f}")
         
         # === SIGNAL 6: CONTRARIAN AT EXTREMES ===
-        # At extreme prices with heavy one-sided orderbook, fade the crowd
-        if p_market < 0.12 and orderbook_imbalance < -0.4:
-            # Very low price + heavy selling = potential contrarian buy
-            adjustment += 0.03
-            signal_strength += 0.3
+        if p_market < 0.15 and orderbook_imbalance < -0.2:  # lowered thresholds
+            adjustment += 0.02
+            signal_strength += 0.2
             adjustment_reasons.append("contrarian_oversold")
-        elif p_market > 0.88 and orderbook_imbalance > 0.4:
-            # Very high price + heavy buying = potential contrarian sell
-            adjustment -= 0.03
-            signal_strength += 0.3
+        elif p_market > 0.85 and orderbook_imbalance > 0.2:
+            adjustment -= 0.02
+            signal_strength += 0.2
             adjustment_reasons.append("contrarian_overbought")
         
+        # === SIGNAL 7: BASE EDGE FROM SPREAD ===
+        # If spread is tight, there's less uncertainty = small edge opportunity
+        spread_pct = features.get("spread_pct", 0.05)
+        if spread_pct < 0.03 and abs(orderbook_imbalance) > 0.05:
+            # Tight spread + any imbalance = small edge
+            base_edge = orderbook_imbalance * 0.02
+            adjustment += base_edge
+            signal_strength += 0.15
+            adjustment_reasons.append("tight_spread_edge")
+        
         # === APPLY DYNAMIC LIMITS ===
-        # More signals = allow larger deviation
-        # Few signals = stay close to market
-        if signal_strength < 0.3:
-            max_deviation = 0.02  # Weak evidence: max 2%
-        elif signal_strength < 0.6:
-            max_deviation = 0.04  # Moderate evidence: max 4%
-        elif signal_strength < 1.0:
-            max_deviation = 0.06  # Strong evidence: max 6%
+        if signal_strength < 0.15:
+            max_deviation = 0.015  # Very weak: 1.5%
+        elif signal_strength < 0.3:
+            max_deviation = 0.03  # Weak: 3%
+        elif signal_strength < 0.5:
+            max_deviation = 0.05  # Moderate: 5%
         else:
-            max_deviation = 0.08  # Very strong evidence: max 8%
+            max_deviation = 0.08  # Strong: 8%
         
         adjustment = max(-max_deviation, min(max_deviation, adjustment))
         
         # === SPREAD-BASED DAMPENING ===
-        spread_pct = features.get("spread_pct", 0)
-        if spread_pct > 0.06:  # 6%+ spread = illiquid
-            dampening = max(0.3, 1.0 - spread_pct * 5)  # Reduce adjustment
+        if spread_pct > 0.08:  # Only dampen for very wide spreads
+            dampening = max(0.4, 1.0 - spread_pct * 3)
             adjustment *= dampening
             adjustment_reasons.append(f"spread_dampen_{dampening:.2f}")
         
