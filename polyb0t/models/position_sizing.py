@@ -32,14 +32,16 @@ class PositionSizer:
         self.min_kelly_fraction = 0.05  # Minimum Kelly
         self.max_kelly_fraction = 0.50  # Maximum Kelly (half Kelly max)
         
-        # Dynamic position sizing limits
+        # Dynamic position sizing limits - READ FROM SETTINGS
         self.min_pct_per_trade = 0.05  # Min 5% of available cash per trade
-        self.max_pct_per_trade = 0.15  # Max 15% of available cash per trade (user limit)
-        self.max_pct_total_exposure = 0.90  # Hard cap: max 90% total portfolio exposure (not a target)
+        # Max per trade comes from settings (max_position_pct)
+        self.max_pct_per_trade = float(self.settings.max_position_pct) / 100.0
+        # Total exposure comes from settings (max_total_exposure_pct)
+        self.max_pct_total_exposure = float(self.settings.max_total_exposure_pct) / 100.0
         
         # Edge-based scaling for dynamic sizing
-        self.edge_scale_min = 0.045  # 4.5% edge = minimum sizing (5%)
-        self.edge_scale_max = 0.10   # 10% edge = maximum sizing (45%)
+        self.edge_scale_min = 0.03   # 3% edge = minimum sizing
+        self.edge_scale_max = 0.08   # 8% edge = maximum sizing
         
     def compute_size(
         self,
@@ -119,12 +121,16 @@ class PositionSizer:
         # Cap 4: Configured absolute limits
         min_order = float(self.settings.min_order_usd)
         max_order = float(self.settings.max_order_usd)
-        size_final = max(0, min(after_exposure_cap, max_order))
+        
+        # Cap 5: Per-market diversification limit (prevents all-in on one thing)
+        max_per_market = float(self.settings.max_market_exposure_usd)
+        
+        size_final = max(0, min(after_exposure_cap, max_order, max_per_market))
         
         actual_pct = (size_final / available_usdc * 100) if available_usdc > 0 else 0
         logger.info(
             f"Position size: ${size_final:.2f} ({actual_pct:.1f}% of ${available_usdc:.2f} available) "
-            f"[edge={edge_abs*100:.1f}%, confidence={confidence:.0%}]"
+            f"[edge={edge_abs*100:.1f}%, confidence={confidence:.0%}, max_per_market=${max_per_market:.0f}]"
         )
 
         # Determine primary reason for final size
