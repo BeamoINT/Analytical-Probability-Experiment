@@ -573,7 +573,11 @@ class TradingScheduler:
             # Step 5b: Exit management (CLOSE_POSITION intents) - approval gated.
             exit_created = 0
             exit_skipped = 0
-            if self.settings.mode == "live":
+            
+            # MASTER SWITCH: Skip all exit management if disabled (BUY ONLY mode)
+            if not self.settings.enable_exit_management:
+                logger.debug("Exit management disabled (enable_exit_management=false) - BUY ONLY mode")
+            elif self.settings.mode == "live":
                 try:
                     from polyb0t.data.account_state import AccountStateProvider
                     from polyb0t.execution.portfolio import Position
