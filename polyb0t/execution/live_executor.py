@@ -323,9 +323,28 @@ class LiveExecutor:
         actual_shares = 0.0
         actual_size_usd = float(intent.size_usd or 0.0)
         best_bid = float(intent.price or 0.0)
-        use_market_sell = False  # Default: use limit orders (conservative)
+        use_market_sell = True  # ALWAYS use market sells for immediate fill at best bid
         entry_price: float | None = None
         price_drop_pct: float = 0.0
+        
+        # FRESH ORDERBOOK: Fetch current best bid right before selling
+        try:
+            import httpx
+            ob_url = f"{self.settings.clob_base_url}/book?token_id={intent.token_id}"
+            resp = httpx.get(ob_url, timeout=5.0)
+            if resp.status_code == 200:
+                ob_data = resp.json()
+                bids = ob_data.get("bids", [])
+                if bids and len(bids) > 0:
+                    fresh_best_bid = float(bids[0].get("price", 0))
+                    if fresh_best_bid > 0:
+                        logger.info(
+                            f"Fresh orderbook: best_bid={fresh_best_bid:.4f} (was {best_bid:.4f})",
+                            extra={"token_id": intent.token_id[:20]}
+                        )
+                        best_bid = fresh_best_bid  # Use fresh price
+        except Exception as e:
+            logger.warning(f"Could not fetch fresh orderbook: {e}")
         
         # Check if this is an EMERGENCY (crash) exit - always use market sell
         is_emergency = False
@@ -447,17 +466,11 @@ class LiveExecutor:
             # CRITICAL: Use actual balance for sell size
             actual_shares = token_balance / 1e6
             
-            # Determine sell price based on market sell or limit sell
-            if use_market_sell:
-                # Market sell: use best bid minus slippage for guaranteed fill
-                slippage_factor = 1.0 - (self.settings.panic_sell_min_fill_slippage_pct / 100.0)
-                sell_price = max(0.005, best_bid * slippage_factor)
-                order_details["order_type"] = "MARKET_SELL"
-                order_details["slippage_applied"] = self.settings.panic_sell_min_fill_slippage_pct
-            else:
-                # Limit sell: use best bid (no additional slippage, let it sit)
-                sell_price = best_bid
-                order_details["order_type"] = "LIMIT_SELL"
+            # ALWAYS use best bid for immediate fill - no slippage reduction
+            # The best_bid IS the market price - sell at that price
+            sell_price = best_bid
+            order_details["order_type"] = "MARKET_SELL"
+            order_details["slippage_applied"] = 0.0  # No additional slippage
             
             actual_size_usd = actual_shares * sell_price
             

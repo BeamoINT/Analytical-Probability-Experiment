@@ -170,7 +170,7 @@ class Settings(BaseSettings):
 
     # Exit Management
     enable_exit_management: bool = Field(
-        default=False,
+        default=True,
         description="Master switch for ALL automatic selling. When false, bot is BUY ONLY."
     )
     manage_all_positions: bool = Field(
@@ -182,9 +182,9 @@ class Settings(BaseSettings):
         ),
     )
     enable_take_profit: bool = Field(default=True, description="Enable take-profit proposals")
-    take_profit_pct: float = Field(default=15.0, description="Take profit at % gain")
-    enable_stop_loss: bool = Field(default=False, description="Enable stop-loss proposals")
-    stop_loss_pct: float = Field(default=30.0, description="Stop loss at % loss (conservative - only for sustained losses)")
+    take_profit_pct: float = Field(default=10.0, description="Take profit at % gain")
+    enable_stop_loss: bool = Field(default=True, description="Enable stop-loss proposals")
+    stop_loss_pct: float = Field(default=20.0, description="Stop loss at % loss (conservative - only for sustained losses)")
     
     # Conservative Loss Management
     # The bot should NOT sell at small losses - wait for potential recovery
