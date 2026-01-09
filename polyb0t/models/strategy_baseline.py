@@ -690,16 +690,12 @@ class BaselineStrategy:
         p_market: float,
         features: dict[str, Any],
     ) -> float:
-        """Compute baseline probability using SMART heuristics.
+        """Compute baseline probability with EVIDENCE-BASED adjustments.
 
-        CRITICAL FIX: The old approach was fundamentally flawed:
-        - Shrinkage to 0.5 ALWAYS created artificial edge (systematically wrong)
-        - Mean-reversion assumption is WRONG for prediction markets (markets are often right)
-        
-        NEW APPROACH: Only deviate from market when we have SPECIFIC EVIDENCE
-        - Use Smart Heuristics weighted scoring
-        - Only create edge when multiple signals agree
-        - Default to market price (efficient market baseline)
+        APPROACH: Start with market price, adjust based on CONCRETE SIGNALS.
+        - No blind shrinkage to 0.5 (that was the bug causing losses)
+        - Adjustments scale with signal strength
+        - Multiple agreeing signals = larger adjustment
 
         Args:
             p_market: Market implied probability.
@@ -708,84 +704,111 @@ class BaselineStrategy:
         Returns:
             Baseline probability estimate (0-1).
         """
-        # BASELINE: Market is efficient - start with market price
-        # Only deviate when we have STRONG evidence the market is wrong
-        p_model = p_market
-        
-        # === MICRO-ADJUSTMENT FACTORS ===
-        # Small adjustments based on specific signals (NOT systematic shrinkage)
-        
+        # BASELINE: Start with market price
         adjustment = 0.0
         adjustment_reasons = []
+        signal_strength = 0.0  # Track how much evidence we have
         
-        # 1. ORDER BOOK IMBALANCE (only if significant)
-        # If orderbook is heavily imbalanced, price may move in that direction
+        # === SIGNAL 1: ORDER BOOK IMBALANCE ===
+        # Heavy bid side = buyers waiting = price likely to rise
         orderbook_imbalance = features.get("order_book_imbalance", 0.0)
-        if abs(orderbook_imbalance) > 0.4:  # Strong imbalance (40%+)
-            # Expect price to move toward the imbalanced side
-            ob_adj = orderbook_imbalance * 0.02  # Max 2% adjustment
+        if abs(orderbook_imbalance) > 0.25:  # 25%+ imbalance
+            ob_adj = orderbook_imbalance * 0.04  # Up to 4% adjustment
             adjustment += ob_adj
+            signal_strength += abs(orderbook_imbalance)
             adjustment_reasons.append(f"ob_imbalance_{orderbook_imbalance:.2f}")
         
-        # 2. INFORMATION SIGNAL (unusual volume without price move)
+        # === SIGNAL 2: VOLUME SPIKE (information signal) ===
         volume_ratio = features.get("volume_ratio", 1.0)
-        if volume_ratio > 2.0:  # 2x+ normal volume
-            # High volume often precedes moves - but which direction?
-            # Use orderbook imbalance to guess direction
-            vol_adj = 0.01 * np.sign(orderbook_imbalance) if abs(orderbook_imbalance) > 0.2 else 0
+        if volume_ratio > 1.5:  # 1.5x+ normal volume
+            # High volume = something is happening
+            # Direction: use orderbook imbalance or momentum
+            direction = np.sign(orderbook_imbalance) if abs(orderbook_imbalance) > 0.15 else 0
+            if direction == 0:
+                momentum = features.get("momentum", 0)
+                direction = np.sign(momentum) if abs(momentum) > 0.02 else 0
+            
+            vol_adj = direction * min((volume_ratio - 1.0) * 0.02, 0.03)
             adjustment += vol_adj
             if vol_adj != 0:
-                adjustment_reasons.append("volume_spike")
+                signal_strength += 0.3
+                adjustment_reasons.append(f"volume_{volume_ratio:.1f}x")
         
-        # 3. MOMENTUM (follow the trend, but weakly)
+        # === SIGNAL 3: MOMENTUM ===
         momentum = features.get("momentum", 0)
-        if abs(momentum) > 0.03:  # 3%+ momentum
-            # Follow momentum but cap adjustment
-            mom_adj = np.sign(momentum) * min(abs(momentum) * 0.3, 0.02)
+        if abs(momentum) > 0.02:  # 2%+ momentum
+            # Follow momentum - trend continuation
+            mom_adj = np.sign(momentum) * min(abs(momentum) * 0.5, 0.03)
             adjustment += mom_adj
-            adjustment_reasons.append(f"momentum_{momentum:.2f}")
+            signal_strength += min(abs(momentum) * 2, 0.4)
+            adjustment_reasons.append(f"momentum_{momentum:+.2f}")
         
-        # 4. PRICE LEVEL EDGE (ONLY at extremes, OPPOSITE of old logic)
-        # At extremes, the MARKET often underestimates resolution probability
-        # Price at 0.10 often resolves to 0 (market is RIGHT, not wrong)
-        # BUT: Very extreme prices (0.05 or 0.95) may have value
-        if p_market < 0.08:
-            # Very low price - maybe slight value in buying (contrarian)
-            adjustment += 0.01
-            adjustment_reasons.append("extreme_low_contrarian")
-        elif p_market > 0.92:
-            # Very high price - maybe slight value in selling (contrarian)
-            adjustment -= 0.01
-            adjustment_reasons.append("extreme_high_contrarian")
-        # NO adjustment for middle-range prices (market is usually right)
+        # === SIGNAL 4: MICROSTRUCTURE SIGNALS ===
+        # Entry score from microstructure analysis
+        entry_score = features.get("entry_score", 0)
+        if abs(entry_score) > 0.3:
+            micro_adj = entry_score * 0.02
+            adjustment += micro_adj
+            signal_strength += abs(entry_score) * 0.3
+            adjustment_reasons.append(f"entry_score_{entry_score:.2f}")
         
-        # 5. SPREAD-BASED CAUTION
-        # Wide spread = less confident in market price
-        spread_pct = features.get("spread_pct", 0)
-        if spread_pct > 0.08:  # 8%+ spread
-            # Reduce any adjustment - market is illiquid
-            adjustment *= 0.5
-            adjustment_reasons.append("wide_spread_dampening")
+        # === SIGNAL 5: EDGE INTELLIGENCE (if available) ===
+        composite_edge = features.get("edge_composite", 0)
+        if abs(composite_edge) > 0.02:
+            intel_adj = composite_edge * 0.5  # Blend in 50% of intelligence edge
+            adjustment += intel_adj
+            signal_strength += abs(composite_edge) * 2
+            adjustment_reasons.append(f"intel_edge_{composite_edge:+.3f}")
         
-        # Apply adjustment with STRICT LIMITS
-        # Maximum deviation from market: 3%
-        max_deviation = 0.03
+        # === SIGNAL 6: CONTRARIAN AT EXTREMES ===
+        # At extreme prices with heavy one-sided orderbook, fade the crowd
+        if p_market < 0.12 and orderbook_imbalance < -0.4:
+            # Very low price + heavy selling = potential contrarian buy
+            adjustment += 0.03
+            signal_strength += 0.3
+            adjustment_reasons.append("contrarian_oversold")
+        elif p_market > 0.88 and orderbook_imbalance > 0.4:
+            # Very high price + heavy buying = potential contrarian sell
+            adjustment -= 0.03
+            signal_strength += 0.3
+            adjustment_reasons.append("contrarian_overbought")
+        
+        # === APPLY DYNAMIC LIMITS ===
+        # More signals = allow larger deviation
+        # Few signals = stay close to market
+        if signal_strength < 0.3:
+            max_deviation = 0.02  # Weak evidence: max 2%
+        elif signal_strength < 0.6:
+            max_deviation = 0.04  # Moderate evidence: max 4%
+        elif signal_strength < 1.0:
+            max_deviation = 0.06  # Strong evidence: max 6%
+        else:
+            max_deviation = 0.08  # Very strong evidence: max 8%
+        
         adjustment = max(-max_deviation, min(max_deviation, adjustment))
+        
+        # === SPREAD-BASED DAMPENING ===
+        spread_pct = features.get("spread_pct", 0)
+        if spread_pct > 0.06:  # 6%+ spread = illiquid
+            dampening = max(0.3, 1.0 - spread_pct * 5)  # Reduce adjustment
+            adjustment *= dampening
+            adjustment_reasons.append(f"spread_dampen_{dampening:.2f}")
         
         p_model = p_market + adjustment
         
         # Clamp to valid range
         p_model = max(0.01, min(0.99, p_model))
         
-        # Log if significant adjustment
+        # Log adjustments for debugging
         if abs(adjustment) >= 0.01:
             logger.debug(
-                f"Baseline probability adjusted: market={p_market:.3f} -> model={p_model:.3f} "
-                f"(adj={adjustment:+.3f}, reasons={adjustment_reasons})"
+                f"Model: market={p_market:.3f} -> model={p_model:.3f} "
+                f"(adj={adjustment:+.3f}, strength={signal_strength:.2f}, reasons={adjustment_reasons})"
             )
         
-        # Store adjustment info in features for debugging
+        # Store for debugging
         features["baseline_adjustment"] = adjustment
+        features["baseline_signal_strength"] = signal_strength
         features["baseline_reasons"] = adjustment_reasons
         
         return p_model
