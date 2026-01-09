@@ -123,7 +123,7 @@ class PositionSizer:
         max_order = float(self.settings.max_order_usd)
         
         # Cap 5: Per-market diversification limit (prevents all-in on one thing)
-        max_per_market = float(self.settings.max_market_exposure_usd)
+        max_per_market = float(self.settings.max_notional_per_market)
         
         size_final = max(0, min(after_exposure_cap, max_order, max_per_market))
         
