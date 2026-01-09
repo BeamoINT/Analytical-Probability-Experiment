@@ -296,15 +296,15 @@ class AccountStateProvider:
                 cur_price = float(pos.get("curPrice", 0))
                 pnl = float(pos.get("cashPnl", 0))
                 
-                    position = AccountPosition(
+                position = AccountPosition(
                     token_id=token_id,
                     market_id=market_slug,  # Using slug as market identifier
                     side="LONG",  # All positions from this API are long
                     quantity=size,
                     avg_price=avg_price,
                     current_price=cur_price,
-                    )
-                    positions.append(position)
+                )
+                positions.append(position)
 
             logger.info(f"Fetched {len(positions)} active positions (filtered from {len(positions_data)} total)")
             return positions
