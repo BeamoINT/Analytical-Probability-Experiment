@@ -538,9 +538,10 @@ class TradingScheduler:
                         {"condition_id": m.condition_id, "outcomes": [{"token_id": o.token_id} for o in m.outcomes]}
                         for m in markets_for_data
                     ]
-                    self.ai_orchestrator.track_markets(market_dicts)
+                    new_tracked = self.ai_orchestrator.track_markets(market_dicts)
                     
                     # Collect snapshots from orderbooks
+                    snapshots_collected = 0
                     for m in tradable_markets:
                         for o in m.outcomes:
                             if not o.token_id:
@@ -567,8 +568,25 @@ class TradingScheduler:
                                 category=getattr(m, 'category', ''),
                                 days_to_resolution=self._days_to_resolution(m.end_date),
                             )
+                            snapshots_collected += 1
                     
                     self.ai_orchestrator.finish_example_cycle()
+                    
+                    # Log AI training progress
+                    stats = self.ai_orchestrator.get_training_stats()
+                    logger.info(
+                        f"AI data collection: {snapshots_collected} snapshots, "
+                        f"{stats['collector']['total_examples']} total examples, "
+                        f"{stats['collector']['labeled_examples']} labeled, "
+                        f"model_ready={stats['is_ready']}",
+                        extra={
+                            "snapshots_collected": snapshots_collected,
+                            "new_markets_tracked": new_tracked,
+                            "total_examples": stats['collector']['total_examples'],
+                            "labeled_examples": stats['collector']['labeled_examples'],
+                            "can_train": stats['can_train'],
+                        }
+                    )
                     
                     # Run training if due
                     if self.ai_orchestrator.should_train():
@@ -576,7 +594,7 @@ class TradingScheduler:
                         self.ai_orchestrator.run_training()
                         
                 except Exception as e:
-                    logger.warning(f"AI data collection failed: {e}")
+                    logger.warning(f"AI data collection failed: {e}", exc_info=True)
             
             # === SIGNAL GENERATION ===
             # Use rules-based OR AI-based signals (NOT hybrid)
