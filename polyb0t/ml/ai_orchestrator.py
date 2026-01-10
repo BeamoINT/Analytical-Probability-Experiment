@@ -33,8 +33,14 @@ class AIOrchestrator:
         """Initialize the orchestrator."""
         self.settings = get_settings()
         
+        # Calculate max storage in bytes
+        max_storage_bytes = int(self.settings.ai_max_storage_gb * 1024 * 1024 * 1024)
+        
         # Initialize components
-        self.collector = get_data_collector(self.settings.ai_training_db)
+        self.collector = ContinuousDataCollector(
+            db_path=self.settings.ai_training_db,
+            max_storage_bytes=max_storage_bytes,
+        )
         self.trainer = get_ai_trainer(
             model_dir=self.settings.ai_model_dir,
             min_training_examples=self.settings.ai_min_training_examples,
@@ -225,20 +231,88 @@ class AIOrchestrator:
         orderbook_imbalance: float,
         volume_24h: float,
         liquidity: float,
+        # Expanded features
+        spread: float = 0,
+        spread_pct: float = 0,
+        mid_price: float = 0,
+        volume_1h: float = 0,
+        volume_6h: float = 0,
+        liquidity_bid: float = 0,
+        liquidity_ask: float = 0,
         bid_depth: float = 0,
         ask_depth: float = 0,
+        bid_depth_5: float = 0,
+        ask_depth_5: float = 0,
+        bid_depth_10: float = 0,
+        ask_depth_10: float = 0,
+        bid_levels: int = 0,
+        ask_levels: int = 0,
+        best_bid_size: float = 0,
+        best_ask_size: float = 0,
+        bid_ask_size_ratio: float = 0,
         momentum_1h: float = 0,
+        momentum_4h: float = 0,
         momentum_24h: float = 0,
+        momentum_7d: float = 0,
+        price_change_1h: float = 0,
+        price_change_4h: float = 0,
+        price_change_24h: float = 0,
+        price_high_24h: float = 0,
+        price_low_24h: float = 0,
+        price_range_24h: float = 0,
+        volatility_1h: float = 0,
+        volatility_24h: float = 0,
+        volatility_7d: float = 0,
+        atr_24h: float = 0,
         trade_count_1h: int = 0,
+        trade_count_24h: int = 0,
+        avg_trade_size_1h: float = 0,
+        avg_trade_size_24h: float = 0,
+        buy_volume_1h: float = 0,
+        sell_volume_1h: float = 0,
+        buy_sell_ratio_1h: float = 0,
+        large_trade_count_24h: int = 0,
         category: str = "",
+        subcategory: str = "",
+        market_slug: str = "",
+        question_length: int = 0,
+        description_length: int = 0,
+        has_icon: bool = False,
         days_to_resolution: float = 30,
-    ) -> None:
-        """Collect a market snapshot for training data.
+        hours_to_resolution: float = 720,
+        market_age_days: float = 0,
+        hour_of_day: int = 0,
+        day_of_week: int = 0,
+        is_weekend: bool = False,
+        is_active: bool = True,
+        is_closed: bool = False,
+        total_yes_shares: float = 0,
+        total_no_shares: float = 0,
+        open_interest: float = 0,
+        num_related_markets: int = 0,
+        avg_related_price: float = 0,
+        comment_count: int = 0,
+        view_count: int = 0,
+        unique_traders: int = 0,
+        price_vs_volume_ratio: float = 0,
+        liquidity_per_dollar_volume: float = 0,
+        spread_adjusted_edge: float = 0,
+    ) -> bool:
+        """Collect a comprehensive market snapshot for training data.
         
         Args:
-            All market data fields.
+            All market data fields - expanded for richer training data.
+            
+        Returns:
+            True if a training example was created, False otherwise.
         """
-        spread = (ask - bid) / price if price > 0 else 0
+        # Compute spread if not provided
+        if spread == 0 and price > 0:
+            spread = ask - bid
+        if spread_pct == 0 and price > 0:
+            spread_pct = (ask - bid) / price
+        if mid_price == 0:
+            mid_price = price
         
         snapshot = MarketSnapshot(
             token_id=token_id,
@@ -248,16 +322,73 @@ class AIOrchestrator:
             bid=bid,
             ask=ask,
             spread=spread,
+            spread_pct=spread_pct,
+            mid_price=mid_price,
             volume_24h=volume_24h,
+            volume_1h=volume_1h,
+            volume_6h=volume_6h,
             liquidity=liquidity,
+            liquidity_bid=liquidity_bid,
+            liquidity_ask=liquidity_ask,
             orderbook_imbalance=orderbook_imbalance,
             bid_depth=bid_depth,
             ask_depth=ask_depth,
+            bid_depth_5=bid_depth_5,
+            ask_depth_5=ask_depth_5,
+            bid_depth_10=bid_depth_10,
+            ask_depth_10=ask_depth_10,
+            bid_levels=bid_levels,
+            ask_levels=ask_levels,
+            best_bid_size=best_bid_size,
+            best_ask_size=best_ask_size,
+            bid_ask_size_ratio=bid_ask_size_ratio,
             momentum_1h=momentum_1h,
+            momentum_4h=momentum_4h,
             momentum_24h=momentum_24h,
+            momentum_7d=momentum_7d,
+            price_change_1h=price_change_1h,
+            price_change_4h=price_change_4h,
+            price_change_24h=price_change_24h,
+            price_high_24h=price_high_24h,
+            price_low_24h=price_low_24h,
+            price_range_24h=price_range_24h,
+            volatility_1h=volatility_1h,
+            volatility_24h=volatility_24h,
+            volatility_7d=volatility_7d,
+            atr_24h=atr_24h,
             trade_count_1h=trade_count_1h,
+            trade_count_24h=trade_count_24h,
+            avg_trade_size_1h=avg_trade_size_1h,
+            avg_trade_size_24h=avg_trade_size_24h,
+            buy_volume_1h=buy_volume_1h,
+            sell_volume_1h=sell_volume_1h,
+            buy_sell_ratio_1h=buy_sell_ratio_1h,
+            large_trade_count_24h=large_trade_count_24h,
             category=category,
+            subcategory=subcategory,
+            market_slug=market_slug,
+            question_length=question_length,
+            description_length=description_length,
+            has_icon=has_icon,
             days_to_resolution=days_to_resolution,
+            hours_to_resolution=hours_to_resolution,
+            market_age_days=market_age_days,
+            hour_of_day=hour_of_day,
+            day_of_week=day_of_week,
+            is_weekend=is_weekend,
+            is_active=is_active,
+            is_closed=is_closed,
+            total_yes_shares=total_yes_shares,
+            total_no_shares=total_no_shares,
+            open_interest=open_interest,
+            num_related_markets=num_related_markets,
+            avg_related_price=avg_related_price,
+            comment_count=comment_count,
+            view_count=view_count,
+            unique_traders=unique_traders,
+            price_vs_volume_ratio=price_vs_volume_ratio,
+            liquidity_per_dollar_volume=liquidity_per_dollar_volume,
+            spread_adjusted_edge=spread_adjusted_edge,
         )
         
         self.collector.record_snapshot(snapshot)

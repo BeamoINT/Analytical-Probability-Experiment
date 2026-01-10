@@ -74,6 +74,10 @@ class Settings(BaseSettings):
         default="data/ai_training.db",
         description="SQLite database for AI training data"
     )
+    ai_max_storage_gb: float = Field(
+        default=140.0,
+        description="Maximum storage for AI training data in GB (default 140GB)"
+    )
 
     # Database
     db_url: str = Field(default="sqlite:///./polybot.db", description="Database connection URL")

@@ -256,18 +256,54 @@ class AITrainer:
     def _prepare_training_data(self, data: list[dict]) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
         """Prepare training data arrays.
         
+        Handles backwards compatibility by filling missing features with 0.
+        Uses all available features from the expanded schema.
+        
         Args:
             data: Raw training data.
             
         Returns:
             Tuple of (features, labels) arrays.
         """
-        # Feature columns to use
+        # Comprehensive feature columns (from MarketSnapshot)
+        # Ordered by importance/availability
         feature_cols = [
-            "price", "spread", "volume_24h", "liquidity",
+            # Core price features (always available)
+            "price", "spread", "spread_pct", "mid_price",
+            # Volume & liquidity
+            "volume_24h", "volume_1h", "volume_6h", "liquidity",
+            "liquidity_bid", "liquidity_ask",
+            # Orderbook features
             "orderbook_imbalance", "bid_depth", "ask_depth",
-            "momentum_1h", "momentum_24h", "days_to_resolution"
+            "bid_depth_5", "ask_depth_5", "bid_depth_10", "ask_depth_10",
+            "bid_levels", "ask_levels", "best_bid_size", "best_ask_size",
+            "bid_ask_size_ratio",
+            # Momentum features
+            "momentum_1h", "momentum_4h", "momentum_24h", "momentum_7d",
+            "price_change_1h", "price_change_4h", "price_change_24h",
+            "price_high_24h", "price_low_24h", "price_range_24h",
+            # Volatility features
+            "volatility_1h", "volatility_24h", "volatility_7d", "atr_24h",
+            # Trade flow features
+            "trade_count_1h", "trade_count_24h",
+            "avg_trade_size_1h", "avg_trade_size_24h",
+            "buy_volume_1h", "sell_volume_1h", "buy_sell_ratio_1h",
+            "large_trade_count_24h",
+            # Timing features
+            "days_to_resolution", "hours_to_resolution", "market_age_days",
+            "hour_of_day", "day_of_week",
+            # Market state
+            "total_yes_shares", "total_no_shares", "open_interest",
+            # Related/social features
+            "num_related_markets", "avg_related_price",
+            "comment_count", "view_count", "unique_traders",
+            # Derived features
+            "price_vs_volume_ratio", "liquidity_per_dollar_volume",
+            "spread_adjusted_edge",
         ]
+        
+        # Store feature columns for later use in predictions
+        self._feature_cols = feature_cols
         
         # Target: predict 24h price change
         X_list = []
@@ -279,27 +315,26 @@ class AITrainer:
             if target is None:
                 continue
                 
-            # Extract features
+            # Extract features - fill missing with 0 for backwards compatibility
             features = []
-            valid = True
             for col in feature_cols:
-                val = example.get(col)
-                if val is None:
-                    valid = False
-                    break
-                features.append(float(val))
+                val = example.get(col, 0)  # Default to 0 if missing
+                try:
+                    features.append(float(val) if val is not None else 0.0)
+                except (ValueError, TypeError):
+                    features.append(0.0)
                 
-            if valid:
-                X_list.append(features)
-                y_list.append(float(target))
+            X_list.append(features)
+            y_list.append(float(target))
                 
         if len(X_list) == 0:
             return None, None
-            
+        
+        logger.info(f"Prepared {len(X_list)} examples with {len(feature_cols)} features each")
         return np.array(X_list), np.array(y_list)
     
     def _train(self, X: np.ndarray, y: np.ndarray) -> Any:
-        """Train a model.
+        """Train a model using advanced ensemble methods.
         
         Args:
             X: Feature array.
@@ -308,21 +343,68 @@ class AITrainer:
         Returns:
             Trained model.
         """
+        n_features = X.shape[1]
+        n_samples = X.shape[0]
+        
+        logger.info(f"Training on {n_samples} samples with {n_features} features")
+        
         try:
-            # Try gradient boosting first
-            from sklearn.ensemble import GradientBoostingRegressor
-            model = GradientBoostingRegressor(
-                n_estimators=100,
-                max_depth=5,
-                learning_rate=0.1,
-                random_state=42,
-            )
+            # Try Random Forest first (better for many features)
+            from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+            from sklearn.preprocessing import StandardScaler
+            from sklearn.pipeline import Pipeline
+            
+            # Use a pipeline with scaling for better performance
+            if n_samples > 1000:
+                # Larger dataset - use more trees
+                model = Pipeline([
+                    ('scaler', StandardScaler()),
+                    ('regressor', RandomForestRegressor(
+                        n_estimators=200,
+                        max_depth=10,
+                        min_samples_split=5,
+                        min_samples_leaf=2,
+                        n_jobs=-1,
+                        random_state=42,
+                    ))
+                ])
+            else:
+                # Smaller dataset - use gradient boosting
+                model = Pipeline([
+                    ('scaler', StandardScaler()),
+                    ('regressor', GradientBoostingRegressor(
+                        n_estimators=100,
+                        max_depth=5,
+                        learning_rate=0.1,
+                        random_state=42,
+                    ))
+                ])
+            
             model.fit(X, y)
+            
+            # Log feature importances if available
+            try:
+                regressor = model.named_steps['regressor']
+                if hasattr(regressor, 'feature_importances_'):
+                    importances = regressor.feature_importances_
+                    top_indices = np.argsort(importances)[-10:][::-1]
+                    top_features = [(self._feature_cols[i], importances[i]) for i in top_indices]
+                    logger.info(f"Top 10 features: {top_features}")
+            except Exception:
+                pass
+                
             return model
+            
         except ImportError:
             # Fallback to simple model
             from sklearn.linear_model import Ridge
-            model = Ridge(alpha=1.0)
+            from sklearn.preprocessing import StandardScaler
+            from sklearn.pipeline import Pipeline
+            
+            model = Pipeline([
+                ('scaler', StandardScaler()),
+                ('regressor', Ridge(alpha=1.0))
+            ])
             model.fit(X, y)
             return model
             
@@ -429,27 +511,55 @@ class AITrainer:
     def predict(self, features: dict) -> Optional[float]:
         """Make a prediction using the current model.
         
+        Handles backwards compatibility - missing features are filled with 0.
+
         Args:
             features: Feature dictionary.
-            
+
         Returns:
             Predicted price change, or None if no model.
         """
         if self._current_model is None:
             return None
-            
-        feature_cols = [
-            "price", "spread", "volume_24h", "liquidity",
-            "orderbook_imbalance", "bid_depth", "ask_depth",
-            "momentum_1h", "momentum_24h", "days_to_resolution"
-        ]
-        
+
+        # Use stored feature columns from training, or default set
+        feature_cols = getattr(self, '_feature_cols', None)
+        if feature_cols is None:
+            # Fallback to comprehensive feature set
+            feature_cols = [
+                "price", "spread", "spread_pct", "mid_price",
+                "volume_24h", "volume_1h", "volume_6h", "liquidity",
+                "liquidity_bid", "liquidity_ask",
+                "orderbook_imbalance", "bid_depth", "ask_depth",
+                "bid_depth_5", "ask_depth_5", "bid_depth_10", "ask_depth_10",
+                "bid_levels", "ask_levels", "best_bid_size", "best_ask_size",
+                "bid_ask_size_ratio",
+                "momentum_1h", "momentum_4h", "momentum_24h", "momentum_7d",
+                "price_change_1h", "price_change_4h", "price_change_24h",
+                "price_high_24h", "price_low_24h", "price_range_24h",
+                "volatility_1h", "volatility_24h", "volatility_7d", "atr_24h",
+                "trade_count_1h", "trade_count_24h",
+                "avg_trade_size_1h", "avg_trade_size_24h",
+                "buy_volume_1h", "sell_volume_1h", "buy_sell_ratio_1h",
+                "large_trade_count_24h",
+                "days_to_resolution", "hours_to_resolution", "market_age_days",
+                "hour_of_day", "day_of_week",
+                "total_yes_shares", "total_no_shares", "open_interest",
+                "num_related_markets", "avg_related_price",
+                "comment_count", "view_count", "unique_traders",
+                "price_vs_volume_ratio", "liquidity_per_dollar_volume",
+                "spread_adjusted_edge",
+            ]
+
         try:
             X = []
             for col in feature_cols:
                 val = features.get(col, 0)
-                X.append(float(val) if val is not None else 0.0)
-                
+                try:
+                    X.append(float(val) if val is not None else 0.0)
+                except (ValueError, TypeError):
+                    X.append(0.0)
+
             X = np.array([X])
             prediction = self._current_model.predict(X)[0]
             return float(prediction)

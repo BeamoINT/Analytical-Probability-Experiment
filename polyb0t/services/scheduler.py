@@ -540,9 +540,11 @@ class TradingScheduler:
                     ]
                     new_tracked = self.ai_orchestrator.track_markets(market_dicts)
                     
-                    # Collect snapshots from orderbooks
+                    # Collect comprehensive snapshots from orderbooks
                     snapshots_collected = 0
                     examples_created_this_cycle = False
+                    now = datetime.utcnow()
+                    
                     for m in tradable_markets:
                         for o in m.outcomes:
                             if not o.token_id:
@@ -550,24 +552,105 @@ class TradingScheduler:
                             ob = orderbooks.get(o.token_id)
                             if not ob or not ob.bids or not ob.asks:
                                 continue
-                            mid = (ob.bids[0].price + ob.asks[0].price) / 2
-                            bid_depth = sum(l.size for l in ob.bids[:5])
-                            ask_depth = sum(l.size for l in ob.asks[:5])
-                            imbalance = (bid_depth - ask_depth) / (bid_depth + ask_depth) if (bid_depth + ask_depth) > 0 else 0
+                            
+                            # === CORE PRICE DATA ===
+                            best_bid = ob.bids[0].price
+                            best_ask = ob.asks[0].price
+                            mid = (best_bid + best_ask) / 2
+                            spread = best_ask - best_bid
+                            spread_pct = spread / mid if mid > 0 else 0
+                            
+                            # === ORDERBOOK DEPTH ===
+                            bid_depth_5 = sum(l.size for l in ob.bids[:5])
+                            ask_depth_5 = sum(l.size for l in ob.asks[:5])
+                            bid_depth_10 = sum(l.size for l in ob.bids[:10])
+                            ask_depth_10 = sum(l.size for l in ob.asks[:10])
+                            total_bid_depth = bid_depth_5 + bid_depth_10
+                            total_ask_depth = ask_depth_5 + ask_depth_10
+                            imbalance = (total_bid_depth - total_ask_depth) / (total_bid_depth + total_ask_depth) if (total_bid_depth + total_ask_depth) > 0 else 0
+                            
+                            best_bid_size = ob.bids[0].size if ob.bids else 0
+                            best_ask_size = ob.asks[0].size if ob.asks else 0
+                            bid_ask_size_ratio = best_bid_size / best_ask_size if best_ask_size > 0 else 1
+                            
+                            # === VOLUME & LIQUIDITY ===
+                            volume_24h = float(m.volume or 0)
+                            liquidity = float(m.liquidity or 0)
+                            liquidity_bid = sum(l.size * l.price for l in ob.bids[:10])
+                            liquidity_ask = sum(l.size * l.price for l in ob.asks[:10])
+                            
+                            # === MOMENTUM (from collector's price history) ===
+                            momentum_1h = self.ai_orchestrator.collector.compute_momentum(o.token_id, 1)
+                            momentum_4h = self.ai_orchestrator.collector.compute_momentum(o.token_id, 4)
+                            momentum_24h = self.ai_orchestrator.collector.compute_momentum(o.token_id, 24)
+                            momentum_7d = self.ai_orchestrator.collector.compute_momentum(o.token_id, 168)
+                            
+                            # === VOLATILITY ===
+                            volatility_1h = self.ai_orchestrator.collector.compute_volatility(o.token_id, 1)
+                            volatility_24h = self.ai_orchestrator.collector.compute_volatility(o.token_id, 24)
+                            volatility_7d = self.ai_orchestrator.collector.compute_volatility(o.token_id, 168)
+                            
+                            # === TIMING FEATURES ===
+                            days_to_res = self._days_to_resolution(m.end_date)
+                            hours_to_res = days_to_res * 24
+                            hour_of_day = now.hour
+                            day_of_week = now.weekday()
+                            is_weekend = day_of_week >= 5
+                            
+                            # === MARKET METADATA ===
+                            category = getattr(m, 'category', '')
+                            market_slug = getattr(m, 'slug', '')
+                            question = getattr(m, 'question', '')
+                            description = getattr(m, 'description', '')
+                            
+                            # === DERIVED FEATURES ===
+                            price_vs_volume = mid / volume_24h if volume_24h > 0 else 0
+                            liq_per_vol = liquidity / volume_24h if volume_24h > 0 else 0
+                            spread_adj_edge = max(0, abs(mid - 0.5) - spread_pct)
                             
                             created = self.ai_orchestrator.collect_snapshot(
                                 token_id=o.token_id,
                                 market_id=m.condition_id,
                                 price=mid,
-                                bid=ob.bids[0].price,
-                                ask=ob.asks[0].price,
+                                bid=best_bid,
+                                ask=best_ask,
+                                spread=spread,
+                                spread_pct=spread_pct,
+                                mid_price=mid,
                                 orderbook_imbalance=imbalance,
-                                volume_24h=float(m.volume or 0),
-                                liquidity=float(m.liquidity or 0),
-                                bid_depth=bid_depth,
-                                ask_depth=ask_depth,
-                                category=getattr(m, 'category', ''),
-                                days_to_resolution=self._days_to_resolution(m.end_date),
+                                volume_24h=volume_24h,
+                                liquidity=liquidity,
+                                liquidity_bid=liquidity_bid,
+                                liquidity_ask=liquidity_ask,
+                                bid_depth=total_bid_depth,
+                                ask_depth=total_ask_depth,
+                                bid_depth_5=bid_depth_5,
+                                ask_depth_5=ask_depth_5,
+                                bid_depth_10=bid_depth_10,
+                                ask_depth_10=ask_depth_10,
+                                bid_levels=len(ob.bids),
+                                ask_levels=len(ob.asks),
+                                best_bid_size=best_bid_size,
+                                best_ask_size=best_ask_size,
+                                bid_ask_size_ratio=bid_ask_size_ratio,
+                                momentum_1h=momentum_1h,
+                                momentum_4h=momentum_4h,
+                                momentum_24h=momentum_24h,
+                                momentum_7d=momentum_7d,
+                                volatility_1h=volatility_1h,
+                                volatility_24h=volatility_24h,
+                                volatility_7d=volatility_7d,
+                                days_to_resolution=days_to_res,
+                                hours_to_resolution=hours_to_res,
+                                hour_of_day=hour_of_day,
+                                day_of_week=day_of_week,
+                                category=category,
+                                market_slug=market_slug,
+                                question_length=len(question),
+                                description_length=len(description),
+                                price_vs_volume_ratio=price_vs_volume,
+                                liquidity_per_dollar_volume=liq_per_vol,
+                                spread_adjusted_edge=spread_adj_edge,
                             )
                             snapshots_collected += 1
                             if created:

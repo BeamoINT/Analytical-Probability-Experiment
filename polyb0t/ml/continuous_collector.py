@@ -6,6 +6,8 @@ at regular intervals, not just on resolution. It handles:
 - Creating multiple examples per position over time
 - Persisting data across restarts
 - Catching up on missed data after shutdown
+- Schema versioning for backwards compatibility
+- Storage limits with automatic cleanup
 """
 
 import json
@@ -13,39 +15,169 @@ import logging
 import os
 import sqlite3
 import time
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from datetime import datetime, timedelta
 from typing import Any, Optional
 import threading
 
 logger = logging.getLogger(__name__)
 
+# Schema version - increment when adding new features
+SCHEMA_VERSION = 2
+
+# Maximum storage size (140GB)
+MAX_STORAGE_BYTES = 140 * 1024 * 1024 * 1024
+
 
 @dataclass
 class MarketSnapshot:
-    """A snapshot of market state at a point in time."""
+    """A comprehensive snapshot of market state at a point in time.
+    
+    Version 2: Added many more features for richer training data.
+    """
+    # === IDENTIFIERS ===
     token_id: str
     market_id: str
     timestamp: datetime
-    price: float
-    bid: float
-    ask: float
-    spread: float
-    volume_24h: float
-    liquidity: float
-    orderbook_imbalance: float
-    bid_depth: float
-    ask_depth: float
-    momentum_1h: float
-    momentum_24h: float
-    trade_count_1h: int
-    category: str
-    days_to_resolution: float
+    schema_version: int = SCHEMA_VERSION
+    
+    # === PRICE DATA ===
+    price: float = 0.0
+    bid: float = 0.0
+    ask: float = 0.0
+    spread: float = 0.0
+    spread_pct: float = 0.0  # Spread as percentage of price
+    mid_price: float = 0.0
+    
+    # === VOLUME & LIQUIDITY ===
+    volume_24h: float = 0.0
+    volume_1h: float = 0.0
+    volume_6h: float = 0.0
+    liquidity: float = 0.0
+    liquidity_bid: float = 0.0  # Liquidity on bid side
+    liquidity_ask: float = 0.0  # Liquidity on ask side
+    
+    # === ORDERBOOK FEATURES ===
+    orderbook_imbalance: float = 0.0  # -1 to +1
+    bid_depth: float = 0.0
+    ask_depth: float = 0.0
+    bid_depth_5: float = 0.0  # Top 5 levels
+    ask_depth_5: float = 0.0
+    bid_depth_10: float = 0.0  # Top 10 levels
+    ask_depth_10: float = 0.0
+    bid_levels: int = 0  # Number of bid levels
+    ask_levels: int = 0  # Number of ask levels
+    best_bid_size: float = 0.0
+    best_ask_size: float = 0.0
+    bid_ask_size_ratio: float = 0.0
+    
+    # === MOMENTUM / PRICE CHANGES ===
+    momentum_1h: float = 0.0
+    momentum_4h: float = 0.0
+    momentum_24h: float = 0.0
+    momentum_7d: float = 0.0
+    price_change_1h: float = 0.0
+    price_change_4h: float = 0.0
+    price_change_24h: float = 0.0
+    price_high_24h: float = 0.0
+    price_low_24h: float = 0.0
+    price_range_24h: float = 0.0  # High - Low
+    
+    # === VOLATILITY ===
+    volatility_1h: float = 0.0
+    volatility_24h: float = 0.0
+    volatility_7d: float = 0.0
+    atr_24h: float = 0.0  # Average True Range
+    
+    # === TRADE FLOW ===
+    trade_count_1h: int = 0
+    trade_count_24h: int = 0
+    avg_trade_size_1h: float = 0.0
+    avg_trade_size_24h: float = 0.0
+    buy_volume_1h: float = 0.0
+    sell_volume_1h: float = 0.0
+    buy_sell_ratio_1h: float = 0.0
+    large_trade_count_24h: int = 0  # Trades > $100
+    
+    # === MARKET METADATA ===
+    category: str = ""
+    subcategory: str = ""
+    market_slug: str = ""
+    question_length: int = 0
+    description_length: int = 0
+    has_icon: bool = False
+    
+    # === TIMING FEATURES ===
+    days_to_resolution: float = 30.0
+    hours_to_resolution: float = 720.0
+    market_age_days: float = 0.0  # Days since market created
+    hour_of_day: int = 0  # 0-23
+    day_of_week: int = 0  # 0-6 (Monday=0)
+    is_weekend: bool = False
+    
+    # === MARKET STATE ===
+    is_active: bool = True
+    is_closed: bool = False
+    total_yes_shares: float = 0.0
+    total_no_shares: float = 0.0
+    open_interest: float = 0.0
+    
+    # === RELATED MARKETS ===
+    num_related_markets: int = 0
+    avg_related_price: float = 0.0
+    
+    # === SOCIAL/ENGAGEMENT (if available) ===
+    comment_count: int = 0
+    view_count: int = 0
+    unique_traders: int = 0
+    
+    # === DERIVED FEATURES ===
+    price_vs_volume_ratio: float = 0.0  # Price relative to volume
+    liquidity_per_dollar_volume: float = 0.0
+    spread_adjusted_edge: float = 0.0
     
     def to_dict(self) -> dict:
         d = asdict(self)
         d['timestamp'] = self.timestamp.isoformat()
         return d
+    
+    @classmethod
+    def get_feature_columns(cls) -> list[str]:
+        """Get list of numeric feature columns for training."""
+        return [
+            # Core price features
+            "price", "spread", "spread_pct", "mid_price",
+            # Volume & liquidity
+            "volume_24h", "volume_1h", "volume_6h", "liquidity",
+            "liquidity_bid", "liquidity_ask",
+            # Orderbook
+            "orderbook_imbalance", "bid_depth", "ask_depth",
+            "bid_depth_5", "ask_depth_5", "bid_depth_10", "ask_depth_10",
+            "bid_levels", "ask_levels", "best_bid_size", "best_ask_size",
+            "bid_ask_size_ratio",
+            # Momentum
+            "momentum_1h", "momentum_4h", "momentum_24h", "momentum_7d",
+            "price_change_1h", "price_change_4h", "price_change_24h",
+            "price_high_24h", "price_low_24h", "price_range_24h",
+            # Volatility
+            "volatility_1h", "volatility_24h", "volatility_7d", "atr_24h",
+            # Trade flow
+            "trade_count_1h", "trade_count_24h",
+            "avg_trade_size_1h", "avg_trade_size_24h",
+            "buy_volume_1h", "sell_volume_1h", "buy_sell_ratio_1h",
+            "large_trade_count_24h",
+            # Timing
+            "days_to_resolution", "hours_to_resolution", "market_age_days",
+            "hour_of_day", "day_of_week",
+            # Market state
+            "total_yes_shares", "total_no_shares", "open_interest",
+            # Related/social
+            "num_related_markets", "avg_related_price",
+            "comment_count", "view_count", "unique_traders",
+            # Derived
+            "price_vs_volume_ratio", "liquidity_per_dollar_volume",
+            "spread_adjusted_edge",
+        ]
 
 
 @dataclass 
@@ -55,32 +187,44 @@ class TrainingExample:
     token_id: str
     market_id: str
     created_at: datetime
+    schema_version: int = SCHEMA_VERSION
     
     # Features at time of snapshot
-    features: dict
+    features: dict = field(default_factory=dict)
     
-    # Label: what happened next
+    # Label: what happened next (multiple timeframes)
+    price_change_15m: Optional[float] = None
     price_change_1h: Optional[float] = None
     price_change_4h: Optional[float] = None
     price_change_24h: Optional[float] = None
+    price_change_7d: Optional[float] = None
     price_change_to_resolution: Optional[float] = None
+    
+    # Direction labels (for classification)
+    direction_1h: Optional[int] = None  # 1=up, 0=flat, -1=down
+    direction_24h: Optional[int] = None
+    
+    # Final resolution
     resolved_outcome: Optional[int] = None  # 1 = Yes won, 0 = No won
     
     # Metadata
     labeled_at: Optional[datetime] = None
     is_fully_labeled: bool = False
+    available_features: list = field(default_factory=list)  # Which features were available
 
 
 class ContinuousDataCollector:
     """Collects training data continuously from Polymarket."""
     
-    def __init__(self, db_path: str = "data/ai_training.db"):
+    def __init__(self, db_path: str = "data/ai_training.db", max_storage_bytes: int = MAX_STORAGE_BYTES):
         """Initialize the collector.
         
         Args:
             db_path: Path to SQLite database for persistence.
+            max_storage_bytes: Maximum storage size in bytes (default 140GB).
         """
         self.db_path = db_path
+        self.max_storage_bytes = max_storage_bytes
         self._ensure_db()
         self._lock = threading.Lock()
         self._running = False
@@ -90,6 +234,9 @@ class ContinuousDataCollector:
         self._last_collection_time: Optional[datetime] = None
         self._load_state()
         
+        # Check storage on startup
+        self._check_storage()
+        
     def _ensure_db(self) -> None:
         """Create database tables if they don't exist."""
         os.makedirs(os.path.dirname(self.db_path) if os.path.dirname(self.db_path) else ".", exist_ok=True)
@@ -97,43 +244,37 @@ class ContinuousDataCollector:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        # Market snapshots table
+        # Market snapshots table (expanded schema)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS market_snapshots (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 token_id TEXT NOT NULL,
                 market_id TEXT NOT NULL,
                 timestamp TEXT NOT NULL,
-                price REAL,
-                bid REAL,
-                ask REAL,
-                spread REAL,
-                volume_24h REAL,
-                liquidity REAL,
-                orderbook_imbalance REAL,
-                bid_depth REAL,
-                ask_depth REAL,
-                momentum_1h REAL,
-                momentum_24h REAL,
-                trade_count_1h INTEGER,
-                category TEXT,
-                days_to_resolution REAL,
+                schema_version INTEGER DEFAULT 1,
+                data JSON NOT NULL,
                 UNIQUE(token_id, timestamp)
             )
         """)
         
-        # Training examples table
+        # Training examples table (expanded schema)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS training_examples (
                 example_id TEXT PRIMARY KEY,
                 token_id TEXT NOT NULL,
                 market_id TEXT NOT NULL,
                 created_at TEXT NOT NULL,
+                schema_version INTEGER DEFAULT 1,
                 features TEXT NOT NULL,
+                available_features TEXT,
+                price_change_15m REAL,
                 price_change_1h REAL,
                 price_change_4h REAL,
                 price_change_24h REAL,
+                price_change_7d REAL,
                 price_change_to_resolution REAL,
+                direction_1h INTEGER,
+                direction_24h INTEGER,
                 resolved_outcome INTEGER,
                 labeled_at TEXT,
                 is_fully_labeled INTEGER DEFAULT 0
@@ -148,7 +289,8 @@ class ContinuousDataCollector:
                 started_tracking TEXT NOT NULL,
                 last_snapshot TEXT,
                 is_resolved INTEGER DEFAULT 0,
-                resolution_outcome INTEGER
+                resolution_outcome INTEGER,
+                market_metadata TEXT
             )
         """)
         
@@ -160,13 +302,108 @@ class ContinuousDataCollector:
             )
         """)
         
-        # Create indexes
+        # Price history table (for computing momentum/volatility)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS price_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token_id TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                price REAL NOT NULL,
+                volume REAL DEFAULT 0,
+                UNIQUE(token_id, timestamp)
+            )
+        """)
+        
+        # Storage stats table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS storage_stats (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                total_snapshots INTEGER DEFAULT 0,
+                total_examples INTEGER DEFAULT 0,
+                last_cleanup TEXT,
+                db_size_bytes INTEGER DEFAULT 0
+            )
+        """)
+        
+        # Initialize storage stats if not exists
+        cursor.execute("""
+            INSERT OR IGNORE INTO storage_stats (id, total_snapshots, total_examples)
+            VALUES (1, 0, 0)
+        """)
+        
+        # Create indexes for performance
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_token ON market_snapshots(token_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_time ON market_snapshots(timestamp)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_version ON market_snapshots(schema_version)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_examples_labeled ON training_examples(is_fully_labeled)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_examples_version ON training_examples(schema_version)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_price_history_token ON price_history(token_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_price_history_time ON price_history(timestamp)")
         
         conn.commit()
         conn.close()
+        
+    def _check_storage(self) -> None:
+        """Check storage usage and cleanup if needed."""
+        try:
+            db_size = os.path.getsize(self.db_path) if os.path.exists(self.db_path) else 0
+            
+            if db_size > self.max_storage_bytes:
+                logger.warning(
+                    f"Storage limit exceeded: {db_size / 1e9:.1f}GB > {self.max_storage_bytes / 1e9:.1f}GB. "
+                    "Running cleanup..."
+                )
+                self._cleanup_old_data()
+            else:
+                logger.info(f"Storage usage: {db_size / 1e9:.2f}GB / {self.max_storage_bytes / 1e9:.0f}GB")
+                
+        except Exception as e:
+            logger.warning(f"Storage check failed: {e}")
+            
+    def _cleanup_old_data(self) -> None:
+        """Remove oldest data to stay under storage limit."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        try:
+            # Delete oldest 10% of snapshots
+            cursor.execute("""
+                DELETE FROM market_snapshots 
+                WHERE id IN (
+                    SELECT id FROM market_snapshots 
+                    ORDER BY timestamp ASC 
+                    LIMIT (SELECT COUNT(*) / 10 FROM market_snapshots)
+                )
+            """)
+            deleted_snapshots = cursor.rowcount
+            
+            # Delete oldest 10% of price history
+            cursor.execute("""
+                DELETE FROM price_history 
+                WHERE id IN (
+                    SELECT id FROM price_history 
+                    ORDER BY timestamp ASC 
+                    LIMIT (SELECT COUNT(*) / 10 FROM price_history)
+                )
+            """)
+            deleted_prices = cursor.rowcount
+            
+            # Update last cleanup time
+            cursor.execute("""
+                UPDATE storage_stats SET last_cleanup = ? WHERE id = 1
+            """, (datetime.utcnow().isoformat(),))
+            
+            conn.commit()
+            
+            # Vacuum to reclaim space
+            cursor.execute("VACUUM")
+            
+            logger.info(f"Cleanup complete: deleted {deleted_snapshots} snapshots, {deleted_prices} price points")
+            
+        except Exception as e:
+            logger.error(f"Cleanup failed: {e}")
+        finally:
+            conn.close()
         
     def _load_state(self) -> None:
         """Load collector state from database."""
@@ -230,12 +467,43 @@ class ContinuousDataCollector:
         conn.close()
         return count
     
-    def add_market_to_track(self, token_id: str, market_id: str) -> bool:
+    def get_storage_stats(self) -> dict:
+        """Get storage statistics."""
+        try:
+            db_size = os.path.getsize(self.db_path) if os.path.exists(self.db_path) else 0
+            
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute("SELECT COUNT(*) FROM market_snapshots")
+            snapshot_count = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM price_history")
+            price_count = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM training_examples")
+            example_count = cursor.fetchone()[0]
+            
+            conn.close()
+            
+            return {
+                "db_size_gb": db_size / 1e9,
+                "max_size_gb": self.max_storage_bytes / 1e9,
+                "usage_pct": (db_size / self.max_storage_bytes) * 100,
+                "snapshots": snapshot_count,
+                "price_points": price_count,
+                "examples": example_count,
+            }
+        except Exception as e:
+            return {"error": str(e)}
+    
+    def add_market_to_track(self, token_id: str, market_id: str, metadata: dict = None) -> bool:
         """Add a market to track for training data.
         
         Args:
             token_id: Token ID to track.
             market_id: Market condition ID.
+            metadata: Optional market metadata to store.
             
         Returns:
             True if added, False if already tracking.
@@ -245,8 +513,8 @@ class ContinuousDataCollector:
         
         try:
             cursor.execute(
-                "INSERT INTO tracked_markets (token_id, market_id, started_tracking) VALUES (?, ?, ?)",
-                (token_id, market_id, datetime.utcnow().isoformat())
+                "INSERT INTO tracked_markets (token_id, market_id, started_tracking, market_metadata) VALUES (?, ?, ?, ?)",
+                (token_id, market_id, datetime.utcnow().isoformat(), json.dumps(metadata) if metadata else None)
             )
             conn.commit()
             logger.debug(f"Started tracking market {token_id[:12]} for AI training")
@@ -266,19 +534,23 @@ class ContinuousDataCollector:
         cursor = conn.cursor()
         
         try:
+            # Store full snapshot as JSON
             cursor.execute("""
                 INSERT OR IGNORE INTO market_snapshots 
-                (token_id, market_id, timestamp, price, bid, ask, spread, volume_24h,
-                 liquidity, orderbook_imbalance, bid_depth, ask_depth, momentum_1h,
-                 momentum_24h, trade_count_1h, category, days_to_resolution)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (token_id, market_id, timestamp, schema_version, data)
+                VALUES (?, ?, ?, ?, ?)
             """, (
                 snapshot.token_id, snapshot.market_id, snapshot.timestamp.isoformat(),
-                snapshot.price, snapshot.bid, snapshot.ask, snapshot.spread,
-                snapshot.volume_24h, snapshot.liquidity, snapshot.orderbook_imbalance,
-                snapshot.bid_depth, snapshot.ask_depth, snapshot.momentum_1h,
-                snapshot.momentum_24h, snapshot.trade_count_1h, snapshot.category,
-                snapshot.days_to_resolution
+                snapshot.schema_version, json.dumps(snapshot.to_dict())
+            ))
+            
+            # Also store in price history for momentum calculations
+            cursor.execute("""
+                INSERT OR IGNORE INTO price_history (token_id, timestamp, price, volume)
+                VALUES (?, ?, ?, ?)
+            """, (
+                snapshot.token_id, snapshot.timestamp.isoformat(),
+                snapshot.price, snapshot.volume_24h
             ))
             
             # Update last snapshot time
@@ -305,22 +577,103 @@ class ContinuousDataCollector:
         example_id = str(uuid.uuid4())
         features = snapshot.to_dict()
         
+        # Track which features are available (for backwards compat)
+        available_features = [k for k, v in features.items() if v is not None and v != 0 and v != ""]
+        
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
         cursor.execute("""
             INSERT INTO training_examples 
-            (example_id, token_id, market_id, created_at, features, is_fully_labeled)
-            VALUES (?, ?, ?, ?, ?, 0)
+            (example_id, token_id, market_id, created_at, schema_version, features, available_features, is_fully_labeled)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 0)
         """, (
             example_id, snapshot.token_id, snapshot.market_id,
-            datetime.utcnow().isoformat(), json.dumps(features)
+            datetime.utcnow().isoformat(), snapshot.schema_version,
+            json.dumps(features), json.dumps(available_features)
         ))
         
         conn.commit()
         conn.close()
         
         return example_id
+    
+    def get_price_history(self, token_id: str, hours: int = 24) -> list[tuple[datetime, float]]:
+        """Get price history for a token.
+        
+        Args:
+            token_id: Token ID.
+            hours: Hours of history to fetch.
+            
+        Returns:
+            List of (timestamp, price) tuples.
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+        
+        cursor.execute("""
+            SELECT timestamp, price FROM price_history
+            WHERE token_id = ? AND timestamp > ?
+            ORDER BY timestamp ASC
+        """, (token_id, cutoff))
+        
+        rows = cursor.fetchall()
+        conn.close()
+        
+        return [(datetime.fromisoformat(ts), price) for ts, price in rows]
+    
+    def compute_momentum(self, token_id: str, hours: int) -> float:
+        """Compute price momentum over given hours.
+        
+        Args:
+            token_id: Token ID.
+            hours: Hours to look back.
+            
+        Returns:
+            Momentum (price change ratio).
+        """
+        history = self.get_price_history(token_id, hours)
+        if len(history) < 2:
+            return 0.0
+        
+        first_price = history[0][1]
+        last_price = history[-1][1]
+        
+        if first_price <= 0:
+            return 0.0
+            
+        return (last_price - first_price) / first_price
+    
+    def compute_volatility(self, token_id: str, hours: int) -> float:
+        """Compute price volatility over given hours.
+        
+        Args:
+            token_id: Token ID.
+            hours: Hours to look back.
+            
+        Returns:
+            Volatility (standard deviation of returns).
+        """
+        history = self.get_price_history(token_id, hours)
+        if len(history) < 3:
+            return 0.0
+        
+        prices = [p for _, p in history]
+        returns = []
+        for i in range(1, len(prices)):
+            if prices[i-1] > 0:
+                returns.append((prices[i] - prices[i-1]) / prices[i-1])
+        
+        if len(returns) < 2:
+            return 0.0
+        
+        import statistics
+        try:
+            return statistics.stdev(returns)
+        except:
+            return 0.0
     
     def label_examples(self) -> int:
         """Label unlabeled examples with future price data.
@@ -352,31 +705,58 @@ class ContinuousDataCollector:
                 
             # Get snapshots after this example was created
             cursor.execute("""
-                SELECT timestamp, price FROM market_snapshots
+                SELECT timestamp, json_extract(data, '$.price') as price 
+                FROM market_snapshots
                 WHERE token_id = ? AND timestamp > ?
                 ORDER BY timestamp ASC
             """, (token_id, created_at_str))
             
             future_snapshots = cursor.fetchall()
             
+            price_change_15m = None
             price_change_1h = None
             price_change_4h = None
             price_change_24h = None
+            price_change_7d = None
             
             for snap_time_str, snap_price in future_snapshots:
+                if snap_price is None:
+                    continue
                 snap_time = datetime.fromisoformat(snap_time_str)
                 hours_later = (snap_time - created_at).total_seconds() / 3600
                 
                 if snap_price and snap_price > 0:
                     price_change = (snap_price - initial_price) / initial_price
                     
+                    if hours_later >= 0.25 and price_change_15m is None:
+                        price_change_15m = price_change
                     if hours_later >= 1 and price_change_1h is None:
                         price_change_1h = price_change
                     if hours_later >= 4 and price_change_4h is None:
                         price_change_4h = price_change
                     if hours_later >= 24 and price_change_24h is None:
                         price_change_24h = price_change
+                    if hours_later >= 168 and price_change_7d is None:  # 7 days
+                        price_change_7d = price_change
                         
+            # Compute direction labels
+            direction_1h = None
+            direction_24h = None
+            if price_change_1h is not None:
+                if price_change_1h > 0.01:
+                    direction_1h = 1
+                elif price_change_1h < -0.01:
+                    direction_1h = -1
+                else:
+                    direction_1h = 0
+            if price_change_24h is not None:
+                if price_change_24h > 0.02:
+                    direction_24h = 1
+                elif price_change_24h < -0.02:
+                    direction_24h = -1
+                else:
+                    direction_24h = 0
+                    
             # Check if we can fully label this example
             hours_since_created = (now - created_at).total_seconds() / 3600
             
@@ -395,11 +775,15 @@ class ContinuousDataCollector:
             # Update the example
             cursor.execute("""
                 UPDATE training_examples
-                SET price_change_1h = ?, price_change_4h = ?, price_change_24h = ?,
+                SET price_change_15m = ?, price_change_1h = ?, price_change_4h = ?, 
+                    price_change_24h = ?, price_change_7d = ?,
+                    direction_1h = ?, direction_24h = ?,
                     resolved_outcome = ?, labeled_at = ?, is_fully_labeled = ?
                 WHERE example_id = ?
             """, (
-                price_change_1h, price_change_4h, price_change_24h,
+                price_change_15m, price_change_1h, price_change_4h, 
+                price_change_24h, price_change_7d,
+                direction_1h, direction_24h,
                 resolution_outcome, now.isoformat() if is_fully_labeled else None,
                 1 if is_fully_labeled else 0, example_id
             ))
@@ -435,11 +819,14 @@ class ContinuousDataCollector:
         
         logger.info(f"Marked market {token_id[:12]} as resolved with outcome {outcome}")
     
-    def get_training_data(self, only_labeled: bool = True) -> list[dict]:
+    def get_training_data(self, only_labeled: bool = True, min_schema_version: int = 1) -> list[dict]:
         """Get training data for model training.
+        
+        Handles backwards compatibility by filling missing features with defaults.
         
         Args:
             only_labeled: If True, only return fully labeled examples.
+            min_schema_version: Minimum schema version to include.
             
         Returns:
             List of training examples as dictionaries.
@@ -447,30 +834,50 @@ class ContinuousDataCollector:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
+        query = """
+            SELECT features, schema_version, available_features,
+                   price_change_15m, price_change_1h, price_change_4h, 
+                   price_change_24h, price_change_7d,
+                   direction_1h, direction_24h, resolved_outcome
+            FROM training_examples
+            WHERE schema_version >= ?
+        """
+        
         if only_labeled:
-            cursor.execute("""
-                SELECT features, price_change_1h, price_change_4h, price_change_24h,
-                       resolved_outcome
-                FROM training_examples
-                WHERE is_fully_labeled = 1
-            """)
-        else:
-            cursor.execute("""
-                SELECT features, price_change_1h, price_change_4h, price_change_24h,
-                       resolved_outcome
-                FROM training_examples
-            """)
+            query += " AND is_fully_labeled = 1"
             
+        cursor.execute(query, (min_schema_version,))
         rows = cursor.fetchall()
         conn.close()
         
+        # Get all possible feature columns
+        all_feature_cols = MarketSnapshot.get_feature_columns()
+        
         data = []
-        for features_json, pc_1h, pc_4h, pc_24h, outcome in rows:
+        for (features_json, schema_ver, avail_features_json,
+             pc_15m, pc_1h, pc_4h, pc_24h, pc_7d,
+             dir_1h, dir_24h, outcome) in rows:
+            
             features = json.loads(features_json)
+            available = json.loads(avail_features_json) if avail_features_json else []
+            
+            # Fill missing features with 0 for backwards compatibility
+            for col in all_feature_cols:
+                if col not in features:
+                    features[col] = 0.0
+                    
+            # Add labels
+            features["label_price_change_15m"] = pc_15m
             features["label_price_change_1h"] = pc_1h
             features["label_price_change_4h"] = pc_4h
             features["label_price_change_24h"] = pc_24h
+            features["label_price_change_7d"] = pc_7d
+            features["label_direction_1h"] = dir_1h
+            features["label_direction_24h"] = dir_24h
             features["label_resolved_outcome"] = outcome
+            features["_schema_version"] = schema_ver
+            features["_available_features"] = available
+            
             data.append(features)
             
         return data
@@ -496,12 +903,15 @@ class ContinuousDataCollector:
         Returns:
             Dictionary of stats.
         """
+        storage = self.get_storage_stats()
         return {
             "tracked_markets": self.get_tracked_market_count(),
             "total_examples": self.get_total_examples(),
             "labeled_examples": self.get_labeled_examples(),
             "unlabeled_examples": self.get_unlabeled_examples(),
             "last_collection": self._last_collection_time.isoformat() if self._last_collection_time else None,
+            "storage": storage,
+            "schema_version": SCHEMA_VERSION,
         }
 
 
