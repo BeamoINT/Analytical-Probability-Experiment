@@ -238,7 +238,7 @@ class ContinuousDataCollector:
         self._check_storage()
         
     def _ensure_db(self) -> None:
-        """Create database tables if they don't exist."""
+        """Create database tables if they don't exist, and migrate old schemas."""
         os.makedirs(os.path.dirname(self.db_path) if os.path.dirname(self.db_path) else ".", exist_ok=True)
         
         conn = sqlite3.connect(self.db_path)
@@ -256,6 +256,16 @@ class ContinuousDataCollector:
                 UNIQUE(token_id, timestamp)
             )
         """)
+        
+        # === MIGRATE OLD SCHEMA ===
+        # Add schema_version column if it doesn't exist (for old databases)
+        try:
+            cursor.execute("SELECT schema_version FROM market_snapshots LIMIT 1")
+        except sqlite3.OperationalError:
+            logger.info("Migrating database: adding schema_version column to market_snapshots")
+            cursor.execute("ALTER TABLE market_snapshots ADD COLUMN schema_version INTEGER DEFAULT 1")
+            cursor.execute("ALTER TABLE market_snapshots ADD COLUMN data JSON")
+            conn.commit()
         
         # Training examples table (expanded schema)
         cursor.execute("""
@@ -280,6 +290,37 @@ class ContinuousDataCollector:
                 is_fully_labeled INTEGER DEFAULT 0
             )
         """)
+        
+        # Migrate training_examples table if needed
+        try:
+            cursor.execute("SELECT schema_version FROM training_examples LIMIT 1")
+        except sqlite3.OperationalError:
+            logger.info("Migrating database: adding new columns to training_examples")
+            try:
+                cursor.execute("ALTER TABLE training_examples ADD COLUMN schema_version INTEGER DEFAULT 1")
+            except sqlite3.OperationalError:
+                pass  # Column might already exist
+            try:
+                cursor.execute("ALTER TABLE training_examples ADD COLUMN available_features TEXT")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                cursor.execute("ALTER TABLE training_examples ADD COLUMN price_change_15m REAL")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                cursor.execute("ALTER TABLE training_examples ADD COLUMN price_change_7d REAL")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                cursor.execute("ALTER TABLE training_examples ADD COLUMN direction_1h INTEGER")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                cursor.execute("ALTER TABLE training_examples ADD COLUMN direction_24h INTEGER")
+            except sqlite3.OperationalError:
+                pass
+            conn.commit()
         
         # Tracked markets table
         cursor.execute("""
