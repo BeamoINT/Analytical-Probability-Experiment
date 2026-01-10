@@ -330,7 +330,13 @@ class TradingScheduler:
                         extra={"cycle_id": cycle_id, "dry_run": self.settings.dry_run},
                     )
                 executor = LiveExecutor(db_session=db_session, intent_manager=intent_manager)
-                execution_summary = executor.process_approved_intents(cycle_id=cycle_id)
+                
+                # PLACING_ORDERS check: skip all execution if disabled
+                if not self.settings.placing_orders:
+                    logger.info("Placing orders DISABLED - skipping execution (data collection mode)")
+                    execution_summary = {"processed": 0, "executed": 0, "failed": 0, "dry_run": True, "reason": "placing_orders=false"}
+                else:
+                    execution_summary = executor.process_approved_intents(cycle_id=cycle_id)
 
             # Step 1: Fetch markets
             markets, gamma_list_diag = await self._fetch_markets(db_session)
@@ -559,7 +565,7 @@ class TradingScheduler:
                                 bid_depth=bid_depth,
                                 ask_depth=ask_depth,
                                 category=getattr(m, 'category', ''),
-                                days_to_resolution=(m.end_date - datetime.utcnow()).days if m.end_date else 30,
+                                days_to_resolution=self._days_to_resolution(m.end_date),
                             )
                     
                     self.ai_orchestrator.finish_example_cycle()
@@ -890,7 +896,7 @@ class TradingScheduler:
                 # means a restart could strand a backlog of PENDING intents forever (and then dedup
                 # prevents new ones). Here we sweep any existing PENDING intents, approve them, and
                 # let the executor pick them up.
-                if self.settings.mode == "live" and bool(self.settings.auto_approve_intents):
+                if self.settings.mode == "live" and bool(self.settings.auto_approve_intents) and self.settings.placing_orders:
                     try:
                         pending = intent_manager.get_pending_intents()
                         auto_approved_existing = 0
@@ -1564,7 +1570,7 @@ class TradingScheduler:
                     "ask_depth": ask_depth,
                     "momentum_1h": 0,  # TODO: calculate from price history
                     "momentum_24h": 0,
-                    "days_to_resolution": (market.end_date - datetime.utcnow()).days if market.end_date else 30,
+                    "days_to_resolution": self._days_to_resolution(market.end_date),
                 }
                 
                 # Get AI signal
@@ -1620,6 +1626,32 @@ class TradingScheduler:
                 )
                 
         return signals, rejections
+
+    def _days_to_resolution(self, end_date: Optional[datetime]) -> float:
+        """Calculate days until market resolution, handling timezone-aware dates.
+        
+        Args:
+            end_date: Market end date (may be timezone-aware or naive).
+            
+        Returns:
+            Days until resolution, or 30 if unknown.
+        """
+        if not end_date:
+            return 30.0
+        
+        try:
+            now = datetime.utcnow()
+            
+            # Make both timezone-naive for comparison
+            if end_date.tzinfo is not None:
+                end_naive = end_date.replace(tzinfo=None)
+            else:
+                end_naive = end_date
+                
+            delta = end_naive - now
+            return max(0.0, delta.days + delta.seconds / 86400)
+        except Exception:
+            return 30.0
 
     def _save_signals(
         self,
