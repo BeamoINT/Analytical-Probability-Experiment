@@ -335,6 +335,17 @@ class ContinuousDataCollector:
             )
         """)
         
+        # Migrate tracked_markets table if needed
+        try:
+            cursor.execute("SELECT market_metadata FROM tracked_markets LIMIT 1")
+        except sqlite3.OperationalError:
+            logger.info("Migrating database: adding market_metadata column to tracked_markets")
+            try:
+                cursor.execute("ALTER TABLE tracked_markets ADD COLUMN market_metadata TEXT")
+            except sqlite3.OperationalError:
+                pass
+            conn.commit()
+        
         # Collector state table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS collector_state (
