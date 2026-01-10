@@ -4,7 +4,7 @@ import asyncio
 import logging
 import time
 import uuid
-from typing import Any
+from typing import Any, Optional
 from datetime import datetime
 
 from sqlalchemy.orm import Session
@@ -34,6 +34,23 @@ from polyb0t.services.reporter import Reporter
 logger = logging.getLogger(__name__)
 
 
+def _check_strategy_mode() -> None:
+    """Check strategy mode and validate AI readiness."""
+    settings = get_settings()
+    
+    logger.info(f"Strategy mode: {settings.strategy_mode.upper()}")
+    logger.info(f"Placing orders: {settings.placing_orders}")
+    
+    if settings.strategy_mode == "ai":
+        try:
+            from polyb0t.ml.ai_orchestrator import check_ai_ready_or_exit
+            check_ai_ready_or_exit()
+        except ImportError as e:
+            logger.error(f"AI mode requested but AI modules not available: {e}")
+            if settings.placing_orders:
+                raise SystemExit(1)
+
+
 class TradingScheduler:
     """Main trading loop scheduler."""
 
@@ -44,6 +61,9 @@ class TradingScheduler:
         self.health = get_health_status()
         self.consecutive_errors = 0
 
+        # Check strategy mode before anything else
+        _check_strategy_mode()
+
         # Initialize database
         init_db()
 
@@ -52,6 +72,21 @@ class TradingScheduler:
         self.risk_manager = RiskManager()
         self.strategy = BaselineStrategy()
         self.market_filter = MarketFilter()
+        
+        # AI orchestrator (for AI mode and data collection)
+        self.ai_orchestrator: Optional[Any] = None
+        if self.settings.strategy_mode == "ai" or not self.settings.placing_orders:
+            try:
+                from polyb0t.ml.ai_orchestrator import get_ai_orchestrator
+                self.ai_orchestrator = get_ai_orchestrator()
+                stats = self.ai_orchestrator.get_training_stats()
+                logger.info(
+                    f"AI Orchestrator initialized: "
+                    f"{stats['collector']['total_examples']} examples, "
+                    f"model_ready={stats['is_ready']}"
+                )
+            except Exception as e:
+                logger.warning(f"Failed to initialize AI orchestrator: {e}")
 
         # Arbitrage scanner (optional)
         self.arbitrage_scanner = None
@@ -60,7 +95,10 @@ class TradingScheduler:
             self.arbitrage_scanner = ArbitrageScanner()
             logger.info("Arbitrage scanner enabled")
 
-        logger.info("Trading scheduler initialized")
+        logger.info(
+            f"Trading scheduler initialized "
+            f"(mode={self.settings.strategy_mode}, placing_orders={self.settings.placing_orders})"
+        )
 
     async def run(self) -> None:
         """Run main trading loop continuously."""
@@ -485,12 +523,78 @@ class TradingScheduler:
             available_for_signals = float(balance_summary.get("available_usdc", 0.0) or 0.0) if balance_summary else 0.0
             reserved_for_signals = float(balance_summary.get("reserved_usdc", 0.0) or 0.0) if balance_summary else 0.0
             
-            signals, signal_rejections = self.strategy.generate_signals(
-                tradable_markets, orderbooks, trades, available_for_signals, reserved_for_signals
-            )
+            # === AI DATA COLLECTION ===
+            # Collect data for AI training (runs regardless of strategy mode)
+            if self.ai_orchestrator:
+                try:
+                    # Track markets for AI training
+                    market_dicts = [
+                        {"condition_id": m.condition_id, "outcomes": [{"token_id": o.token_id} for o in m.outcomes]}
+                        for m in markets_for_data
+                    ]
+                    self.ai_orchestrator.track_markets(market_dicts)
+                    
+                    # Collect snapshots from orderbooks
+                    for m in tradable_markets:
+                        for o in m.outcomes:
+                            if not o.token_id:
+                                continue
+                            ob = orderbooks.get(o.token_id)
+                            if not ob or not ob.bids or not ob.asks:
+                                continue
+                            mid = (ob.bids[0].price + ob.asks[0].price) / 2
+                            bid_depth = sum(l.size for l in ob.bids[:5])
+                            ask_depth = sum(l.size for l in ob.asks[:5])
+                            imbalance = (bid_depth - ask_depth) / (bid_depth + ask_depth) if (bid_depth + ask_depth) > 0 else 0
+                            
+                            self.ai_orchestrator.collect_snapshot(
+                                token_id=o.token_id,
+                                market_id=m.condition_id,
+                                price=mid,
+                                bid=ob.bids[0].price,
+                                ask=ob.asks[0].price,
+                                orderbook_imbalance=imbalance,
+                                volume_24h=float(m.volume or 0),
+                                liquidity=float(m.liquidity or 0),
+                                bid_depth=bid_depth,
+                                ask_depth=ask_depth,
+                                category=getattr(m, 'category', ''),
+                                days_to_resolution=(m.end_date - datetime.utcnow()).days if m.end_date else 30,
+                            )
+                    
+                    self.ai_orchestrator.finish_example_cycle()
+                    
+                    # Run training if due
+                    if self.ai_orchestrator.should_train():
+                        logger.info("Starting AI training cycle...")
+                        self.ai_orchestrator.run_training()
+                        
+                except Exception as e:
+                    logger.warning(f"AI data collection failed: {e}")
+            
+            # === SIGNAL GENERATION ===
+            # Use rules-based OR AI-based signals (NOT hybrid)
+            signals: list[TradingSignal] = []
+            signal_rejections: dict[str, int] = {}
+            
+            if self.settings.strategy_mode == "rules":
+                # Rules-based signal generation
+                signals, signal_rejections = self.strategy.generate_signals(
+                    tradable_markets, orderbooks, trades, available_for_signals, reserved_for_signals
+                )
+            elif self.settings.strategy_mode == "ai" and self.ai_orchestrator and self.ai_orchestrator.is_ai_ready():
+                # AI-only signal generation
+                signals, signal_rejections = self._generate_ai_signals(
+                    tradable_markets, orderbooks, available_for_signals, reserved_for_signals
+                )
+            else:
+                # AI mode but no model - just collect data, no signals
+                logger.debug("AI mode but no model ready - collecting data only")
+                signal_rejections = {"ai_model_not_ready": len(tradable_markets) * 2}
+            
             self._save_signals(signals, cycle_id, db_session)
             logger.info(
-                f"Signals computed: {len(signals)}",
+                f"Signals computed: {len(signals)} ({self.settings.strategy_mode} mode)",
                 extra={"signal_rejections": signal_rejections},
             )
 
@@ -1046,7 +1150,13 @@ class TradingScheduler:
                 # Autonomous mode: auto-approve and (if not dry-run) auto-execute newly created intents.
                 auto_approved = 0
                 auto_execution: dict[str, Any] | None = None
-                if self.settings.mode == "live" and self.settings.auto_approve_intents:
+                
+                # PLACING_ORDERS check: skip all execution if disabled
+                if not self.settings.placing_orders:
+                    logger.debug(
+                        f"Placing orders disabled - skipping execution of {len(created_intent_ids)} intents"
+                    )
+                elif self.settings.mode == "live" and self.settings.auto_approve_intents:
                     for iid in created_intent_ids:
                         try:
                             if intent_manager.approve_intent(iid, approved_by="auto") is not None:
@@ -1398,6 +1508,118 @@ class TradingScheduler:
             db_session.add(db_trade)
 
         db_session.commit()
+
+    def _generate_ai_signals(
+        self,
+        markets: list,
+        orderbooks: dict[str, OrderBook],
+        available_usdc: float,
+        reserved_usdc: float,
+    ) -> tuple[list[TradingSignal], dict[str, int]]:
+        """Generate trading signals using AI model only.
+
+        Args:
+            markets: List of tradable markets.
+            orderbooks: Orderbook data by token_id.
+            available_usdc: Available balance.
+            reserved_usdc: Reserved balance.
+
+        Returns:
+            Tuple of (signals, rejection_counts).
+        """
+        signals = []
+        rejections: dict[str, int] = {}
+        
+        if not self.ai_orchestrator:
+            rejections["ai_orchestrator_not_available"] = 1
+            return signals, rejections
+            
+        from polyb0t.models.position_sizing import PositionSizer
+        sizer = PositionSizer()
+        
+        for market in markets:
+            for outcome in market.outcomes:
+                if not outcome.token_id:
+                    continue
+                    
+                ob = orderbooks.get(outcome.token_id)
+                if not ob or not ob.bids or not ob.asks:
+                    rejections["no_orderbook"] = rejections.get("no_orderbook", 0) + 1
+                    continue
+                    
+                # Calculate features for AI
+                mid = (ob.bids[0].price + ob.asks[0].price) / 2
+                spread = (ob.asks[0].price - ob.bids[0].price) / mid if mid > 0 else 0
+                bid_depth = sum(l.size for l in ob.bids[:5])
+                ask_depth = sum(l.size for l in ob.asks[:5])
+                imbalance = (bid_depth - ask_depth) / (bid_depth + ask_depth) if (bid_depth + ask_depth) > 0 else 0
+                
+                features = {
+                    "price": mid,
+                    "spread": spread,
+                    "volume_24h": float(market.volume or 0),
+                    "liquidity": float(market.liquidity or 0),
+                    "orderbook_imbalance": imbalance,
+                    "bid_depth": bid_depth,
+                    "ask_depth": ask_depth,
+                    "momentum_1h": 0,  # TODO: calculate from price history
+                    "momentum_24h": 0,
+                    "days_to_resolution": (market.end_date - datetime.utcnow()).days if market.end_date else 30,
+                }
+                
+                # Get AI signal
+                ai_signal = self.ai_orchestrator.get_ai_signal(
+                    token_id=outcome.token_id,
+                    price=mid,
+                    features=features,
+                )
+                
+                if not ai_signal:
+                    rejections["ai_no_signal"] = rejections.get("ai_no_signal", 0) + 1
+                    continue
+                    
+                edge = ai_signal["edge"]
+                side = ai_signal["side"]
+                confidence = ai_signal["confidence"]
+                
+                # Check edge threshold
+                if abs(edge) < self.settings.edge_threshold:
+                    rejections["edge_below_threshold"] = rejections.get("edge_below_threshold", 0) + 1
+                    continue
+                    
+                # Calculate position size
+                sizing = sizer.compute_size(
+                    edge_net=edge,
+                    confidence=confidence,
+                    available_usdc=available_usdc,
+                    reserved_usdc=reserved_usdc,
+                )
+                
+                if sizing.size_usd_final < self.settings.min_order_usd:
+                    rejections["size_too_small"] = rejections.get("size_too_small", 0) + 1
+                    continue
+                    
+                # Create signal
+                signal = TradingSignal(
+                    token_id=outcome.token_id,
+                    market_id=market.condition_id,
+                    side=side,
+                    p_market=mid,
+                    p_model=mid + edge if side == "BUY" else mid - edge,
+                    edge=edge,
+                    edge_raw=edge,
+                    confidence=confidence,
+                    features=features,
+                    sizing_result=sizing,
+                )
+                
+                signals.append(signal)
+                logger.info(
+                    f"AI signal: {side} {outcome.token_id[:12]} edge={edge:+.3f} "
+                    f"confidence={confidence:.0%} size=${sizing.size_usd_final:.2f}"
+                )
+                
+        return signals, rejections
 
     def _save_signals(
         self,

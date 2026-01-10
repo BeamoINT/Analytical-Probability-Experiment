@@ -30,6 +30,50 @@ class Settings(BaseSettings):
         ...,
         description="Polymarket wallet address for read-only monitoring",
     )
+    
+    # === STRATEGY MODE CONFIGURATION ===
+    placing_orders: bool = Field(
+        default=True,
+        description="Master switch: when False, bot only monitors and collects data (no trading)"
+    )
+    strategy_mode: Literal["rules", "ai"] = Field(
+        default="rules",
+        description="Strategy mode: 'rules' for rule-based trading, 'ai' for AI-only trading"
+    )
+    
+    # === AI TRAINING CONFIGURATION ===
+    ai_min_training_examples: int = Field(
+        default=1000,
+        description="Minimum training examples before AI can start training"
+    )
+    ai_retrain_interval_hours: int = Field(
+        default=6,
+        description="How often to retrain the AI model (hours)"
+    )
+    ai_example_interval_minutes: int = Field(
+        default=15,
+        description="How often to create training examples from tracked positions"
+    )
+    ai_max_markets_to_track: int = Field(
+        default=200,
+        description="Maximum number of markets to track for AI training data"
+    )
+    ai_benchmark_test_size: float = Field(
+        default=0.2,
+        description="Fraction of data to use for benchmarking (0.2 = 20%)"
+    )
+    ai_min_improvement_pct: float = Field(
+        default=1.0,
+        description="New model must beat old by this % to be deployed"
+    )
+    ai_model_dir: str = Field(
+        default="data/ai_models",
+        description="Directory to store AI models"
+    )
+    ai_training_db: str = Field(
+        default="data/ai_training.db",
+        description="SQLite database for AI training data"
+    )
 
     # Database
     db_url: str = Field(default="sqlite:///./polybot.db", description="Database connection URL")
