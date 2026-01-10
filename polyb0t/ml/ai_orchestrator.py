@@ -66,9 +66,14 @@ class AIOrchestrator:
                 if state.get("last_example_time"):
                     self._last_example_time = datetime.fromisoformat(state["last_example_time"])
                     
-                logger.info(f"Loaded AI orchestrator state from {self._state_path}")
+                logger.info(
+                    f"Loaded AI orchestrator state: last_example_time={self._last_example_time}, "
+                    f"last_training_time={self._last_training_time}"
+                )
             except Exception as e:
                 logger.warning(f"Failed to load orchestrator state: {e}")
+        else:
+            logger.info("No AI orchestrator state file found - starting fresh")
                 
     def _save_state(self) -> None:
         """Save orchestrator state to disk."""
@@ -167,10 +172,17 @@ class AIOrchestrator:
             True if we should create examples.
         """
         if self._last_example_time is None:
+            logger.info("should_create_examples: True (never created before)")
             return True
             
         minutes_since = (datetime.utcnow() - self._last_example_time).total_seconds() / 60
-        return minutes_since >= self.settings.ai_example_interval_minutes
+        interval = self.settings.ai_example_interval_minutes
+        should_create = minutes_since >= interval
+        
+        if should_create:
+            logger.info(f"should_create_examples: True ({minutes_since:.1f} min >= {interval} min interval)")
+        
+        return should_create
     
     def track_markets(self, markets: list[dict]) -> int:
         """Add markets to tracking for AI data collection.
