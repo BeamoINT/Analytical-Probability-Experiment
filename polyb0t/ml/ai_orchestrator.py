@@ -251,12 +251,24 @@ class AIOrchestrator:
         self.collector.record_snapshot(snapshot)
         
         # Create training example if it's time
+        # Return True if example was created
         if self.should_create_examples():
             self.collector.create_training_example(snapshot)
+            return True
+        return False
             
-    def finish_example_cycle(self) -> None:
-        """Mark end of an example creation cycle."""
-        self._last_example_time = datetime.utcnow()
+    def finish_example_cycle(self, examples_created: bool = False) -> None:
+        """Mark end of an example creation cycle.
+        
+        Args:
+            examples_created: If True, update the example creation timestamp.
+        """
+        # Only update the example timestamp if we actually created examples
+        # This prevents the timer from resetting every cycle
+        if examples_created:
+            self._last_example_time = datetime.utcnow()
+            logger.info(f"Created training examples, next batch in {self.settings.ai_example_interval_minutes} minutes")
+        
         self.collector.update_collection_time()
         self._save_state()
         

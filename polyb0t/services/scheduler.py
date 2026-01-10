@@ -542,6 +542,7 @@ class TradingScheduler:
                     
                     # Collect snapshots from orderbooks
                     snapshots_collected = 0
+                    examples_created_this_cycle = False
                     for m in tradable_markets:
                         for o in m.outcomes:
                             if not o.token_id:
@@ -554,7 +555,7 @@ class TradingScheduler:
                             ask_depth = sum(l.size for l in ob.asks[:5])
                             imbalance = (bid_depth - ask_depth) / (bid_depth + ask_depth) if (bid_depth + ask_depth) > 0 else 0
                             
-                            self.ai_orchestrator.collect_snapshot(
+                            created = self.ai_orchestrator.collect_snapshot(
                                 token_id=o.token_id,
                                 market_id=m.condition_id,
                                 price=mid,
@@ -569,8 +570,10 @@ class TradingScheduler:
                                 days_to_resolution=self._days_to_resolution(m.end_date),
                             )
                             snapshots_collected += 1
+                            if created:
+                                examples_created_this_cycle = True
                     
-                    self.ai_orchestrator.finish_example_cycle()
+                    self.ai_orchestrator.finish_example_cycle(examples_created=examples_created_this_cycle)
                     
                     # Log AI training progress
                     stats = self.ai_orchestrator.get_training_stats()
