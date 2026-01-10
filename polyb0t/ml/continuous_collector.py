@@ -745,7 +745,11 @@ class ContinuousDataCollector:
         
         examples = cursor.fetchall()
         labeled_count = 0
+        partial_labeled = 0
         now = datetime.utcnow()
+        
+        if not examples:
+            return 0
         
         for example_id, token_id, created_at_str, features_json in examples:
             created_at = datetime.fromisoformat(created_at_str)
@@ -755,10 +759,11 @@ class ContinuousDataCollector:
             if initial_price <= 0:
                 continue
                 
-            # Get snapshots after this example was created
+            # Get price history after this example was created
+            # Use price_history table (always populated) instead of market_snapshots
             cursor.execute("""
-                SELECT timestamp, json_extract(data, '$.price') as price 
-                FROM market_snapshots
+                SELECT timestamp, price 
+                FROM price_history
                 WHERE token_id = ? AND timestamp > ?
                 ORDER BY timestamp ASC
             """, (token_id, created_at_str))
@@ -824,6 +829,11 @@ class ContinuousDataCollector:
             # Mark as fully labeled if 24h has passed or market resolved
             is_fully_labeled = (hours_since_created >= 24 and price_change_24h is not None) or is_resolved
             
+            # Track partial labels
+            has_any_label = any([price_change_15m, price_change_1h, price_change_4h])
+            if has_any_label:
+                partial_labeled += 1
+            
             # Update the example
             cursor.execute("""
                 UPDATE training_examples
@@ -846,8 +856,13 @@ class ContinuousDataCollector:
         conn.commit()
         conn.close()
         
-        if labeled_count > 0:
-            logger.info(f"Labeled {labeled_count} training examples")
+        # Log progress
+        if labeled_count > 0 or partial_labeled > 0:
+            logger.info(
+                f"Labeling progress: {labeled_count} fully labeled, "
+                f"{partial_labeled} with partial labels, "
+                f"{len(examples)} total unlabeled checked"
+            )
             
         return labeled_count
     
