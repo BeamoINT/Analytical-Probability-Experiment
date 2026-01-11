@@ -502,7 +502,17 @@ class ContinuousDataCollector:
         return count
     
     def get_labeled_examples(self) -> int:
-        """Get number of fully labeled examples."""
+        """Get number of examples with 24h labels (usable for training)."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        # Count examples with 24h price change labels (main training target)
+        cursor.execute("SELECT COUNT(*) FROM training_examples WHERE price_change_24h IS NOT NULL")
+        count = cursor.fetchone()[0]
+        conn.close()
+        return count
+    
+    def get_resolved_examples(self) -> int:
+        """Get number of examples from resolved markets (final ground truth)."""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM training_examples WHERE is_fully_labeled = 1")
@@ -814,9 +824,6 @@ class ContinuousDataCollector:
                 else:
                     direction_24h = 0
                     
-            # Check if we can fully label this example
-            hours_since_created = (now - created_at).total_seconds() / 3600
-            
             # Check if market resolved
             cursor.execute(
                 "SELECT is_resolved, resolution_outcome FROM tracked_markets WHERE token_id = ?",
@@ -826,13 +833,23 @@ class ContinuousDataCollector:
             is_resolved = market_row[0] if market_row else 0
             resolution_outcome = market_row[1] if market_row else None
             
-            # Mark as fully labeled if 24h has passed or market resolved
-            is_fully_labeled = (hours_since_created >= 24 and price_change_24h is not None) or is_resolved
+            # === LABELING LOGIC ===
+            # "Fully labeled" = market has resolved (final truth)
+            # "Has 24h label" = can be used for training (even if not resolved)
+            # We continue tracking until resolution for the best training data
+            is_fully_labeled = bool(is_resolved)
+            has_24h_label = price_change_24h is not None
             
             # Track partial labels
-            has_any_label = any([price_change_15m, price_change_1h, price_change_4h])
+            has_any_label = any([price_change_15m, price_change_1h, price_change_4h, price_change_24h])
             if has_any_label:
                 partial_labeled += 1
+            
+            # Determine labeled_at timestamp
+            # Set when we first get a 24h label (usable for training)
+            labeled_at = None
+            if has_24h_label or is_fully_labeled:
+                labeled_at = now.isoformat()
             
             # Update the example
             cursor.execute("""
@@ -846,11 +863,12 @@ class ContinuousDataCollector:
                 price_change_15m, price_change_1h, price_change_4h, 
                 price_change_24h, price_change_7d,
                 direction_1h, direction_24h,
-                resolution_outcome, now.isoformat() if is_fully_labeled else None,
+                resolution_outcome, labeled_at,
                 1 if is_fully_labeled else 0, example_id
             ))
             
-            if is_fully_labeled:
+            # Count as "labeled" if it has 24h data (usable for training)
+            if has_24h_label:
                 labeled_count += 1
                 
         conn.commit()
@@ -892,7 +910,9 @@ class ContinuousDataCollector:
         Handles backwards compatibility by filling missing features with defaults.
         
         Args:
-            only_labeled: If True, only return fully labeled examples.
+            only_labeled: If True, only return examples with 24h labels (usable for training).
+                         Note: "fully labeled" now means resolved, but we can train on
+                         any example with a 24h price change label.
             min_schema_version: Minimum schema version to include.
             
         Returns:
@@ -905,13 +925,16 @@ class ContinuousDataCollector:
             SELECT features, schema_version, available_features,
                    price_change_15m, price_change_1h, price_change_4h, 
                    price_change_24h, price_change_7d,
-                   direction_1h, direction_24h, resolved_outcome
+                   direction_1h, direction_24h, resolved_outcome,
+                   created_at
             FROM training_examples
             WHERE schema_version >= ?
         """
         
         if only_labeled:
-            query += " AND is_fully_labeled = 1"
+            # Include examples with 24h labels (not just fully resolved)
+            # This gives us more training data while still having reliable labels
+            query += " AND price_change_24h IS NOT NULL"
             
         cursor.execute(query, (min_schema_version,))
         rows = cursor.fetchall()
@@ -923,7 +946,7 @@ class ContinuousDataCollector:
         data = []
         for (features_json, schema_ver, avail_features_json,
              pc_15m, pc_1h, pc_4h, pc_24h, pc_7d,
-             dir_1h, dir_24h, outcome) in rows:
+             dir_1h, dir_24h, outcome, created_at) in rows:
             
             features = json.loads(features_json)
             available = json.loads(avail_features_json) if avail_features_json else []
@@ -944,6 +967,7 @@ class ContinuousDataCollector:
             features["label_resolved_outcome"] = outcome
             features["_schema_version"] = schema_ver
             features["_available_features"] = available
+            features["created_at"] = created_at  # For time-based sorting
             
             data.append(features)
             

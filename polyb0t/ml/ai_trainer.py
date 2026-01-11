@@ -196,56 +196,68 @@ class AITrainer:
         try:
             logger.info(f"Starting AI training with {len(training_data)} examples")
             
-            # Prepare data
-            X, y = self._prepare_training_data(training_data)
+            # === SORT BY TIME FOR REALISTIC VALIDATION ===
+            # Sort data by timestamp (oldest first)
+            # This prevents data leakage - we train on past, validate on future
+            sorted_data = sorted(
+                training_data,
+                key=lambda x: x.get("timestamp", x.get("created_at", ""))
+            )
+            
+            # Prepare data (maintains sort order)
+            X, y, timestamps = self._prepare_training_data_with_time(sorted_data)
             
             if X is None or len(X) == 0:
                 logger.warning("No valid training data after preparation")
                 return None
-                
-            # Split into train/test
+            
+            # === TIME-BASED SPLIT ===
+            # Train on older 80%, validate on newest 20%
+            # This simulates real trading: learn from past, predict future
             split_idx = int(len(X) * (1 - self.benchmark_test_size))
             X_train, X_test = X[:split_idx], X[split_idx:]
             y_train, y_test = y[:split_idx], y[split_idx:]
             
+            logger.info(
+                f"Time-based split: train={len(X_train)} (older), test={len(X_test)} (newer)"
+            )
+            
             # Train new model
             new_model = self._train(X_train, y_train)
             
-            # Evaluate new model
+            # === EVALUATE ON FUTURE DATA (more realistic) ===
             new_metrics = self._evaluate(new_model, X_test, y_test)
             logger.info(
-                f"New model metrics: score={new_metrics.score():.3f}, "
+                f"New model validation (on future data): "
                 f"dir_acc={new_metrics.directional_accuracy:.1%}, "
-                f"profit_acc={new_metrics.profitable_accuracy:.1%}"
+                f"profit_acc={new_metrics.profitable_accuracy:.1%}, "
+                f"r2={new_metrics.r2:.3f}"
             )
             
-            # Compare with current model
-            should_deploy = True
+            # Compare with current model (for logging only)
             if self._current_model is not None:
-                old_metrics = self._evaluate(self._current_model, X_test, y_test)
-                improvement = (new_metrics.score() - old_metrics.score()) / max(0.001, old_metrics.score()) * 100
-                
-                logger.info(
-                    f"Model comparison: old={old_metrics.score():.3f}, "
-                    f"new={new_metrics.score():.3f}, improvement={improvement:.1f}%"
-                )
-                
-                if improvement < self.min_improvement_pct:
-                    logger.info(
-                        f"New model not better enough ({improvement:.1f}% < {self.min_improvement_pct}%). "
-                        "Keeping current model."
-                    )
-                    should_deploy = False
+                try:
+                    old_metrics = self._evaluate(self._current_model, X_test, y_test)
+                    improvement = (new_metrics.score() - old_metrics.score()) / max(0.001, old_metrics.score()) * 100
                     
-            if should_deploy:
-                # Deploy new model
-                version = (self._current_model_info.version + 1) if self._current_model_info else 1
-                model_info = self._deploy_model(new_model, new_metrics, version, len(training_data))
-                
-                logger.info(f"Deployed new AI model v{version}")
-                return model_info
-                
-            return None
+                    logger.info(
+                        f"Model comparison: old_score={old_metrics.score():.3f}, "
+                        f"new_score={new_metrics.score():.3f}, "
+                        f"change={improvement:+.1f}%"
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not compare with old model: {e}")
+            
+            # === ALWAYS DEPLOY NEWEST MODEL ===
+            # New model always replaces old - it has more/newer training data
+            version = (self._current_model_info.version + 1) if self._current_model_info else 1
+            model_info = self._deploy_model(new_model, new_metrics, version, len(training_data))
+            
+            logger.info(
+                f"Deployed AI model v{version} "
+                f"(profit_acc={new_metrics.profitable_accuracy:.1%})"
+            )
+            return model_info
             
         except Exception as e:
             logger.error(f"Training failed: {e}", exc_info=True)
@@ -332,6 +344,75 @@ class AITrainer:
         
         logger.info(f"Prepared {len(X_list)} examples with {len(feature_cols)} features each")
         return np.array(X_list), np.array(y_list)
+    
+    def _prepare_training_data_with_time(
+        self, data: list[dict]
+    ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[list[str]]]:
+        """Prepare training data arrays with timestamps for time-based splitting.
+        
+        Args:
+            data: Raw training data (should be pre-sorted by time).
+            
+        Returns:
+            Tuple of (features, labels, timestamps) arrays.
+        """
+        # Same feature columns as _prepare_training_data
+        feature_cols = [
+            "price", "spread", "spread_pct", "mid_price",
+            "volume_24h", "volume_1h", "volume_6h", "liquidity",
+            "liquidity_bid", "liquidity_ask",
+            "orderbook_imbalance", "bid_depth", "ask_depth",
+            "bid_depth_5", "ask_depth_5", "bid_depth_10", "ask_depth_10",
+            "bid_levels", "ask_levels", "best_bid_size", "best_ask_size",
+            "bid_ask_size_ratio",
+            "momentum_1h", "momentum_4h", "momentum_24h", "momentum_7d",
+            "price_change_1h", "price_change_4h", "price_change_24h",
+            "price_high_24h", "price_low_24h", "price_range_24h",
+            "volatility_1h", "volatility_24h", "volatility_7d", "atr_24h",
+            "trade_count_1h", "trade_count_24h",
+            "avg_trade_size_1h", "avg_trade_size_24h",
+            "buy_volume_1h", "sell_volume_1h", "buy_sell_ratio_1h",
+            "large_trade_count_24h",
+            "days_to_resolution", "hours_to_resolution", "market_age_days",
+            "hour_of_day", "day_of_week",
+            "total_yes_shares", "total_no_shares", "open_interest",
+            "num_related_markets", "avg_related_price",
+            "comment_count", "view_count", "unique_traders",
+            "price_vs_volume_ratio", "liquidity_per_dollar_volume",
+            "spread_adjusted_edge",
+        ]
+        
+        self._feature_cols = feature_cols
+        
+        X_list = []
+        y_list = []
+        timestamps = []
+        
+        for example in data:
+            target = example.get("label_price_change_24h")
+            if target is None:
+                continue
+            
+            # Get timestamp for tracking
+            ts = example.get("timestamp", example.get("created_at", ""))
+            
+            features = []
+            for col in feature_cols:
+                val = example.get(col, 0)
+                try:
+                    features.append(float(val) if val is not None else 0.0)
+                except (ValueError, TypeError):
+                    features.append(0.0)
+            
+            X_list.append(features)
+            y_list.append(float(target))
+            timestamps.append(ts)
+        
+        if len(X_list) == 0:
+            return None, None, None
+        
+        logger.info(f"Prepared {len(X_list)} time-sorted examples with {len(feature_cols)} features")
+        return np.array(X_list), np.array(y_list), timestamps
     
     def _train(self, X: np.ndarray, y: np.ndarray) -> Any:
         """Train a model using advanced ensemble methods.
