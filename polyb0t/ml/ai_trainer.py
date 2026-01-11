@@ -513,14 +513,47 @@ class AITrainer:
         ss_tot = np.sum((y - np.mean(y)) ** 2)
         r2 = float(1 - ss_res / max(ss_tot, 1e-10))
         
-        # Directional accuracy: did we predict the right direction?
-        correct_direction = np.sum((predictions > 0) == (y > 0))
-        directional_accuracy = float(correct_direction / len(y))
+        # === REALISTIC ACCURACY METRICS ===
+        # Minimum threshold for a "confident" prediction (1% price change)
+        # This filters out noise and flat predictions
+        MIN_PREDICTION_THRESHOLD = 0.01  # 1% price change
+        MIN_ACTUAL_THRESHOLD = 0.01  # 1% actual change to count as "movement"
+        SPREAD_COST = 0.02  # Assume 2% spread cost to be conservative
         
-        # Profitable accuracy: would following this prediction be profitable?
-        # If prediction > 0, buy; if actual > 0, profit
-        profitable = np.sum(predictions * y > 0)  # Same sign = profit
-        profitable_accuracy = float(profitable / len(y))
+        # Directional accuracy: only count predictions above threshold
+        # Predictions near zero are "no trade" signals
+        confident_mask = np.abs(predictions) >= MIN_PREDICTION_THRESHOLD
+        actual_moves_mask = np.abs(y) >= MIN_ACTUAL_THRESHOLD
+        
+        # Only evaluate on cases where we'd actually trade
+        tradeable = confident_mask & actual_moves_mask
+        if np.sum(tradeable) > 0:
+            correct_direction = np.sum(
+                (predictions[tradeable] > 0) == (y[tradeable] > 0)
+            )
+            directional_accuracy = float(correct_direction / np.sum(tradeable))
+        else:
+            directional_accuracy = 0.5  # No confident predictions = random
+        
+        # Profitable accuracy: net profit after spread
+        # Only count as profitable if gain exceeds spread cost
+        if np.sum(confident_mask) > 0:
+            # Calculate net profit: |actual change| - spread if direction correct
+            # Loss: -|actual change| - spread if direction wrong
+            net_profits = np.where(
+                (predictions > 0) == (y > 0),  # Correct direction
+                np.abs(y) - SPREAD_COST,  # Profit minus spread
+                -np.abs(y) - SPREAD_COST  # Loss plus spread
+            )
+            profitable = np.sum(net_profits[confident_mask] > 0)
+            profitable_accuracy = float(profitable / np.sum(confident_mask))
+        else:
+            profitable_accuracy = 0.0  # No trades = no profit
+        
+        logger.info(
+            f"Evaluation: {np.sum(tradeable)}/{len(y)} tradeable samples, "
+            f"{np.sum(confident_mask)} confident predictions"
+        )
         
         return ModelMetrics(
             mse=mse,
