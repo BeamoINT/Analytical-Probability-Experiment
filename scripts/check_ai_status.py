@@ -117,11 +117,14 @@ def main():
         min_examples = 500  # Default threshold
         if labeled < min_examples:
             needed = min_examples - labeled
-            # Rough estimate: ~16 examples per 15 min become labeled after 24h delay
-            hours_needed = (needed / 64) * 24  # Very rough estimate
+            # After 24h delay, examples become labeled at creation rate
+            # ~14-16 examples per cycle, ~4 cycles per hour = ~60 per hour
+            examples_per_hour = 60
+            hours_needed = needed / examples_per_hour
             print(f"\n⏱️  TRAINING ESTIMATE:")
             print(f"   Need {needed} more labeled examples")
-            print(f"   Estimated: ~{hours_needed:.0f} hours")
+            print(f"   Rate: ~{examples_per_hour} examples/hour become labeled")
+            print(f"   Estimated: ~{hours_needed:.1f} hours ({hours_needed*60:.0f} minutes)")
     else:
         print("\n❌ No training database found")
         
