@@ -9,7 +9,7 @@ import json
 import os
 import sqlite3
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # Find project root
@@ -45,7 +45,7 @@ def format_time_ago(timestamp_str):
         dt = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
         if dt.tzinfo:
             dt = dt.replace(tzinfo=None)
-        delta = datetime.utcnow() - dt
+        delta = datetime.now(timezone.utc).replace(tzinfo=None) - dt
         
         if delta.total_seconds() < 60:
             return f"{int(delta.total_seconds())}s ago"
@@ -97,7 +97,8 @@ def get_ai_status():
         try:
             result["db_size_mb"] = os.path.getsize(db_path) / (1024 * 1024)
 
-            conn = sqlite3.connect(db_path)
+            # Use timeout to wait for lock (bot may be writing)
+            conn = sqlite3.connect(db_path, timeout=10.0)
             cursor = conn.cursor()
 
             # Total examples
@@ -218,7 +219,8 @@ def get_log_status():
                         # Check if bot is running (last log within 1 minute)
                         try:
                             log_time = datetime.fromisoformat(ts)
-                            if (datetime.utcnow() - log_time).total_seconds() < 60:
+                            now = datetime.now(timezone.utc).replace(tzinfo=None)
+                            if (now - log_time).total_seconds() < 60:
                                 result["bot_running"] = True
                         except:
                             pass
