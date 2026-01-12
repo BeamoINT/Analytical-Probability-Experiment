@@ -30,6 +30,7 @@ from polyb0t.models.filters import MarketFilter
 from polyb0t.models.strategy_baseline import TradingSignal
 from polyb0t.services.health import get_health_status
 from polyb0t.services.reporter import Reporter
+from polyb0t.services.system_monitor import get_system_monitor, start_system_monitor
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,11 @@ class TradingScheduler:
 
         # Check strategy mode before anything else
         _check_strategy_mode()
+
+        # Start system resource monitoring
+        self.system_monitor = get_system_monitor()
+        start_system_monitor()
+        logger.info("System resource monitor started")
 
         # Initialize database
         init_db()
@@ -532,6 +538,7 @@ class TradingScheduler:
             # === AI DATA COLLECTION ===
             # Collect data for AI training (runs regardless of strategy mode)
             if self.ai_orchestrator:
+                self.system_monitor.set_context("collecting")
                 try:
                     # Track markets for AI training
                     market_dicts = [
@@ -677,10 +684,17 @@ class TradingScheduler:
                     # Run training if due
                     if self.ai_orchestrator.should_train():
                         logger.info("Starting AI training cycle...")
-                        self.ai_orchestrator.run_training()
-                        
+                        self.system_monitor.set_context("training")
+                        try:
+                            self.ai_orchestrator.run_training()
+                        finally:
+                            self.system_monitor.set_context("normal")
+                    else:
+                        self.system_monitor.set_context("normal")  # Done collecting
+
                 except Exception as e:
                     logger.warning(f"AI data collection failed: {e}", exc_info=True)
+                    self.system_monitor.set_context("normal")  # Reset context on error
             
             # === SIGNAL GENERATION ===
             # Use rules-based OR AI-based signals (NOT hybrid)

@@ -242,6 +242,82 @@ def get_log_status():
     return result
 
 
+def get_system_stats():
+    """Get system resource statistics from the monitor."""
+    stats_path = "data/system_stats.json"
+    
+    if os.path.exists(stats_path):
+        try:
+            with open(stats_path, "r") as f:
+                return json.load(f)
+        except Exception as e:
+            return {"error": str(e)}
+    
+    return None
+
+
+def get_system_recommendation(stats: dict) -> dict:
+    """Get upgrade recommendation based on stats."""
+    if not stats or "cpu" not in stats:
+        return None
+    
+    recommendations = []
+    status = "healthy"
+    
+    cpu = stats.get("cpu", {}).get("percent", {})
+    mem = stats.get("memory", {}).get("percent", {})
+    disk = stats.get("disk", {}).get("percent", {})
+    load = stats.get("cpu", {}).get("load_avg", {})
+    cpu_count = stats.get("cpu", {}).get("count", 1)
+    training = stats.get("training", {})
+    
+    # Check CPU
+    if cpu.get("avg", 0) > 80:
+        recommendations.append("CPU avg >80%. Consider upgrading.")
+        status = "needs_upgrade"
+    elif cpu.get("max", 0) > 95 and cpu.get("samples", 0) > 100:
+        recommendations.append("CPU occasionally maxes out.")
+        if status == "healthy":
+            status = "monitor"
+    
+    # Check Memory
+    if mem.get("avg", 0) > 85:
+        recommendations.append("Memory avg >85%. Add more RAM.")
+        status = "needs_upgrade"
+    elif mem.get("max", 0) > 95:
+        recommendations.append("Memory occasionally maxes out.")
+        if status == "healthy":
+            status = "monitor"
+    
+    # Check Disk
+    if disk.get("current", 0) > 90:
+        recommendations.append("Disk >90%. Free space needed.")
+        status = "needs_upgrade"
+    elif disk.get("current", 0) > 80:
+        recommendations.append("Disk >80%. Consider cleanup.")
+        if status == "healthy":
+            status = "monitor"
+    
+    # Check load vs cores
+    if load.get("avg", 0) > cpu_count and cpu_count > 0:
+        recommendations.append(f"Load ({load.get('avg', 0):.1f}) > cores ({cpu_count}). Overloaded.")
+        status = "needs_upgrade"
+    
+    # Check training performance
+    avg_train_time = training.get("avg_duration_seconds", 0)
+    if avg_train_time > 300:
+        recommendations.append(f"Training takes {avg_train_time/60:.1f}m. More CPU helps.")
+    
+    if not recommendations:
+        recommendations.append("System resources healthy. No upgrade needed.")
+    
+    return {
+        "status": status,
+        "status_icon": "🟢" if status == "healthy" else "🟡" if status == "monitor" else "🔴",
+        "recommendations": recommendations,
+    }
+
+
 def get_config_status():
     """Get current configuration."""
     result = {
@@ -361,6 +437,66 @@ def main():
     print(f"\n💾 STORAGE:")
     print(f"   AI Database:      {ai['db_size_mb']:.1f} MB")
     print(f"   Max Allowed:      140 GB ({ai['db_size_mb']/1024/140*100:.2f}% used)")
+    
+    # System Resources
+    sys_stats = get_system_stats()
+    if sys_stats:
+        print(f"\n🖥️  SYSTEM RESOURCES:")
+        cpu = sys_stats.get("cpu", {})
+        mem = sys_stats.get("memory", {})
+        disk = sys_stats.get("disk", {})
+        proc = sys_stats.get("process", {})
+        training = sys_stats.get("training", {})
+        
+        cpu_pct = cpu.get("percent", {})
+        mem_pct = mem.get("percent", {})
+        
+        print(f"   Uptime:           {sys_stats.get('uptime_hours', 0):.1f} hours")
+        print(f"   CPU Cores:        {cpu.get('count', 'N/A')}")
+        
+        if cpu_pct.get("samples", 0) > 0:
+            print(f"\n   📊 CPU USAGE:")
+            print(f"   Current:          {cpu_pct.get('current', 0):.1f}%")
+            print(f"   Average:          {cpu_pct.get('avg', 0):.1f}%")
+            print(f"   Min / Max:        {cpu_pct.get('min', 0):.1f}% / {cpu_pct.get('max', 0):.1f}%")
+            
+            load = cpu.get("load_avg", {})
+            if load.get("current", 0) > 0:
+                print(f"   Load Average:     {load.get('current', 0):.2f}")
+        
+        if mem_pct.get("samples", 0) > 0:
+            print(f"\n   📊 MEMORY USAGE:")
+            print(f"   Total:            {mem.get('total_gb', 0):.1f} GB")
+            print(f"   Current:          {mem_pct.get('current', 0):.1f}%")
+            print(f"   Average:          {mem_pct.get('avg', 0):.1f}%")
+            print(f"   Min / Max:        {mem_pct.get('min', 0):.1f}% / {mem_pct.get('max', 0):.1f}%")
+        
+        disk_pct = disk.get("percent", {})
+        if disk_pct.get("samples", 0) > 0:
+            print(f"\n   📊 DISK USAGE:")
+            print(f"   Total:            {disk.get('total_gb', 0):.1f} GB")
+            print(f"   Current:          {disk_pct.get('current', 0):.1f}%")
+        
+        proc_cpu = proc.get("cpu_percent", {})
+        proc_mem = proc.get("memory_mb", {})
+        if proc_cpu.get("samples", 0) > 0:
+            print(f"\n   📊 BOT PROCESS:")
+            print(f"   CPU (avg):        {proc_cpu.get('avg', 0):.1f}%")
+            print(f"   Memory (avg):     {proc_mem.get('avg', 0):.1f} MB")
+        
+        train_cpu = training.get("cpu_percent", {})
+        if train_cpu.get("samples", 0) > 0:
+            print(f"\n   📊 DURING TRAINING:")
+            print(f"   CPU (avg):        {train_cpu.get('avg', 0):.1f}%")
+            print(f"   Avg Duration:     {training.get('avg_duration_seconds', 0):.1f}s")
+            print(f"   Training Runs:    {training.get('training_count', 0)}")
+        
+        # Recommendation
+        rec = get_system_recommendation(sys_stats)
+        if rec:
+            print(f"\n   {rec['status_icon']} SYSTEM STATUS: {rec['status'].upper()}")
+            for r in rec.get("recommendations", [])[:3]:  # Top 3 recommendations
+                print(f"   • {r}")
     
     print("\n" + "=" * 70)
     print("  Run: poetry run python scripts/check_ai_status.py")
