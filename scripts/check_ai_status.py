@@ -98,7 +98,10 @@ def get_ai_status():
             result["db_size_mb"] = os.path.getsize(db_path) / (1024 * 1024)
 
             # Use timeout to wait for lock (bot may be writing)
-            conn = sqlite3.connect(db_path, timeout=10.0)
+            # Also use WAL mode for better concurrent access
+            conn = sqlite3.connect(db_path, timeout=30.0)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=30000")
             cursor = conn.cursor()
 
             # Total examples
@@ -253,7 +256,37 @@ def get_system_stats():
         except Exception as e:
             return {"error": str(e)}
     
-    return None
+    # Try to get live stats if file doesn't exist yet
+    try:
+        import psutil
+        # Return basic live stats
+        cpu = psutil.cpu_percent(interval=0.5)
+        mem = psutil.virtual_memory()
+        disk = psutil.disk_usage('/')
+        
+        return {
+            "uptime_hours": 0,
+            "cpu": {
+                "percent": {"current": cpu, "avg": cpu, "min": cpu, "max": cpu, "samples": 1},
+                "count": psutil.cpu_count(),
+                "load_avg": {"current": 0, "avg": 0, "min": 0, "max": 0, "samples": 0},
+            },
+            "memory": {
+                "percent": {"current": mem.percent, "avg": mem.percent, "min": mem.percent, "max": mem.percent, "samples": 1},
+                "total_gb": mem.total / (1024**3),
+            },
+            "disk": {
+                "percent": {"current": disk.percent, "avg": disk.percent, "min": disk.percent, "max": disk.percent, "samples": 1},
+                "total_gb": disk.total / (1024**3),
+            },
+            "process": {"cpu_percent": {"samples": 0}, "memory_mb": {"samples": 0}},
+            "training": {"cpu_percent": {"samples": 0}, "avg_duration_seconds": 0, "training_count": 0},
+            "_live": True,
+        }
+    except ImportError:
+        return None
+    except Exception:
+        return None
 
 
 def get_system_recommendation(stats: dict) -> dict:
