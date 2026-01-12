@@ -319,12 +319,22 @@ def main():
         metrics = ai["metrics"]
         prof = metrics.get('profitable_accuracy', 0)
         dir_acc = metrics.get('directional_accuracy', 0)
+        n_models = metrics.get('n_models_ensemble', 0)
+        n_features = metrics.get('n_features_used', 0)
+        cv_std = metrics.get('cv_std', 0)
         
         prof_icon = "✅" if prof > 0.55 else "🟡" if prof > 0.50 else "❌"
         print(f"\n   📊 PERFORMANCE:")
         print(f"   Profitable Acc:   {prof_icon} {format_pct(prof)}")
         print(f"   Directional Acc:  {format_pct(dir_acc)}")
         print(f"   R² Score:         {metrics.get('r2', 0):.3f}")
+        if n_models > 0:
+            print(f"\n   🧠 MODEL DETAILS:")
+            print(f"   Ensemble:         {n_models} models")
+            print(f"   Features Used:    {n_features}")
+            if cv_std > 0:
+                consistency = "High" if cv_std < 0.05 else "Medium" if cv_std < 0.1 else "Low"
+                print(f"   CV Consistency:   {consistency} (std={cv_std:.3f})")
     else:
         print(f"   ⏳ NO TRAINED MODEL YET")
         
