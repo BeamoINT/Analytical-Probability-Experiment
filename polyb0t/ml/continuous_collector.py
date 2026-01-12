@@ -287,7 +287,12 @@ class ContinuousDataCollector:
                 direction_24h INTEGER,
                 resolved_outcome INTEGER,
                 labeled_at TEXT,
-                is_fully_labeled INTEGER DEFAULT 0
+                is_fully_labeled INTEGER DEFAULT 0,
+                -- Prediction simulation columns
+                predicted_change REAL,
+                category TEXT,
+                market_title TEXT,
+                prediction_evaluated INTEGER DEFAULT 0
             )
         """)
         
@@ -318,6 +323,29 @@ class ContinuousDataCollector:
                 pass
             try:
                 cursor.execute("ALTER TABLE training_examples ADD COLUMN direction_24h INTEGER")
+            except sqlite3.OperationalError:
+                pass
+            conn.commit()
+        
+        # Migrate for prediction simulation columns
+        try:
+            cursor.execute("SELECT predicted_change FROM training_examples LIMIT 1")
+        except sqlite3.OperationalError:
+            logger.info("Migrating database: adding prediction simulation columns")
+            try:
+                cursor.execute("ALTER TABLE training_examples ADD COLUMN predicted_change REAL")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                cursor.execute("ALTER TABLE training_examples ADD COLUMN category TEXT")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                cursor.execute("ALTER TABLE training_examples ADD COLUMN market_title TEXT")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                cursor.execute("ALTER TABLE training_examples ADD COLUMN prediction_evaluated INTEGER DEFAULT 0")
             except sqlite3.OperationalError:
                 pass
             conn.commit()
@@ -625,39 +653,50 @@ class ContinuousDataCollector:
         finally:
             conn.close()
             
-    def create_training_example(self, snapshot: MarketSnapshot) -> str:
+    def create_training_example(
+        self,
+        snapshot: MarketSnapshot,
+        predicted_change: Optional[float] = None,
+        category: Optional[str] = None,
+        market_title: Optional[str] = None,
+    ) -> str:
         """Create a training example from a snapshot.
-        
+
         Args:
             snapshot: Market snapshot to create example from.
-            
+            predicted_change: What the model predicted (for simulation).
+            category: Market category (for category learning).
+            market_title: Market title (for categorization).
+
         Returns:
             Example ID.
         """
         import uuid
-        
+
         example_id = str(uuid.uuid4())
         features = snapshot.to_dict()
-        
+
         # Track which features are available (for backwards compat)
         available_features = [k for k, v in features.items() if v is not None and v != 0 and v != ""]
-        
+
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        
+
         cursor.execute("""
-            INSERT INTO training_examples 
-            (example_id, token_id, market_id, created_at, schema_version, features, available_features, is_fully_labeled)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+            INSERT INTO training_examples
+            (example_id, token_id, market_id, created_at, schema_version, features, available_features, 
+             is_fully_labeled, predicted_change, category, market_title, prediction_evaluated)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 0)
         """, (
             example_id, snapshot.token_id, snapshot.market_id,
             datetime.utcnow().isoformat(), snapshot.schema_version,
-            json.dumps(features), json.dumps(available_features)
+            json.dumps(features), json.dumps(available_features),
+            predicted_change, category, market_title
         ))
-        
+
         conn.commit()
         conn.close()
-        
+
         return example_id
     
     def get_price_history(self, token_id: str, hours: int = 24) -> list[tuple[datetime, float]]:

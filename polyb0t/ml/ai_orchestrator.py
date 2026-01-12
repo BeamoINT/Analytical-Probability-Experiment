@@ -400,7 +400,35 @@ class AIOrchestrator:
         # Create training example if it's time
         # Return True if example was created
         if self.should_create_examples():
-            self.collector.create_training_example(snapshot)
+            # === PREDICTION SIMULATION FOR CATEGORY LEARNING ===
+            # Make a prediction using the current model (if available)
+            # This allows us to learn which categories we're good/bad at
+            # even before we start trading
+            predicted_change = None
+            market_category = None
+            market_title = market_slug  # Use slug as title if available
+            
+            if self.is_ai_ready():
+                try:
+                    # Get prediction from current model
+                    features = snapshot.to_dict()
+                    predicted_change = self.predict(features)
+                    
+                    # Categorize the market
+                    if market_title:
+                        market_category, _ = self.category_tracker.categorize_market(
+                            market_id=market_id,
+                            title=market_title,
+                        )
+                except Exception as e:
+                    logger.debug(f"Prediction simulation failed: {e}")
+            
+            self.collector.create_training_example(
+                snapshot=snapshot,
+                predicted_change=predicted_change,
+                category=market_category,
+                market_title=market_title,
+            )
             return True
         return False
             
@@ -421,6 +449,73 @@ class AIOrchestrator:
         
         # Label any unlabeled examples
         self.collector.label_examples()
+        
+        # Evaluate predictions for category learning
+        self._evaluate_predictions_for_categories()
+    
+    def _evaluate_predictions_for_categories(self) -> None:
+        """Evaluate simulated predictions and record results for category learning.
+        
+        This runs after labeling to check which predictions were right/wrong
+        and update category statistics.
+        """
+        try:
+            import sqlite3
+            conn = sqlite3.connect(self.collector.db_path, timeout=10.0)
+            cursor = conn.cursor()
+            
+            # Find examples with predictions that haven't been evaluated yet
+            # and have 24h labels (so we know the outcome)
+            cursor.execute("""
+                SELECT example_id, token_id, market_id, predicted_change, 
+                       price_change_24h, category, market_title
+                FROM training_examples
+                WHERE predicted_change IS NOT NULL
+                  AND prediction_evaluated = 0
+                  AND price_change_24h IS NOT NULL
+            """)
+            
+            rows = cursor.fetchall()
+            
+            if not rows:
+                return
+            
+            evaluated = 0
+            for row in rows:
+                example_id, token_id, market_id, predicted_change, actual_change, category, title = row
+                
+                # If no category stored, try to categorize now
+                if not category and title:
+                    category, _ = self.category_tracker.categorize_market(
+                        market_id=market_id,
+                        title=title,
+                    )
+                
+                if category:
+                    # Record the prediction outcome
+                    self.category_tracker.record_prediction(
+                        market_id=market_id,
+                        token_id=token_id,
+                        category=category,
+                        predicted_change=predicted_change,
+                        actual_change=actual_change,
+                    )
+                
+                # Mark as evaluated
+                cursor.execute(
+                    "UPDATE training_examples SET prediction_evaluated = 1 WHERE example_id = ?",
+                    (example_id,)
+                )
+                evaluated += 1
+            
+            conn.commit()
+            conn.close()
+            
+            if evaluated > 0:
+                logger.info(f"Evaluated {evaluated} simulated predictions for category learning")
+                
+        except Exception as e:
+            logger.warning(f"Failed to evaluate predictions for categories: {e}")
     
     def mark_resolution(self, token_id: str, outcome: int) -> None:
         """Mark a market as resolved.
