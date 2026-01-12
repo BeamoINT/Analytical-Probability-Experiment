@@ -96,29 +96,38 @@ def get_ai_status():
     if os.path.exists(db_path):
         try:
             result["db_size_mb"] = os.path.getsize(db_path) / (1024 * 1024)
-            
+
             conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
-            
+
+            # Total examples
             cursor.execute("SELECT COUNT(*) FROM training_examples")
             result["total_examples"] = cursor.fetchone()[0]
-            
-            cursor.execute("SELECT COUNT(*) FROM training_examples WHERE is_fully_labeled = 1")
+
+            # Labeled = has 24h price change (usable for training)
+            cursor.execute("SELECT COUNT(*) FROM training_examples WHERE price_change_24h IS NOT NULL")
             result["labeled_examples"] = cursor.fetchone()[0]
             
-            cursor.execute("SELECT COUNT(*) FROM training_examples WHERE price_change_1h IS NOT NULL AND is_fully_labeled = 0")
+            # Fully resolved (market closed)
+            cursor.execute("SELECT COUNT(*) FROM training_examples WHERE is_fully_labeled = 1")
+            result["resolved_examples"] = cursor.fetchone()[0]
+
+            # Partial labels (has some data but not 24h yet)
+            cursor.execute("SELECT COUNT(*) FROM training_examples WHERE price_change_1h IS NOT NULL AND price_change_24h IS NULL")
             result["partial_labels"] = cursor.fetchone()[0]
-            
+
             cursor.execute("SELECT COUNT(*) FROM market_snapshots")
             result["snapshots"] = cursor.fetchone()[0]
-            
+
             cursor.execute("SELECT COUNT(*) FROM price_history")
             result["price_points"] = cursor.fetchone()[0]
-            
+
             conn.close()
         except Exception as e:
             result["db_error"] = str(e)
-    
+    else:
+        result["db_error"] = f"DB not found at {os.path.abspath(db_path)}"
+
     return result
 
 
@@ -319,10 +328,13 @@ def main():
         
     print(f"\n   📦 TRAINING DATA:")
     print(f"   Total Examples:   {ai['total_examples']:,}")
-    print(f"   Fully Labeled:    {ai['labeled_examples']:,}")
+    print(f"   With 24h Label:   {ai['labeled_examples']:,}  (usable for training)")
+    print(f"   Resolved:         {ai.get('resolved_examples', 0):,}  (market closed)")
     print(f"   Partial Labels:   {ai['partial_labels']:,}")
     print(f"   Snapshots:        {ai['snapshots']:,}")
     print(f"   Price History:    {ai['price_points']:,}")
+    if ai.get("db_error"):
+        print(f"   ⚠️  DB Error:      {ai['db_error']}")
     
     # Training estimate
     min_examples = 500
