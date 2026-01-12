@@ -1691,9 +1691,11 @@ class TradingScheduler:
                     "days_to_resolution": self._days_to_resolution(market.end_date),
                 }
                 
-                # Get AI signal
+                # Get AI signal (with category-based confidence adjustment)
                 ai_signal = self.ai_orchestrator.get_ai_signal(
                     token_id=outcome.token_id,
+                    market_id=market.condition_id,
+                    market_title=market.question or market.condition_id,
                     price=mid,
                     features=features,
                 )
@@ -1705,6 +1707,7 @@ class TradingScheduler:
                 edge = ai_signal["edge"]
                 side = ai_signal["side"]
                 confidence = ai_signal["confidence"]
+                category = ai_signal.get("category", "unknown")
                 
                 # Check edge threshold
                 if abs(edge) < self.settings.edge_threshold:

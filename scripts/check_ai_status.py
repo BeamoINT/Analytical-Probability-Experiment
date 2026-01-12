@@ -289,6 +289,51 @@ def get_system_stats():
         return None
 
 
+def get_category_stats():
+    """Get market category performance stats."""
+    db_path = "data/category_stats.db"
+    
+    if not os.path.exists(db_path):
+        return None
+    
+    try:
+        conn = sqlite3.connect(db_path, timeout=10.0)
+        cursor = conn.cursor()
+        
+        # Get all category stats
+        cursor.execute("""
+            SELECT category, total_predictions, correct_predictions, profitable_predictions,
+                   total_pnl, is_avoided
+            FROM category_stats
+            ORDER BY total_predictions DESC
+        """)
+        
+        categories = []
+        for row in cursor.fetchall():
+            total = row[1]
+            if total > 0:
+                accuracy = row[2] / total
+                profitable_acc = row[3] / total
+            else:
+                accuracy = 0.5
+                profitable_acc = 0.5
+            
+            categories.append({
+                "category": row[0],
+                "total": total,
+                "accuracy": accuracy,
+                "profitable_acc": profitable_acc,
+                "avg_pnl": row[4] / total if total > 0 else 0,
+                "is_avoided": bool(row[5]),
+            })
+        
+        conn.close()
+        return categories
+        
+    except Exception as e:
+        return {"error": str(e)}
+
+
 def get_system_recommendation(stats: dict) -> dict:
     """Get upgrade recommendation based on stats."""
     if not stats or "cpu" not in stats:
@@ -456,6 +501,32 @@ def main():
     print(f"   Price History:    {ai['price_points']:,}")
     if ai.get("db_error"):
         print(f"   ⚠️  DB Error:      {ai['db_error']}")
+    
+    # Category Performance
+    categories = get_category_stats()
+    if categories and isinstance(categories, list) and len(categories) > 0:
+        print(f"\n   📂 CATEGORY PERFORMANCE:")
+        
+        # Sort by total predictions
+        sorted_cats = sorted(categories, key=lambda x: x["total"], reverse=True)
+        
+        # Show top 5 categories
+        for cat in sorted_cats[:5]:
+            if cat["total"] < 5:
+                continue
+            
+            status_icon = "🚫" if cat["is_avoided"] else ("✅" if cat["profitable_acc"] > 0.50 else "🟡")
+            print(
+                f"   {status_icon} {cat['category']}: "
+                f"{cat['profitable_acc']:.0%} profit ({cat['total']} predictions)"
+            )
+        
+        # Show avoided categories
+        avoided = [c for c in categories if c["is_avoided"]]
+        if avoided:
+            print(f"\n   ⚠️  AVOIDED CATEGORIES: {len(avoided)}")
+            for cat in avoided:
+                print(f"      • {cat['category']} ({cat['profitable_acc']:.0%})")
     
     # Training estimate
     min_examples = 500

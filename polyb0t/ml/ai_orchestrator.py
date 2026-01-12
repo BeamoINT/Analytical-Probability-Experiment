@@ -22,6 +22,7 @@ from polyb0t.ml.continuous_collector import (
     get_data_collector,
 )
 from polyb0t.ml.ai_trainer import AITrainer, get_ai_trainer
+from polyb0t.ml.category_tracker import get_category_tracker, MarketCategoryTracker
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,9 @@ class AIOrchestrator:
             model_dir=self.settings.ai_model_dir,
             min_training_examples=self.settings.ai_min_training_examples,
         )
+        
+        # Category tracker for learning which market types to avoid
+        self.category_tracker = get_category_tracker()
         
         self._last_training_time: Optional[datetime] = None
         self._last_example_time: Optional[datetime] = None
@@ -457,10 +461,27 @@ class AIOrchestrator:
         
         if result:
             logger.info(f"New AI model v{result.version} deployed with score {result.metrics.score():.3f}")
-            return True
         else:
             logger.info("Training completed but model not deployed (not better than current)")
-            return False
+        
+        # === CATEGORY RE-EVALUATION ===
+        # Check if any avoided categories have improved and should be re-enabled
+        try:
+            category_summary = self.category_tracker.get_performance_summary()
+            avoided = category_summary.get("avoided_categories", [])
+            if avoided:
+                logger.info(f"Re-evaluating {len(avoided)} avoided categories...")
+                for category in avoided:
+                    result = self.category_tracker.trigger_reevaluation(category)
+                    if result.get("status") == "un-avoided":
+                        logger.info(
+                            f"Category '{category}' UN-AVOIDED: "
+                            f"profitable_acc={result.get('profitable_accuracy', 0):.1%}"
+                        )
+        except Exception as e:
+            logger.warning(f"Category re-evaluation failed: {e}")
+        
+        return result is not None
     
     def predict(self, features: dict) -> Optional[float]:
         """Make a prediction using the AI model.
@@ -478,28 +499,47 @@ class AIOrchestrator:
     def get_ai_signal(
         self,
         token_id: str,
+        market_id: str,
+        market_title: str,
         price: float,
         features: dict,
     ) -> Optional[dict]:
-        """Get an AI trading signal.
-        
+        """Get an AI trading signal with category-based confidence adjustment.
+
         Args:
             token_id: Token ID.
+            market_id: Market/condition ID.
+            market_title: Market title for categorization.
             price: Current price.
             features: Feature dictionary.
-            
+
         Returns:
-            Signal dict with side, edge, confidence, or None.
+            Signal dict with side, edge, confidence, category info, or None.
         """
         prediction = self.predict(features)
-        
+
         if prediction is None:
             return None
-            
-        # Convert prediction to signal
-        # Prediction is expected price change
-        edge = prediction
+
+        # === CATEGORY TRACKING ===
+        # Categorize the market
+        category, category_confidence = self.category_tracker.categorize_market(
+            market_id=market_id,
+            title=market_title,
+            description=features.get("description", ""),
+        )
         
+        # Check if this category should be avoided
+        if self.category_tracker.should_avoid_category(category):
+            logger.debug(f"Skipping {market_id[:12]} - category '{category}' is avoided")
+            return None
+        
+        # Get category confidence multiplier
+        category_multiplier = self.category_tracker.get_confidence_multiplier(category)
+
+        # Convert prediction to signal
+        edge = prediction
+
         # Only generate signal if edge is meaningful
         min_edge = self.settings.edge_threshold
         if abs(edge) < min_edge:
@@ -509,17 +549,67 @@ class AIOrchestrator:
         side = "BUY" if edge > 0 else "SELL"
         
         # Calculate confidence based on prediction magnitude
-        # Higher prediction = higher confidence
-        confidence = min(1.0, abs(edge) * 5)  # Scale to 0-1
+        base_confidence = min(1.0, abs(edge) * 5)
+        
+        # Apply category confidence adjustment
+        adjusted_confidence = base_confidence * category_multiplier
+        
+        # If adjusted confidence is too low, skip
+        if adjusted_confidence < 0.3:
+            logger.debug(
+                f"Skipping {market_id[:12]} - low category confidence "
+                f"(base={base_confidence:.2f}, mult={category_multiplier:.2f})"
+            )
+            return None
         
         return {
             "token_id": token_id,
+            "market_id": market_id,
             "side": side,
             "edge": edge,
-            "confidence": confidence,
+            "confidence": adjusted_confidence,
+            "base_confidence": base_confidence,
+            "category": category,
+            "category_multiplier": category_multiplier,
             "source": "ai_model",
             "model_version": self.trainer.get_model_info().get("version") if self.trainer.get_model_info() else None,
         }
+    
+    def record_prediction_outcome(
+        self,
+        market_id: str,
+        token_id: str,
+        category: str,
+        predicted_change: float,
+        actual_change: float,
+    ) -> None:
+        """Record a prediction outcome for category learning.
+        
+        This should be called when we have the actual price change data
+        (e.g., 24 hours after the prediction was made).
+        
+        Args:
+            market_id: Market identifier.
+            token_id: Token identifier.
+            category: Market category.
+            predicted_change: What the model predicted.
+            actual_change: What actually happened.
+        """
+        self.category_tracker.record_prediction(
+            market_id=market_id,
+            token_id=token_id,
+            category=category,
+            predicted_change=predicted_change,
+            actual_change=actual_change,
+        )
+    
+    def get_category_performance(self) -> dict:
+        """Get category performance summary.
+        
+        Returns:
+            Summary of category performance.
+        """
+        return self.category_tracker.get_performance_summary()
 
 
 # Singleton instance
