@@ -583,15 +583,24 @@ def main():
         n_models = metrics.get('n_models_ensemble', 0)
         n_features = metrics.get('n_features_used', 0)
         cv_std = metrics.get('cv_std', 0)
+        avg_conf = metrics.get('avg_confidence', 0)
+        conf_trade_pct = metrics.get('confident_trade_pct', 0)
         
         prof_icon = "✅" if prof > 0.55 else "🟡" if prof > 0.50 else "❌"
-        print(f"\n   📊 VALIDATION METRICS (from training):")
+        print(f"\n   📊 VALIDATION METRICS (worst-case):")
         print(f"   Profitable Acc:   {prof_icon} {format_pct(prof)}")
         print(f"   Directional Acc:  {format_pct(dir_acc)}")
-        print(f"   R² Score:         {metrics.get('r2', 0):.3f}")
+        
+        # Show confidence metrics if available (new classifier model)
+        if avg_conf > 0 or conf_trade_pct > 0:
+            print(f"\n   🎯 CONFIDENCE METRICS:")
+            print(f"   Avg Confidence:   {format_pct(avg_conf)}")
+            print(f"   Confident Trades: {format_pct(conf_trade_pct)}")
+            print(f"   (Only trades when >60% confident)")
+        
         if n_models > 0:
             print(f"\n   🧠 MODEL DETAILS:")
-            print(f"   Ensemble:         {n_models} models")
+            print(f"   Ensemble:         {n_models} classifiers")
             print(f"   Features Used:    {n_features}")
             if cv_std > 0:
                 consistency = "High" if cv_std < 0.05 else "Medium" if cv_std < 0.1 else "Low"

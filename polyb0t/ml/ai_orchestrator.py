@@ -578,14 +578,14 @@ class AIOrchestrator:
         
         return result is not None
     
-    def predict(self, features: dict) -> Optional[float]:
+    def predict(self, features: dict) -> Optional[tuple]:
         """Make a prediction using the AI model.
         
         Args:
             features: Feature dictionary.
             
         Returns:
-            Predicted price change, or None if no model.
+            Tuple of (predicted_change, confidence), or None if no model.
         """
         if not self.is_ai_ready():
             return None
@@ -611,10 +611,17 @@ class AIOrchestrator:
         Returns:
             Signal dict with side, edge, confidence, category info, or None.
         """
-        prediction = self.predict(features)
+        result = self.predict(features)
 
-        if prediction is None:
+        if result is None:
             return None
+
+        # Handle both old (float) and new (tuple) return types
+        if isinstance(result, tuple):
+            prediction, model_confidence = result
+        else:
+            prediction = result
+            model_confidence = 0.5  # Default for old models
 
         # === CATEGORY TRACKING ===
         # Categorize the market
@@ -635,6 +642,16 @@ class AIOrchestrator:
         # Convert prediction to signal
         edge = prediction
 
+        # === CONFIDENCE THRESHOLD ===
+        # Only trade when model is confident enough (60%+)
+        CONFIDENCE_THRESHOLD = 0.60
+        if model_confidence < CONFIDENCE_THRESHOLD:
+            logger.debug(
+                f"Skipping {market_id[:12]} - low model confidence "
+                f"({model_confidence:.1%} < {CONFIDENCE_THRESHOLD:.0%})"
+            )
+            return None
+
         # Only generate signal if edge is meaningful
         min_edge = self.settings.edge_threshold
         if abs(edge) < min_edge:
@@ -643,8 +660,8 @@ class AIOrchestrator:
         # Determine side
         side = "BUY" if edge > 0 else "SELL"
         
-        # Calculate confidence based on prediction magnitude
-        base_confidence = min(1.0, abs(edge) * 5)
+        # Base confidence now comes from the model
+        base_confidence = model_confidence
         
         # Apply category confidence adjustment
         adjusted_confidence = base_confidence * category_multiplier
