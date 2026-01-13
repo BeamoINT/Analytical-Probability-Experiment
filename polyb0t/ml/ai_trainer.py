@@ -205,9 +205,7 @@ class AITrainer:
         try:
             logger.info(f"Starting AI training with {len(training_data)} examples")
             
-            # === SORT BY TIME FOR REALISTIC VALIDATION ===
-            # Sort data by timestamp (oldest first)
-            # This prevents data leakage - we train on past, validate on future
+            # === SORT BY TIME ===
             sorted_data = sorted(
                 training_data,
                 key=lambda x: x.get("timestamp", x.get("created_at", ""))
@@ -220,56 +218,143 @@ class AITrainer:
                 logger.warning("No valid training data after preparation")
                 return None
             
-            # === TIME-BASED SPLIT ===
-            # Train on older 80%, validate on newest 20%
-            # This simulates real trading: learn from past, predict future
-            split_idx = int(len(X) * (1 - self.benchmark_test_size))
-            X_train, X_test = X[:split_idx], X[split_idx:]
-            y_train, y_test = y[:split_idx], y[split_idx:]
+            # === ROBUST MULTI-VALIDATION STRATEGY ===
+            # Use multiple validation approaches and report WORST-CASE
+            # This prevents overfit metrics from fooling us
             
-            logger.info(
-                f"Time-based split: train={len(X_train)} (older), test={len(X_test)} (newer)"
-            )
+            validation_results = []
             
-            # Train new model (includes CV, feature selection, ensemble)
-            new_model = self._train(X_train, y_train)
+            # VALIDATION 1: Time-based with gap (no leakage)
+            # Leave a gap between train and test to prevent temporal correlation
+            gap_size = int(len(X) * 0.05)  # 5% gap
+            train_end = int(len(X) * 0.75)  # 75% train
+            test_start = train_end + gap_size
             
-            # === EVALUATE ON FUTURE DATA (more realistic) ===
-            new_metrics = self._evaluate(new_model, X_test, y_test)
+            if test_start < len(X) - 10:
+                X_train_time = X[:train_end]
+                y_train_time = y[:train_end]
+                X_test_time = X[test_start:]
+                y_test_time = y[test_start:]
+                
+                model_time = self._train(X_train_time, y_train_time)
+                metrics_time = self._evaluate(model_time, X_test_time, y_test_time)
+                validation_results.append(("time_gap", metrics_time))
+                logger.info(f"Time-gap validation: profit_acc={metrics_time.profitable_accuracy:.1%}")
             
-            # Add ensemble info to metrics
-            if hasattr(new_model, 'fitted_models'):
-                new_metrics.n_models_ensemble = len(new_model.fitted_models)
-            if hasattr(new_model, 'selected_mask'):
-                new_metrics.n_features_used = int(np.sum(new_model.selected_mask))
+            # VALIDATION 2: Walk-forward (multiple periods)
+            # Train on period 1, test on period 2; train on 1+2, test on 3; etc.
+            n_periods = 4
+            period_size = len(X) // n_periods
+            walk_forward_accs = []
             
-            logger.info(
-                f"New model validation (on future data): "
-                f"dir_acc={new_metrics.directional_accuracy:.1%}, "
-                f"profit_acc={new_metrics.profitable_accuracy:.1%}, "
-                f"r2={new_metrics.r2:.3f}, "
-                f"ensemble={new_metrics.n_models_ensemble} models, "
-                f"features={new_metrics.n_features_used}"
-            )
-            
-            # Compare with current model (for logging only)
-            if self._current_model is not None:
-                try:
-                    old_metrics = self._evaluate(self._current_model, X_test, y_test)
-                    improvement = (new_metrics.score() - old_metrics.score()) / max(0.001, old_metrics.score()) * 100
+            if period_size > 50:
+                for i in range(1, n_periods):
+                    train_end = i * period_size
+                    test_end = (i + 1) * period_size
                     
+                    X_train_wf = X[:train_end]
+                    y_train_wf = y[:train_end]
+                    X_test_wf = X[train_end:test_end]
+                    y_test_wf = y[train_end:test_end]
+                    
+                    if len(X_train_wf) > 50 and len(X_test_wf) > 10:
+                        model_wf = self._train(X_train_wf, y_train_wf)
+                        metrics_wf = self._evaluate(model_wf, X_test_wf, y_test_wf)
+                        walk_forward_accs.append(metrics_wf.profitable_accuracy)
+                
+                if walk_forward_accs:
+                    avg_wf_acc = sum(walk_forward_accs) / len(walk_forward_accs)
+                    min_wf_acc = min(walk_forward_accs)
                     logger.info(
-                        f"Model comparison: old_score={old_metrics.score():.3f}, "
-                        f"new_score={new_metrics.score():.3f}, "
-                        f"change={improvement:+.1f}%"
+                        f"Walk-forward validation: avg={avg_wf_acc:.1%}, "
+                        f"min={min_wf_acc:.1%}, periods={len(walk_forward_accs)}"
                     )
-                except Exception as e:
-                    logger.warning(f"Could not compare with old model: {e}")
+                    # Use the minimum as worst case
+                    wf_metrics = ModelMetrics(
+                        mse=0, mae=0, r2=0,
+                        directional_accuracy=min_wf_acc,
+                        profitable_accuracy=min_wf_acc,
+                    )
+                    validation_results.append(("walk_forward_min", wf_metrics))
             
-            # === ALWAYS DEPLOY NEWEST MODEL ===
-            # New model always replaces old - it has more/newer training data
+            # VALIDATION 3: Random stratified sample (tests generalization)
+            # Randomly sample 20% from ALL time periods
+            np.random.seed(42)
+            n_samples = len(X)
+            test_indices = np.random.choice(n_samples, size=int(n_samples * 0.2), replace=False)
+            train_indices = np.array([i for i in range(n_samples) if i not in test_indices])
+            
+            X_train_rand = X[train_indices]
+            y_train_rand = y[train_indices]
+            X_test_rand = X[test_indices]
+            y_test_rand = y[test_indices]
+            
+            model_rand = self._train(X_train_rand, y_train_rand)
+            metrics_rand = self._evaluate(model_rand, X_test_rand, y_test_rand)
+            validation_results.append(("random_sample", metrics_rand))
+            logger.info(f"Random sample validation: profit_acc={metrics_rand.profitable_accuracy:.1%}")
+            
+            # VALIDATION 4: Oldest data test (can we predict old markets?)
+            # Train on newest 75%, test on oldest 25%
+            oldest_test_size = int(len(X) * 0.25)
+            X_train_old = X[oldest_test_size:]
+            y_train_old = y[oldest_test_size:]
+            X_test_old = X[:oldest_test_size]
+            y_test_old = y[:oldest_test_size]
+            
+            model_old = self._train(X_train_old, y_train_old)
+            metrics_old = self._evaluate(model_old, X_test_old, y_test_old)
+            validation_results.append(("oldest_data", metrics_old))
+            logger.info(f"Oldest data validation: profit_acc={metrics_old.profitable_accuracy:.1%}")
+            
+            # === USE WORST-CASE METRICS ===
+            # Report the MINIMUM across all validation strategies
+            # This is the most honest estimate of real performance
+            all_profit_accs = [m.profitable_accuracy for _, m in validation_results]
+            all_dir_accs = [m.directional_accuracy for _, m in validation_results]
+            all_r2s = [m.r2 for _, m in validation_results]
+            
+            worst_profit_acc = min(all_profit_accs) if all_profit_accs else 0.5
+            worst_dir_acc = min(all_dir_accs) if all_dir_accs else 0.5
+            worst_r2 = min(all_r2s) if all_r2s else 0
+            avg_profit_acc = sum(all_profit_accs) / len(all_profit_accs) if all_profit_accs else 0.5
+            
+            logger.info(
+                f"Multi-validation summary: "
+                f"worst_profit={worst_profit_acc:.1%}, "
+                f"avg_profit={avg_profit_acc:.1%}, "
+                f"strategies={len(validation_results)}"
+            )
+            
+            # === TRAIN FINAL MODEL ON ALL DATA ===
+            # Now train on ALL data for the deployed model
+            final_model = self._train(X, y)
+            
+            # Create final metrics using WORST-CASE values
+            final_metrics = ModelMetrics(
+                mse=sum(m.mse for _, m in validation_results) / len(validation_results) if validation_results else 0,
+                mae=sum(m.mae for _, m in validation_results) / len(validation_results) if validation_results else 0,
+                r2=worst_r2,
+                directional_accuracy=worst_dir_acc,
+                profitable_accuracy=worst_profit_acc,
+            )
+            
+            # Add ensemble info
+            if hasattr(final_model, 'fitted_models'):
+                final_metrics.n_models_ensemble = len(final_model.fitted_models)
+            if hasattr(final_model, 'selected_mask'):
+                final_metrics.n_features_used = int(np.sum(final_model.selected_mask))
+            
+            logger.info(
+                f"Final model (worst-case metrics): "
+                f"dir_acc={final_metrics.directional_accuracy:.1%}, "
+                f"profit_acc={final_metrics.profitable_accuracy:.1%}, "
+                f"r2={final_metrics.r2:.3f}"
+            )
+            
+            # === DEPLOY MODEL ===
             version = (self._current_model_info.version + 1) if self._current_model_info else 1
-            model_info = self._deploy_model(new_model, new_metrics, version, len(training_data))
+            model_info = self._deploy_model(final_model, final_metrics, version, len(training_data))
             
             logger.info(
                 f"Deployed AI model v{version} "
@@ -507,7 +592,7 @@ class AITrainer:
             cv_scores = []
             
             # Model 1: Ridge Regression (L2 regularization)
-            ridge = Ridge(alpha=10.0)  # Strong regularization
+            ridge = Ridge(alpha=100.0)  # VERY strong regularization
             ridge_scores = self._cross_val_score(ridge, X_selected, y, tscv)
             models.append(ridge)
             model_names.append("Ridge")
@@ -515,23 +600,24 @@ class AITrainer:
             logger.info(f"Ridge CV score: {np.mean(ridge_scores):.4f} (+/- {np.std(ridge_scores):.4f})")
             
             # Model 2: ElasticNet (L1 + L2 regularization)
-            elastic = ElasticNet(alpha=0.1, l1_ratio=0.5, max_iter=1000)
+            elastic = ElasticNet(alpha=1.0, l1_ratio=0.7, max_iter=1000)  # Strong regularization
             elastic_scores = self._cross_val_score(elastic, X_selected, y, tscv)
             models.append(elastic)
             model_names.append("ElasticNet")
             cv_scores.append(np.mean(elastic_scores))
             logger.info(f"ElasticNet CV score: {np.mean(elastic_scores):.4f} (+/- {np.std(elastic_scores):.4f})")
             
-            # Model 3: Random Forest with strong regularization
+            # Model 3: Random Forest with VERY strong regularization
             if n_samples >= 500:
                 rf = RandomForestRegressor(
-                    n_estimators=100,
-                    max_depth=6,  # Shallow trees
-                    min_samples_split=20,  # Need many samples to split
-                    min_samples_leaf=10,  # Leaf must have many samples
-                    max_features=0.3,  # Only use 30% of features per tree
+                    n_estimators=50,  # Fewer trees (less overfit)
+                    max_depth=4,  # VERY shallow trees
+                    min_samples_split=50,  # Need MANY samples to split
+                    min_samples_leaf=25,  # Each leaf needs many samples
+                    max_features=0.2,  # Only use 20% of features per tree
+                    max_samples=0.7,  # Only use 70% of samples per tree
                     bootstrap=True,
-                    oob_score=True,  # Out-of-bag validation
+                    oob_score=True,
                     n_jobs=-1,
                     random_state=42,
                 )
@@ -543,15 +629,16 @@ class AITrainer:
             
             # Model 4: Gradient Boosting with early stopping
             if n_samples >= 500:
-                # Use HistGradientBoosting which has built-in early stopping
+                # Use HistGradientBoosting with STRONG regularization
                 hgb = HistGradientBoostingRegressor(
-                    max_iter=200,
-                    max_depth=4,  # Very shallow
-                    min_samples_leaf=20,
-                    l2_regularization=1.0,  # L2 penalty
-                    early_stopping=True,  # Stop if validation score doesn't improve
-                    validation_fraction=0.15,  # Use 15% for early stopping validation
-                    n_iter_no_change=10,  # Stop after 10 rounds without improvement
+                    max_iter=100,  # Fewer iterations
+                    max_depth=3,  # VERY shallow trees
+                    min_samples_leaf=50,  # More samples per leaf
+                    l2_regularization=10.0,  # STRONG L2 penalty
+                    learning_rate=0.05,  # Slow learning
+                    early_stopping=True,
+                    validation_fraction=0.2,  # 20% for early stopping
+                    n_iter_no_change=5,  # Stop quickly if no improvement
                     random_state=42,
                 )
                 hgb_scores = self._cross_val_score(hgb, X_selected, y, tscv)
