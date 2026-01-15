@@ -290,7 +290,7 @@ def get_system_stats():
 
 
 def get_live_performance():
-    """Get actual live prediction performance (not validation, real outcomes)."""
+    """Get actual live prediction performance from CURRENT MODEL ONLY."""
     result = {
         "total_predictions": 0,
         "evaluated_predictions": 0,
@@ -298,53 +298,54 @@ def get_live_performance():
         "profitable_predictions": 0,
         "total_pnl": 0.0,
         "by_category": {},
+        "model_created": None,
     }
     
+    # First, get the current model's creation time
+    model_created = None
+    state_path = "data/ai_models/trainer_state.json"
+    if os.path.exists(state_path):
+        try:
+            with open(state_path, "r") as f:
+                state = json.load(f)
+            model_created = state.get("created_at")
+            result["model_created"] = model_created
+        except:
+            pass
+
     # Check category stats database for actual prediction outcomes
     db_path = "data/category_stats.db"
     if os.path.exists(db_path):
         try:
             conn = sqlite3.connect(db_path, timeout=10.0)
             cursor = conn.cursor()
-            
+
             # Get overall stats from predictions table
-            cursor.execute("""
-                SELECT COUNT(*), 
-                       SUM(was_correct), 
-                       SUM(was_profitable),
-                       SUM(pnl)
-                FROM predictions
-            """)
+            # Only count predictions from AFTER current model was created
+            if model_created:
+                cursor.execute("""
+                    SELECT COUNT(*),
+                           SUM(was_correct),
+                           SUM(was_profitable),
+                           SUM(pnl)
+                    FROM predictions
+                    WHERE recorded_at >= ?
+                """, (model_created,))
+            else:
+                cursor.execute("""
+                    SELECT COUNT(*),
+                           SUM(was_correct),
+                           SUM(was_profitable),
+                           SUM(pnl)
+                    FROM predictions
+                """)
             row = cursor.fetchone()
             if row and row[0]:
                 result["total_predictions"] = row[0]
                 result["correct_direction"] = row[1] or 0
                 result["profitable_predictions"] = row[2] or 0
                 result["total_pnl"] = row[3] or 0.0
-            
-            # Get per-category stats
-            cursor.execute("""
-                SELECT category, 
-                       COUNT(*) as total,
-                       SUM(was_correct) as correct,
-                       SUM(was_profitable) as profitable,
-                       SUM(pnl) as pnl
-                FROM predictions
-                GROUP BY category
-                ORDER BY total DESC
-            """)
-            for row in cursor.fetchall():
-                cat, total, correct, profitable, pnl = row
-                if total > 0:
-                    result["by_category"][cat] = {
-                        "total": total,
-                        "correct": correct or 0,
-                        "profitable": profitable or 0,
-                        "pnl": pnl or 0,
-                        "accuracy": (correct or 0) / total,
-                        "profitable_pct": (profitable or 0) / total,
-                    }
-            
+
             conn.close()
         except Exception as e:
             result["error"] = str(e)
@@ -356,30 +357,61 @@ def get_live_performance():
             conn = sqlite3.connect(ai_db_path, timeout=10.0)
             cursor = conn.cursor()
             
-            # Count evaluated predictions
-            cursor.execute("""
-                SELECT COUNT(*) FROM training_examples 
-                WHERE prediction_evaluated = 1 AND predicted_change IS NOT NULL
-            """)
-            row = cursor.fetchone()
-            result["evaluated_predictions"] = row[0] if row else 0
+            # Only count predictions made AFTER current model was created
+            # This filters out old predictions from previous (worse) models
+            if model_created:
+                # Count evaluated predictions from current model
+                cursor.execute("""
+                    SELECT COUNT(*) FROM training_examples 
+                    WHERE prediction_evaluated = 1 
+                      AND predicted_change IS NOT NULL
+                      AND created_at >= ?
+                """, (model_created,))
+                row = cursor.fetchone()
+                result["evaluated_predictions"] = row[0] if row else 0
+                
+                # Calculate actual accuracy from current model's predictions only
+                cursor.execute("""
+                    SELECT 
+                        COUNT(*) as total,
+                        SUM(CASE WHEN (predicted_change > 0 AND price_change_24h > 0) 
+                                 OR (predicted_change < 0 AND price_change_24h < 0) 
+                                 OR (predicted_change = 0 AND price_change_24h = 0)
+                            THEN 1 ELSE 0 END) as correct_direction,
+                        SUM(CASE WHEN (predicted_change > 0.01 AND price_change_24h > 0.02)
+                                 OR (predicted_change < -0.01 AND price_change_24h < -0.02)
+                            THEN 1 ELSE 0 END) as profitable
+                    FROM training_examples
+                    WHERE prediction_evaluated = 1 
+                      AND predicted_change IS NOT NULL 
+                      AND price_change_24h IS NOT NULL
+                      AND created_at >= ?
+                """, (model_created,))
+            else:
+                # Fallback: all predictions
+                cursor.execute("""
+                    SELECT COUNT(*) FROM training_examples 
+                    WHERE prediction_evaluated = 1 AND predicted_change IS NOT NULL
+                """)
+                row = cursor.fetchone()
+                result["evaluated_predictions"] = row[0] if row else 0
+                
+                cursor.execute("""
+                    SELECT 
+                        COUNT(*) as total,
+                        SUM(CASE WHEN (predicted_change > 0 AND price_change_24h > 0) 
+                                 OR (predicted_change < 0 AND price_change_24h < 0) 
+                                 OR (predicted_change = 0 AND price_change_24h = 0)
+                            THEN 1 ELSE 0 END) as correct_direction,
+                        SUM(CASE WHEN (predicted_change > 0.01 AND price_change_24h > 0.02)
+                                 OR (predicted_change < -0.01 AND price_change_24h < -0.02)
+                            THEN 1 ELSE 0 END) as profitable
+                    FROM training_examples
+                    WHERE prediction_evaluated = 1 
+                      AND predicted_change IS NOT NULL 
+                      AND price_change_24h IS NOT NULL
+                """)
             
-            # Calculate actual accuracy from evaluated predictions
-            cursor.execute("""
-                SELECT 
-                    COUNT(*) as total,
-                    SUM(CASE WHEN (predicted_change > 0 AND price_change_24h > 0) 
-                             OR (predicted_change < 0 AND price_change_24h < 0) 
-                             OR (predicted_change = 0 AND price_change_24h = 0)
-                        THEN 1 ELSE 0 END) as correct_direction,
-                    SUM(CASE WHEN (predicted_change > 0.01 AND price_change_24h > 0.02)
-                             OR (predicted_change < -0.01 AND price_change_24h < -0.02)
-                        THEN 1 ELSE 0 END) as profitable
-                FROM training_examples
-                WHERE prediction_evaluated = 1 
-                  AND predicted_change IS NOT NULL 
-                  AND price_change_24h IS NOT NULL
-            """)
             row = cursor.fetchone()
             if row and row[0] and row[0] > 0:
                 result["simulated_total"] = row[0]
@@ -614,7 +646,7 @@ def main():
         )
         
         if has_live_data:
-            print(f"\n   📈 ACTUAL PERFORMANCE (real outcomes):")
+            print(f"\n   📈 ACTUAL PERFORMANCE (current model only):")
             
             # Show simulated prediction results
             sim_total = live.get("simulated_total", 0)
@@ -632,6 +664,11 @@ def main():
                     diff = sim_prof - prof
                     diff_icon = "📈" if diff > 0 else "📉" if diff < 0 else "➡️"
                     print(f"   vs Validation:    {diff_icon} {diff:+.1%}")
+            else:
+                # Model is new, no evaluated predictions yet
+                print(f"   ⏳ Model v{ai['model_version']} is new")
+                print(f"   Waiting for predictions to be evaluated...")
+                print(f"   (Takes 24-48h after model deployment)")
             
             # Show category tracker results
             cat_total = live.get("total_predictions", 0)
