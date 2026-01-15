@@ -412,7 +412,14 @@ class AIOrchestrator:
                 try:
                     # Get prediction from current model
                     features = snapshot.to_dict()
-                    predicted_change = self.predict(features)
+                    result = self.predict(features)
+                    
+                    # Handle both old (float) and new (tuple) return types
+                    if result is not None:
+                        if isinstance(result, tuple):
+                            predicted_change, confidence = result
+                        else:
+                            predicted_change = result
                     
                     # Categorize the market
                     if market_title:
