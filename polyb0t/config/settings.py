@@ -78,6 +78,16 @@ class Settings(BaseSettings):
         default=140.0,
         description="Maximum storage for AI training data in GB (default 140GB)"
     )
+    
+    # === EXTERNAL API KEYS ===
+    openai_api_key: str = Field(
+        default="",
+        description="OpenAI API key for GPT-5.2 intelligent news analysis"
+    )
+    newsapi_key: str = Field(
+        default="",
+        description="NewsAPI.org API key for fetching news headlines"
+    )
 
     # Database
     db_url: str = Field(default="sqlite:///./polybot.db", description="Database connection URL")

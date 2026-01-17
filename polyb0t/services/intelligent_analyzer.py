@@ -86,7 +86,6 @@ class IntelligentAnalyzer:
     """Uses GPT-5.2 to intelligently analyze news for market confirmation."""
     
     # Configuration
-    API_KEY_ENV = "OPENAI_API_KEY"
     MODEL = "gpt-5.2"  # Latest model with best reasoning
     MAX_TOKENS = 150  # Keep output small for efficiency
     TEMPERATURE = 0.0  # Zero temperature for deterministic output
@@ -105,13 +104,25 @@ class IntelligentAnalyzer:
         """Initialize the analyzer.
         
         Args:
-            api_key: OpenAI API key. If not provided, reads from OPENAI_API_KEY env var.
+            api_key: OpenAI API key. If not provided, reads from settings or env var.
         """
-        self.api_key = api_key or os.environ.get(self.API_KEY_ENV)
+        self.api_key = api_key
+        
+        # Try to get from settings first, then env var
+        if not self.api_key:
+            try:
+                from polyb0t.config.settings import get_settings
+                settings = get_settings()
+                self.api_key = settings.openai_api_key
+            except:
+                pass
+        
+        if not self.api_key:
+            self.api_key = os.environ.get("OPENAI_API_KEY", "")
         
         if not self.api_key:
             logger.warning(
-                f"No OpenAI API key found. Set {self.API_KEY_ENV} environment variable. "
+                "No OpenAI API key found. Set POLYBOT_OPENAI_API_KEY in .env. "
                 "Intelligent analysis will be disabled."
             )
         else:

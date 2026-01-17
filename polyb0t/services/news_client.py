@@ -56,18 +56,30 @@ class NewsClient:
         """Initialize the news client.
         
         Args:
-            api_key: NewsAPI.org API key. If not provided, reads from NEWSAPI_KEY env var.
+            api_key: NewsAPI.org API key. If not provided, reads from settings or env var.
         """
-        self.api_key = api_key or os.environ.get(self.API_KEY_ENV)
+        self.api_key = api_key
         self._last_request_time = None
         self._request_count = 0
         self._daily_count = 0
         self._daily_reset_date = datetime.utcnow().date()
         self._cache_hits = 0
         
+        # Try to get from settings first, then env var
+        if not self.api_key:
+            try:
+                from polyb0t.config.settings import get_settings
+                settings = get_settings()
+                self.api_key = settings.newsapi_key
+            except:
+                pass
+        
+        if not self.api_key:
+            self.api_key = os.environ.get("NEWSAPI_KEY", "")
+        
         if not self.api_key:
             logger.warning(
-                f"No NewsAPI key found. Set {self.API_KEY_ENV} environment variable. "
+                "No NewsAPI key found. Set POLYBOT_NEWSAPI_KEY in .env. "
                 "Get free key at https://newsapi.org/register"
             )
         else:
