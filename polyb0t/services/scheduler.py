@@ -1702,7 +1702,7 @@ class TradingScheduler:
                 }
                 
                 # === CHECK FOR ARBITRAGE FIRST ===
-                # Near-resolved markets with guaranteed profit
+                # Near-resolved markets with NEWS-CONFIRMED profit
                 arb_opp = arbitrage_scanner.scan_market(
                     token_id=outcome.token_id,
                     market_id=market.condition_id,
@@ -1715,6 +1715,7 @@ class TradingScheduler:
                     spread_pct=spread,
                     momentum_24h=0,
                     volatility_24h=0,
+                    event_end_date=market.end_date,  # For event date checking
                 )
                 
                 if arb_opp:

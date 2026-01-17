@@ -727,10 +727,34 @@ def main():
     
     # Arbitrage Scanner Info
     print(f"\n   ⚡ ARBITRAGE SCANNER:")
-    print(f"   Status:           Active (scans each cycle)")
-    print(f"   Min Price:        94% (for YES arbitrage)")
-    print(f"   Min Profit:       1% after spread")
-    print(f"   Max Days to Res:  7 days")
+    arb_stats_path = "data/arbitrage_stats.json"
+    if os.path.exists(arb_stats_path):
+        try:
+            with open(arb_stats_path, "r") as f:
+                arb_stats = json.load(f)
+            total_opps = arb_stats.get("total_opportunities", 0)
+            total_profit = arb_stats.get("total_profit_captured", 0)
+            success_rate = arb_stats.get("success_rate", 0)
+            print(f"   Total Opportunities: {total_opps}")
+            print(f"   Profit Captured:  {total_profit:.2%}")
+            print(f"   Success Rate:     {success_rate:.1%}")
+        except:
+            print(f"   Status:           Active (no trades yet)")
+    else:
+        print(f"   Status:           Active (no trades yet)")
+    
+    # Check if NewsAPI is configured
+    news_api_key = os.environ.get("NEWSAPI_KEY", "")
+    if news_api_key:
+        print(f"   News API:         ✅ Configured")
+    else:
+        print(f"   News API:         ⚠️  Not configured")
+        print(f"   (Set NEWSAPI_KEY env var for news confirmation)")
+    
+    print(f"\n   Arbitrage Criteria:")
+    print(f"   • Price > 92% (YES) or < 8% (NO)")
+    print(f"   • Requires news confirmation OR event date passed")
+    print(f"   • Profit > 0.5% after spread")
     
     # Resolution Predictor Status
     resolution_state_path = "data/resolution_models/resolution_state.json"

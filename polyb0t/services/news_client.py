@@ -1,0 +1,232 @@
+"""News API client for fetching headlines.
+
+Integrates with NewsAPI.org to fetch current headlines
+for correlation with Polymarket events.
+
+Free tier: 100 requests/day, 1 month old articles max.
+"""
+
+import json
+import logging
+import os
+import re
+import requests
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from typing import Optional
+import hashlib
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class NewsArticle:
+    """A news article from the API."""
+    title: str
+    description: str
+    source: str
+    url: str
+    published_at: datetime
+    content: str = ""
+    
+    def get_full_text(self) -> str:
+        """Get all text for analysis."""
+        return f"{self.title} {self.description} {self.content}"
+
+
+class NewsClient:
+    """Client for fetching news from NewsAPI.org."""
+    
+    # Get API key from environment
+    API_KEY_ENV = "NEWSAPI_KEY"
+    BASE_URL = "https://newsapi.org/v2"
+    
+    # Cache to avoid duplicate API calls
+    _cache: dict = {}
+    _cache_duration = timedelta(minutes=15)
+    
+    def __init__(self, api_key: Optional[str] = None):
+        """Initialize the news client.
+        
+        Args:
+            api_key: NewsAPI.org API key. If not provided, reads from NEWSAPI_KEY env var.
+        """
+        self.api_key = api_key or os.environ.get(self.API_KEY_ENV)
+        self._last_request_time = None
+        self._request_count = 0
+        
+        if not self.api_key:
+            logger.warning(
+                f"No NewsAPI key found. Set {self.API_KEY_ENV} environment variable. "
+                "Get free key at https://newsapi.org/register"
+            )
+    
+    def is_available(self) -> bool:
+        """Check if news API is available."""
+        return bool(self.api_key)
+    
+    def search_headlines(
+        self,
+        query: str,
+        language: str = "en",
+        page_size: int = 10,
+    ) -> list[NewsArticle]:
+        """Search for headlines matching a query.
+        
+        Args:
+            query: Search query (keywords from market question).
+            language: Language code.
+            page_size: Number of results.
+            
+        Returns:
+            List of matching articles.
+        """
+        if not self.api_key:
+            return []
+        
+        # Check cache
+        cache_key = hashlib.md5(f"{query}:{language}:{page_size}".encode()).hexdigest()
+        if cache_key in self._cache:
+            cached_time, cached_data = self._cache[cache_key]
+            if datetime.utcnow() - cached_time < self._cache_duration:
+                return cached_data
+        
+        try:
+            # Use "everything" endpoint for broader search
+            url = f"{self.BASE_URL}/everything"
+            params = {
+                "q": query,
+                "language": language,
+                "pageSize": page_size,
+                "sortBy": "publishedAt",
+                "apiKey": self.api_key,
+            }
+            
+            response = requests.get(url, params=params, timeout=10)
+            self._request_count += 1
+            
+            if response.status_code == 429:
+                logger.warning("NewsAPI rate limit reached")
+                return []
+            
+            if response.status_code != 200:
+                logger.warning(f"NewsAPI error: {response.status_code}")
+                return []
+            
+            data = response.json()
+            articles = []
+            
+            for item in data.get("articles", []):
+                try:
+                    published = datetime.fromisoformat(
+                        item.get("publishedAt", "").replace("Z", "+00:00")
+                    )
+                except:
+                    published = datetime.utcnow()
+                
+                article = NewsArticle(
+                    title=item.get("title", "") or "",
+                    description=item.get("description", "") or "",
+                    source=item.get("source", {}).get("name", "Unknown"),
+                    url=item.get("url", ""),
+                    published_at=published,
+                    content=item.get("content", "") or "",
+                )
+                articles.append(article)
+            
+            # Cache results
+            self._cache[cache_key] = (datetime.utcnow(), articles)
+            
+            logger.debug(f"NewsAPI: Found {len(articles)} articles for '{query}'")
+            return articles
+            
+        except requests.RequestException as e:
+            logger.warning(f"NewsAPI request failed: {e}")
+            return []
+        except Exception as e:
+            logger.warning(f"NewsAPI error: {e}")
+            return []
+    
+    def get_top_headlines(
+        self,
+        category: str = "general",
+        country: str = "us",
+        page_size: int = 20,
+    ) -> list[NewsArticle]:
+        """Get top headlines.
+        
+        Args:
+            category: business, entertainment, general, health, science, sports, technology
+            country: Country code (us, gb, etc.)
+            page_size: Number of results.
+            
+        Returns:
+            List of top headlines.
+        """
+        if not self.api_key:
+            return []
+        
+        cache_key = f"top:{category}:{country}:{page_size}"
+        if cache_key in self._cache:
+            cached_time, cached_data = self._cache[cache_key]
+            if datetime.utcnow() - cached_time < self._cache_duration:
+                return cached_data
+        
+        try:
+            url = f"{self.BASE_URL}/top-headlines"
+            params = {
+                "category": category,
+                "country": country,
+                "pageSize": page_size,
+                "apiKey": self.api_key,
+            }
+            
+            response = requests.get(url, params=params, timeout=10)
+            self._request_count += 1
+            
+            if response.status_code != 200:
+                return []
+            
+            data = response.json()
+            articles = []
+            
+            for item in data.get("articles", []):
+                try:
+                    published = datetime.fromisoformat(
+                        item.get("publishedAt", "").replace("Z", "+00:00")
+                    )
+                except:
+                    published = datetime.utcnow()
+                
+                article = NewsArticle(
+                    title=item.get("title", "") or "",
+                    description=item.get("description", "") or "",
+                    source=item.get("source", {}).get("name", "Unknown"),
+                    url=item.get("url", ""),
+                    published_at=published,
+                    content=item.get("content", "") or "",
+                )
+                articles.append(article)
+            
+            self._cache[cache_key] = (datetime.utcnow(), articles)
+            return articles
+            
+        except Exception as e:
+            logger.warning(f"NewsAPI error: {e}")
+            return []
+    
+    def get_request_count(self) -> int:
+        """Get number of API requests made."""
+        return self._request_count
+
+
+# Singleton
+_client_instance: Optional[NewsClient] = None
+
+
+def get_news_client() -> NewsClient:
+    """Get or create the news client singleton."""
+    global _client_instance
+    if _client_instance is None:
+        _client_instance = NewsClient()
+    return _client_instance
