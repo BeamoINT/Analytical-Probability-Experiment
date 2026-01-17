@@ -31,6 +31,7 @@ from polyb0t.models.strategy_baseline import TradingSignal
 from polyb0t.services.health import get_health_status
 from polyb0t.services.reporter import Reporter
 from polyb0t.services.system_monitor import get_system_monitor, start_system_monitor
+from polyb0t.services.arbitrage_scanner import get_arbitrage_scanner, ArbitrageOpportunity
 
 logger = logging.getLogger(__name__)
 
@@ -1661,6 +1662,11 @@ class TradingScheduler:
         from polyb0t.models.position_sizing import PositionSizer
         sizer = PositionSizer()
         
+        # === ARBITRAGE SCANNING ===
+        # Check for near-resolved markets with guaranteed profit
+        arbitrage_scanner = get_arbitrage_scanner()
+        arbitrage_scanner.clear_opportunities()
+        
         for market in markets:
             for outcome in market.outcomes:
                 if not outcome.token_id:
@@ -1678,9 +1684,12 @@ class TradingScheduler:
                 ask_depth = sum(l.size for l in ob.asks[:5])
                 imbalance = (bid_depth - ask_depth) / (bid_depth + ask_depth) if (bid_depth + ask_depth) > 0 else 0
                 
+                days_to_res = self._days_to_resolution(market.end_date)
+                
                 features = {
                     "price": mid,
                     "spread": spread,
+                    "spread_pct": spread,
                     "volume_24h": float(market.volume or 0),
                     "liquidity": float(market.liquidity or 0),
                     "orderbook_imbalance": imbalance,
@@ -1688,8 +1697,54 @@ class TradingScheduler:
                     "ask_depth": ask_depth,
                     "momentum_1h": 0,  # TODO: calculate from price history
                     "momentum_24h": 0,
-                    "days_to_resolution": self._days_to_resolution(market.end_date),
+                    "volatility_24h": 0,
+                    "days_to_resolution": days_to_res,
                 }
+                
+                # === CHECK FOR ARBITRAGE FIRST ===
+                # Near-resolved markets with guaranteed profit
+                arb_opp = arbitrage_scanner.scan_market(
+                    token_id=outcome.token_id,
+                    market_id=market.condition_id,
+                    market_title=market.question or market.condition_id,
+                    price=mid,
+                    bid=ob.bids[0].price,
+                    ask=ob.asks[0].price,
+                    volume_24h=float(market.volume or 0),
+                    days_to_resolution=days_to_res,
+                    spread_pct=spread,
+                    momentum_24h=0,
+                    volatility_24h=0,
+                )
+                
+                if arb_opp:
+                    # Create signal for arbitrage opportunity
+                    arb_sizing = sizer.compute_size(
+                        edge_net=arb_opp.net_profit_pct,
+                        confidence=arb_opp.confidence,
+                        available_usdc=available_usdc,
+                        reserved_usdc=reserved_usdc,
+                    )
+                    
+                    if arb_sizing.size_usd_final >= self.settings.min_order_usd:
+                        arb_signal = TradingSignal(
+                            token_id=outcome.token_id,
+                            market_id=market.condition_id,
+                            side="BUY",  # Always buy the near-certain outcome
+                            p_market=mid,
+                            p_model=arb_opp.expected_value,
+                            edge=arb_opp.net_profit_pct,
+                            edge_raw=arb_opp.net_profit_pct,
+                            confidence=arb_opp.confidence,
+                            features=features,
+                            sizing_result=arb_sizing,
+                        )
+                        signals.append(arb_signal)
+                        logger.info(
+                            f"ARBITRAGE: {market.question[:50] if market.question else market.condition_id[:20]} "
+                            f"profit={arb_opp.net_profit_pct:.1%} conf={arb_opp.confidence:.0%}"
+                        )
+                        continue  # Skip regular AI signal for this market
                 
                 # Get AI signal (with category-based confidence adjustment)
                 ai_signal = self.ai_orchestrator.get_ai_signal(

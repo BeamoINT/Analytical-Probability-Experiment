@@ -725,6 +725,37 @@ def main():
             for cat in avoided:
                 print(f"      • {cat['category']} ({cat['profitable_acc']:.0%})")
     
+    # Arbitrage Scanner Info
+    print(f"\n   ⚡ ARBITRAGE SCANNER:")
+    print(f"   Status:           Active (scans each cycle)")
+    print(f"   Min Price:        94% (for YES arbitrage)")
+    print(f"   Min Profit:       1% after spread")
+    print(f"   Max Days to Res:  7 days")
+    
+    # Resolution Predictor Status
+    resolution_state_path = "data/resolution_models/resolution_state.json"
+    if os.path.exists(resolution_state_path):
+        try:
+            with open(resolution_state_path, "r") as f:
+                res_state = json.load(f)
+            res_metrics = res_state.get("metrics", {})
+            print(f"\n   🎯 RESOLUTION PREDICTOR:")
+            print(f"   Model Version:    v{res_state.get('version', 1)}")
+            print(f"   Markets Trained:  {res_state.get('n_markets', 0):,}")
+            print(f"   Accuracy:         {res_metrics.get('accuracy', 0):.1%}")
+            print(f"   Confident Acc:    {res_metrics.get('confident_accuracy', 0):.1%}")
+            print(f"   Calibration Err:  {res_metrics.get('calibration_error', 0):.3f}")
+        except Exception as e:
+            pass
+    else:
+        resolved = ai.get('resolved_examples', 0)
+        if resolved >= 100:
+            print(f"\n   🎯 RESOLUTION PREDICTOR:")
+            print(f"   Status: Ready to train ({resolved} resolved markets)")
+        else:
+            print(f"\n   🎯 RESOLUTION PREDICTOR:")
+            print(f"   Status: Need {100 - resolved} more resolved markets")
+    
     # Training estimate
     min_examples = 500
     if not ai["has_model"] and ai["labeled_examples"] < min_examples:
