@@ -3,7 +3,7 @@
 Integrates with NewsAPI.org to fetch current headlines
 for correlation with Polymarket events.
 
-Free tier: 100 requests/day, 1 month old articles max.
+Plan: 1000 requests/day, 1 month old articles max.
 """
 
 import json
@@ -35,15 +35,22 @@ class NewsArticle:
 
 
 class NewsClient:
-    """Client for fetching news from NewsAPI.org."""
+    """Client for fetching news from NewsAPI.org.
     
-    # Get API key from environment
+    Features:
+    - 1000 requests/day limit tracking
+    - Aggressive caching (30 min) to maximize efficiency
+    - Daily usage reset at midnight UTC
+    """
+    
+    # Configuration
     API_KEY_ENV = "NEWSAPI_KEY"
     BASE_URL = "https://newsapi.org/v2"
+    DAILY_LIMIT = 1000  # Requests per day
     
-    # Cache to avoid duplicate API calls
+    # Cache settings - longer cache = fewer API calls
     _cache: dict = {}
-    _cache_duration = timedelta(minutes=15)
+    _cache_duration = timedelta(minutes=30)  # 30 min cache
     
     def __init__(self, api_key: Optional[str] = None):
         """Initialize the news client.
@@ -54,12 +61,30 @@ class NewsClient:
         self.api_key = api_key or os.environ.get(self.API_KEY_ENV)
         self._last_request_time = None
         self._request_count = 0
+        self._daily_count = 0
+        self._daily_reset_date = datetime.utcnow().date()
+        self._cache_hits = 0
         
         if not self.api_key:
             logger.warning(
                 f"No NewsAPI key found. Set {self.API_KEY_ENV} environment variable. "
                 "Get free key at https://newsapi.org/register"
             )
+        else:
+            logger.info(f"NewsClient initialized (limit: {self.DAILY_LIMIT}/day)")
+    
+    def _check_daily_reset(self):
+        """Reset daily counter at midnight UTC."""
+        today = datetime.utcnow().date()
+        if today > self._daily_reset_date:
+            self._daily_count = 0
+            self._daily_reset_date = today
+            logger.info("NewsAPI daily counter reset")
+    
+    def _can_make_request(self) -> bool:
+        """Check if we can make another request today."""
+        self._check_daily_reset()
+        return self._daily_count < self.DAILY_LIMIT
     
     def is_available(self) -> bool:
         """Check if news API is available."""
@@ -84,12 +109,18 @@ class NewsClient:
         if not self.api_key:
             return []
         
-        # Check cache
+        # Check cache first
         cache_key = hashlib.md5(f"{query}:{language}:{page_size}".encode()).hexdigest()
         if cache_key in self._cache:
             cached_time, cached_data = self._cache[cache_key]
             if datetime.utcnow() - cached_time < self._cache_duration:
+                self._cache_hits += 1
                 return cached_data
+        
+        # Check daily limit
+        if not self._can_make_request():
+            logger.warning(f"NewsAPI daily limit reached ({self.DAILY_LIMIT})")
+            return []
         
         try:
             # Use "everything" endpoint for broader search
@@ -104,6 +135,7 @@ class NewsClient:
             
             response = requests.get(url, params=params, timeout=10)
             self._request_count += 1
+            self._daily_count += 1
             
             if response.status_code == 429:
                 logger.warning("NewsAPI rate limit reached")
@@ -218,6 +250,27 @@ class NewsClient:
     def get_request_count(self) -> int:
         """Get number of API requests made."""
         return self._request_count
+    
+    def get_stats(self) -> dict:
+        """Get detailed usage statistics."""
+        self._check_daily_reset()
+        remaining = self.DAILY_LIMIT - self._daily_count
+        
+        cache_rate = (
+            self._cache_hits / (self._cache_hits + self._request_count) * 100
+            if (self._cache_hits + self._request_count) > 0 else 0
+        )
+        
+        return {
+            "is_available": self.is_available(),
+            "daily_limit": self.DAILY_LIMIT,
+            "daily_used": self._daily_count,
+            "daily_remaining": remaining,
+            "total_requests": self._request_count,
+            "cache_hits": self._cache_hits,
+            "cache_hit_rate": f"{cache_rate:.1f}%",
+            "cache_size": len(self._cache),
+        }
 
 
 # Singleton

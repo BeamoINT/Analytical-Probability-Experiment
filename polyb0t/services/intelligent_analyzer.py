@@ -1,9 +1,13 @@
-"""Intelligent News Analyzer using LLM for true understanding.
+"""Intelligent News Analyzer using GPT-5.2 for true understanding.
 
-Uses OpenAI/compatible LLM to actually understand news content
-and determine if it confirms a market outcome.
+Uses OpenAI's GPT-5.2 to deeply understand news content
+and determine if it definitively confirms a market outcome.
 
-Much more accurate than keyword matching.
+Features:
+- Chain-of-thought reasoning for accuracy
+- Structured JSON output
+- Aggressive caching to minimize API costs
+- Cost tracking and efficiency metrics
 """
 
 import json
@@ -12,7 +16,7 @@ import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Optional, Tuple
+from typing import Optional
 
 import requests
 
@@ -42,22 +46,60 @@ class IntelligentConfirmation:
         }
 
 
+# System prompt - crafted for precision and accuracy
+SYSTEM_PROMPT = """You are an expert financial analyst specializing in prediction market arbitrage.
+
+Your task is to determine if a news article DEFINITIVELY answers a prediction market question.
+
+CRITICAL RULES:
+1. You are looking for ARBITRAGE - this means near-certain outcomes only
+2. Only answer YES if the news PROVES the event HAS happened or WILL definitely happen
+3. Only answer NO if the news PROVES the event has NOT happened or WILL NOT happen
+4. Answer UNCERTAIN for anything else - speculation, predictions, opinions, partial info
+
+EXAMPLES OF DEFINITIVE NEWS:
+- "President Biden pardons Hunter Biden" → YES for "Will Biden pardon Hunter?"
+- "Supreme Court rules 6-3 against..." → Depending on question, YES or NO
+- "Company X files for bankruptcy" → YES for "Will Company X go bankrupt?"
+- "Bill fails to pass Senate vote" → NO for "Will the bill pass?"
+
+EXAMPLES OF NON-DEFINITIVE NEWS (answer UNCERTAIN):
+- "Sources say Biden is considering..." → UNCERTAIN (not confirmed)
+- "Experts predict Company X will..." → UNCERTAIN (prediction, not fact)
+- "Bill likely to pass according to..." → UNCERTAIN (speculation)
+- Old news about a different event → UNCERTAIN (not relevant)
+
+THINK STEP BY STEP:
+1. What exactly is the market question asking?
+2. What does the headline/article actually say happened?
+3. Does the news DIRECTLY and DEFINITIVELY answer the question?
+4. Is this actual news or just speculation/opinion?
+5. Am I 100% certain about this? If not, say UNCERTAIN.
+
+Your response must be JSON with exactly these fields:
+- outcome: "YES", "NO", or "UNCERTAIN"
+- confidence: number from 0.0 to 1.0 (only >0.85 for definitive answers)
+- reasoning: one clear sentence explaining your logic"""
+
+
 class IntelligentAnalyzer:
-    """Uses LLM to intelligently analyze news for market confirmation."""
+    """Uses GPT-5.2 to intelligently analyze news for market confirmation."""
     
     # Configuration
     API_KEY_ENV = "OPENAI_API_KEY"
-    MODEL = "gpt-3.5-turbo"  # Cheap and fast, good enough for this
-    MAX_TOKENS = 300
-    TEMPERATURE = 0.1  # Low temperature for consistent analysis
+    MODEL = "gpt-5.2"  # Latest model with best reasoning
+    MAX_TOKENS = 150  # Keep output small for efficiency
+    TEMPERATURE = 0.0  # Zero temperature for deterministic output
     
-    # Cache to avoid duplicate API calls
+    # Cache settings - aggressive caching to save costs
     _cache: dict = {}
-    _cache_duration = timedelta(hours=1)
+    _cache_duration = timedelta(hours=4)  # Cache for 4 hours
     
-    # Cost tracking
-    _total_tokens_used = 0
+    # Cost tracking (GPT-5.2 pricing: $1.75/1M input, $14.00/1M output)
+    _total_input_tokens = 0
+    _total_output_tokens = 0
     _total_requests = 0
+    _cache_hits = 0
     
     def __init__(self, api_key: Optional[str] = None):
         """Initialize the analyzer.
@@ -72,6 +114,8 @@ class IntelligentAnalyzer:
                 f"No OpenAI API key found. Set {self.API_KEY_ENV} environment variable. "
                 "Intelligent analysis will be disabled."
             )
+        else:
+            logger.info(f"Intelligent analyzer initialized with {self.MODEL}")
     
     def is_available(self) -> bool:
         """Check if LLM analysis is available."""
@@ -86,13 +130,13 @@ class IntelligentAnalyzer:
     ) -> Optional[IntelligentConfirmation]:
         """Analyze if a headline confirms a market outcome.
         
-        Uses LLM to truly understand the content and determine if it
-        answers the market question.
+        Uses GPT-5.2 to deeply understand the content and determine if it
+        definitively answers the market question.
         
         Args:
             market_question: The Polymarket question (e.g., "Will Biden pardon Hunter?")
             headline: The news headline
-            article_content: Optional article body text
+            article_content: Optional article body text (truncated for efficiency)
             source: News source name
             
         Returns:
@@ -101,33 +145,41 @@ class IntelligentAnalyzer:
         if not self.api_key:
             return None
         
-        # Check cache
-        cache_key = f"{market_question}:{headline}"
+        # Normalize inputs for better cache hits
+        market_q_normalized = market_question.strip().lower()
+        headline_normalized = headline.strip().lower()
+        
+        # Check cache first
+        cache_key = f"{market_q_normalized}:{headline_normalized}"
         if cache_key in self._cache:
             cached_time, cached_result = self._cache[cache_key]
             if datetime.utcnow() - cached_time < self._cache_duration:
+                self._cache_hits += 1
+                logger.debug(f"Cache hit for: {headline[:40]}...")
                 return cached_result
         
-        # Build the analysis prompt
-        prompt = self._build_prompt(market_question, headline, article_content)
+        # Build the analysis prompt - keep it concise for efficiency
+        user_prompt = self._build_prompt(market_question, headline, article_content)
         
         try:
-            response = self._call_llm(prompt)
+            response = self._call_llm(user_prompt)
             if not response:
                 return None
             
             # Parse the response
             result = self._parse_response(response, market_question, headline, source)
             
-            # Cache the result
+            # Cache the result (cache both positive and negative results)
             if result:
                 self._cache[cache_key] = (datetime.utcnow(), result)
                 
                 if result.confirmed_outcome:
                     logger.info(
-                        f"LLM confirms {result.confirmed_outcome} for '{market_question[:40]}' "
-                        f"(conf={result.confidence:.0%}): {result.reasoning[:50]}..."
+                        f"[GPT-5.2] {result.confirmed_outcome} for '{market_question[:35]}...' "
+                        f"(conf={result.confidence:.0%}): {result.reasoning}"
                     )
+                else:
+                    logger.debug(f"[GPT-5.2] UNCERTAIN for '{market_question[:35]}...'")
             
             return result
             
@@ -141,38 +193,21 @@ class IntelligentAnalyzer:
         headline: str,
         article_content: str,
     ) -> str:
-        """Build the analysis prompt for the LLM."""
-        content = headline
+        """Build an efficient, focused prompt."""
+        # Truncate article content to save tokens
+        content_snippet = ""
         if article_content:
-            # Limit content length
-            content += f"\n\nArticle excerpt: {article_content[:500]}"
+            # Only include first 200 chars - headlines usually have the key info
+            content_snippet = f"\nArticle snippet: {article_content[:200].strip()}..."
         
-        return f"""You are analyzing news to determine if it answers a prediction market question.
+        return f"""MARKET QUESTION: {market_question}
 
-MARKET QUESTION: "{market_question}"
+NEWS HEADLINE: {headline}{content_snippet}
 
-NEWS HEADLINE: "{headline}"
-{f'ARTICLE CONTENT: {article_content[:500]}' if article_content else ''}
-
-TASK: Determine if this news DEFINITIVELY answers the market question.
-
-Rules:
-1. Only say YES if the news CONFIRMS the event happened/will happen
-2. Only say NO if the news CONFIRMS the event did NOT/will NOT happen
-3. Say UNCERTAIN if the news doesn't definitively answer the question
-4. Be VERY careful - only confirm if the news is clear and definitive
-
-Respond in this exact JSON format:
-{{
-    "outcome": "YES" or "NO" or "UNCERTAIN",
-    "confidence": 0.0 to 1.0,
-    "reasoning": "One sentence explanation"
-}}
-
-JSON Response:"""
+Does this news DEFINITIVELY answer the market question? Think carefully, then respond with JSON only."""
     
-    def _call_llm(self, prompt: str) -> Optional[str]:
-        """Call the OpenAI API."""
+    def _call_llm(self, user_prompt: str) -> Optional[str]:
+        """Call the OpenAI API with GPT-5.2."""
         try:
             response = requests.post(
                 "https://api.openai.com/v1/chat/completions",
@@ -183,11 +218,12 @@ JSON Response:"""
                 json={
                     "model": self.MODEL,
                     "messages": [
-                        {"role": "system", "content": "You are a precise news analyst for prediction markets. Respond only in JSON."},
-                        {"role": "user", "content": prompt}
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": user_prompt}
                     ],
                     "max_tokens": self.MAX_TOKENS,
                     "temperature": self.TEMPERATURE,
+                    "response_format": {"type": "json_object"},  # Force JSON output
                 },
                 timeout=30,
             )
@@ -195,7 +231,7 @@ JSON Response:"""
             self._total_requests += 1
             
             if response.status_code == 429:
-                logger.warning("OpenAI rate limit reached")
+                logger.warning("OpenAI rate limit reached - backing off")
                 return None
             
             if response.status_code != 200:
@@ -203,7 +239,11 @@ JSON Response:"""
                 return None
             
             data = response.json()
-            self._total_tokens_used += data.get("usage", {}).get("total_tokens", 0)
+            
+            # Track token usage for cost monitoring
+            usage = data.get("usage", {})
+            self._total_input_tokens += usage.get("prompt_tokens", 0)
+            self._total_output_tokens += usage.get("completion_tokens", 0)
             
             content = data["choices"][0]["message"]["content"]
             return content
@@ -221,15 +261,10 @@ JSON Response:"""
     ) -> Optional[IntelligentConfirmation]:
         """Parse the LLM response into a confirmation object."""
         try:
-            # Extract JSON from response (handle markdown code blocks)
-            json_match = re.search(r'\{[^}]+\}', response, re.DOTALL)
-            if not json_match:
-                logger.warning(f"Could not find JSON in LLM response: {response[:100]}")
-                return None
+            # Parse JSON response
+            data = json.loads(response)
             
-            data = json.loads(json_match.group())
-            
-            outcome = data.get("outcome", "UNCERTAIN").upper()
+            outcome = data.get("outcome", "UNCERTAIN").upper().strip()
             confidence = float(data.get("confidence", 0.5))
             reasoning = data.get("reasoning", "No reasoning provided")
             
@@ -239,11 +274,14 @@ JSON Response:"""
             elif outcome == "NO":
                 confirmed = "NO"
             else:
-                confirmed = None  # UNCERTAIN
+                confirmed = None  # UNCERTAIN or anything else
             
-            # Only return if confident enough
-            if confirmed and confidence < 0.7:
-                logger.debug(f"LLM confidence too low ({confidence:.0%}) for {market_question[:30]}")
+            # Require high confidence for definitive answers (arbitrage must be sure)
+            if confirmed and confidence < 0.80:
+                logger.debug(
+                    f"Confidence too low ({confidence:.0%}) for definitive answer - "
+                    f"treating as UNCERTAIN"
+                )
                 confirmed = None
             
             return IntelligentConfirmation(
@@ -256,26 +294,71 @@ JSON Response:"""
                 analyzed_at=datetime.utcnow(),
             )
             
-        except (json.JSONDecodeError, KeyError, ValueError) as e:
-            logger.warning(f"Failed to parse LLM response: {e}")
+        except json.JSONDecodeError:
+            # Try to extract JSON from response if it's wrapped in markdown
+            try:
+                json_match = re.search(r'\{[^}]+\}', response, re.DOTALL)
+                if json_match:
+                    return self._parse_response(json_match.group(), market_question, headline, source)
+            except:
+                pass
+            logger.warning(f"Failed to parse JSON from LLM: {response[:100]}")
+            return None
+        except (KeyError, ValueError, TypeError) as e:
+            logger.warning(f"Failed to parse LLM response fields: {e}")
             return None
     
     def get_stats(self) -> dict:
-        """Get usage statistics."""
+        """Get detailed usage statistics."""
+        # Calculate costs (GPT-5.2 pricing)
+        input_cost = (self._total_input_tokens / 1_000_000) * 1.75
+        output_cost = (self._total_output_tokens / 1_000_000) * 14.00
+        total_cost = input_cost + output_cost
+        
+        # Calculate efficiency
+        cache_rate = (
+            self._cache_hits / (self._cache_hits + self._total_requests) * 100
+            if (self._cache_hits + self._total_requests) > 0 else 0
+        )
+        
         return {
+            "model": self.MODEL,
             "is_available": self.is_available(),
             "total_requests": self._total_requests,
-            "total_tokens": self._total_tokens_used,
+            "cache_hits": self._cache_hits,
+            "cache_hit_rate": f"{cache_rate:.1f}%",
             "cache_size": len(self._cache),
-            "estimated_cost_usd": self._total_tokens_used * 0.000002,  # GPT-3.5 pricing
+            "tokens": {
+                "input": self._total_input_tokens,
+                "output": self._total_output_tokens,
+                "total": self._total_input_tokens + self._total_output_tokens,
+            },
+            "cost_usd": {
+                "input": round(input_cost, 4),
+                "output": round(output_cost, 4),
+                "total": round(total_cost, 4),
+            },
         }
     
     def clear_cache(self):
         """Clear the analysis cache."""
         self._cache.clear()
+        logger.info("Intelligent analyzer cache cleared")
+    
+    def prune_cache(self):
+        """Remove expired cache entries."""
+        now = datetime.utcnow()
+        expired = [
+            key for key, (cached_time, _) in self._cache.items()
+            if now - cached_time > self._cache_duration
+        ]
+        for key in expired:
+            del self._cache[key]
+        if expired:
+            logger.debug(f"Pruned {len(expired)} expired cache entries")
 
 
-# Singleton
+# Singleton instance
 _analyzer_instance: Optional[IntelligentAnalyzer] = None
 
 

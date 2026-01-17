@@ -765,13 +765,15 @@ def main():
     openai_key = os.environ.get("OPENAI_API_KEY", "")
     
     if openai_key:
-        print(f"   OpenAI (LLM):     ✅ Configured (intelligent analysis)")
+        print(f"   OpenAI GPT-5.2:   ✅ Configured")
+        print(f"   Model:            gpt-5.2 (latest)")
+        print(f"   Cost:             ~$0.002/analysis")
     else:
-        print(f"   OpenAI (LLM):     ⚠️  Not configured")
+        print(f"   OpenAI GPT-5.2:   ⚠️  Not configured")
         print(f"   (Set OPENAI_API_KEY for intelligent news analysis)")
     
     if news_api_key:
-        print(f"   NewsAPI:          ✅ Configured")
+        print(f"   NewsAPI:          ✅ Configured (1000/day limit)")
     else:
         print(f"   NewsAPI:          ⚠️  Not configured")
         print(f"   (Set NEWSAPI_KEY for headline fetching)")
@@ -779,7 +781,8 @@ def main():
     print(f"\n   Safety Features:")
     print(f"   • Auto-disables if win rate < 60% (after 10+ trades)")
     print(f"   • Auto-disables if cumulative loss > 5%")
-    print(f"   • Requires LLM confirmation of news meaning")
+    print(f"   • Requires GPT-5.2 to confirm news meaning")
+    print(f"   • 4-hour cache on LLM analysis to reduce costs")
     
     # Resolution Predictor Status
     resolution_state_path = "data/resolution_models/resolution_state.json"
