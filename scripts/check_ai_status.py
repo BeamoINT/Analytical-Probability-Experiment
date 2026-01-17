@@ -761,8 +761,24 @@ def main():
     
     # Check API keys
     print(f"\n   API Configuration:")
-    news_api_key = os.environ.get("NEWSAPI_KEY", "")
-    openai_key = os.environ.get("OPENAI_API_KEY", "")
+    # Check both prefixed and non-prefixed env vars
+    news_api_key = os.environ.get("POLYBOT_NEWSAPI_KEY", "") or os.environ.get("NEWSAPI_KEY", "")
+    openai_key = os.environ.get("POLYBOT_OPENAI_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "")
+    
+    # Also try reading from .env file directly
+    if not openai_key or not news_api_key:
+        env_file = PROJECT_ROOT / ".env"
+        if env_file.exists():
+            try:
+                with open(env_file) as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith("POLYBOT_OPENAI_API_KEY=") and not openai_key:
+                            openai_key = line.split("=", 1)[1].strip()
+                        elif line.startswith("POLYBOT_NEWSAPI_KEY=") and not news_api_key:
+                            news_api_key = line.split("=", 1)[1].strip()
+            except:
+                pass
     
     if openai_key:
         print(f"   OpenAI GPT-5.2:   ✅ Configured")
