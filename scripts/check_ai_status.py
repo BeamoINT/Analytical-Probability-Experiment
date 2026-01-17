@@ -727,34 +727,59 @@ def main():
     
     # Arbitrage Scanner Info
     print(f"\n   ⚡ ARBITRAGE SCANNER:")
-    arb_stats_path = "data/arbitrage_stats.json"
-    if os.path.exists(arb_stats_path):
+    arb_state_path = "data/arbitrage_state.json"
+    if os.path.exists(arb_state_path):
         try:
-            with open(arb_stats_path, "r") as f:
-                arb_stats = json.load(f)
-            total_opps = arb_stats.get("total_opportunities", 0)
-            total_profit = arb_stats.get("total_profit_captured", 0)
-            success_rate = arb_stats.get("success_rate", 0)
-            print(f"   Total Opportunities: {total_opps}")
-            print(f"   Profit Captured:  {total_profit:.2%}")
-            print(f"   Success Rate:     {success_rate:.1%}")
-        except:
-            print(f"   Status:           Active (no trades yet)")
+            with open(arb_state_path, "r") as f:
+                arb_state = json.load(f)
+            
+            is_disabled = arb_state.get("is_disabled", False)
+            stats = arb_state.get("stats", {})
+            
+            if is_disabled:
+                print(f"   Status:           🔴 DISABLED")
+                print(f"   Reason:           {arb_state.get('disable_reason', 'Unknown')}")
+                print(f"   (Run 'poetry run python -c \"from polyb0t.services.arbitrage_scanner import get_arbitrage_scanner; get_arbitrage_scanner().enable()\"' to re-enable)")
+            else:
+                total_trades = stats.get("total_trades", 0)
+                win_rate = stats.get("win_rate", 0)
+                total_profit = stats.get("total_profit", 0)
+                
+                if total_trades > 0:
+                    status_icon = "✅" if win_rate >= 0.6 else "🟡" if win_rate >= 0.5 else "❌"
+                    print(f"   Status:           {status_icon} Active")
+                    print(f"   Total Trades:     {total_trades}")
+                    print(f"   Win Rate:         {win_rate:.1%}")
+                    print(f"   Total Profit:     {total_profit:+.2%}")
+                else:
+                    print(f"   Status:           ✅ Active (no trades yet)")
+                    
+        except Exception as e:
+            print(f"   Status:           ✅ Active (no trades yet)")
     else:
-        print(f"   Status:           Active (no trades yet)")
+        print(f"   Status:           ✅ Active (no trades yet)")
     
-    # Check if NewsAPI is configured
+    # Check API keys
+    print(f"\n   API Configuration:")
     news_api_key = os.environ.get("NEWSAPI_KEY", "")
-    if news_api_key:
-        print(f"   News API:         ✅ Configured")
-    else:
-        print(f"   News API:         ⚠️  Not configured")
-        print(f"   (Set NEWSAPI_KEY env var for news confirmation)")
+    openai_key = os.environ.get("OPENAI_API_KEY", "")
     
-    print(f"\n   Arbitrage Criteria:")
-    print(f"   • Price > 92% (YES) or < 8% (NO)")
-    print(f"   • Requires news confirmation OR event date passed")
-    print(f"   • Profit > 0.5% after spread")
+    if openai_key:
+        print(f"   OpenAI (LLM):     ✅ Configured (intelligent analysis)")
+    else:
+        print(f"   OpenAI (LLM):     ⚠️  Not configured")
+        print(f"   (Set OPENAI_API_KEY for intelligent news analysis)")
+    
+    if news_api_key:
+        print(f"   NewsAPI:          ✅ Configured")
+    else:
+        print(f"   NewsAPI:          ⚠️  Not configured")
+        print(f"   (Set NEWSAPI_KEY for headline fetching)")
+    
+    print(f"\n   Safety Features:")
+    print(f"   • Auto-disables if win rate < 60% (after 10+ trades)")
+    print(f"   • Auto-disables if cumulative loss > 5%")
+    print(f"   • Requires LLM confirmation of news meaning")
     
     # Resolution Predictor Status
     resolution_state_path = "data/resolution_models/resolution_state.json"

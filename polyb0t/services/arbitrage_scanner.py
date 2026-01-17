@@ -87,61 +87,284 @@ class ArbitrageStats:
         }
 
 
+@dataclass
+class ArbitrageTradeResult:
+    """Result of an arbitrage trade for tracking."""
+    market_id: str
+    market_title: str
+    predicted_outcome: str  # "YES" or "NO"
+    entry_price: float
+    exit_price: float  # 1.0 if correct, 0.0 if wrong
+    profit_loss: float  # Actual P&L percentage
+    was_successful: bool
+    timestamp: datetime
+    news_headline: str = ""
+    
+    def to_dict(self) -> dict:
+        return {
+            "market_id": self.market_id,
+            "market_title": self.market_title,
+            "predicted_outcome": self.predicted_outcome,
+            "entry_price": self.entry_price,
+            "exit_price": self.exit_price,
+            "profit_loss": self.profit_loss,
+            "was_successful": self.was_successful,
+            "timestamp": self.timestamp.isoformat(),
+            "news_headline": self.news_headline,
+        }
+
+
 class ArbitrageScanner:
-    """Scans for TRUE arbitrage opportunities with news confirmation."""
+    """Scans for TRUE arbitrage using LLM-powered news analysis.
+    
+    Features:
+    - Uses LLM (OpenAI) to actually understand news content
+    - Tracks trade results and auto-disables if losing money
+    - Requires minimum sample size before making decisions
+    """
     
     # Configuration
-    MIN_EXTREME_PRICE = 0.92  # Price must be > this for YES arbitrage (lowered for news-confirmed)
+    MIN_EXTREME_PRICE = 0.92  # Price must be > this for YES arbitrage
     MAX_EXTREME_PRICE = 0.08  # Price must be < this for NO arbitrage
-    MIN_PROFIT_PCT = 0.005  # Minimum 0.5% profit after spread (lowered - it's confirmed!)
+    MIN_PROFIT_PCT = 0.005  # Minimum 0.5% profit after spread
     MAX_DAYS_TO_RESOLUTION = 14  # Consider markets up to 2 weeks out
-    MIN_CONFIDENCE = 0.85  # Confidence threshold
+    MIN_CONFIDENCE = 0.80  # Confidence threshold
     SPREAD_ESTIMATE = 0.02  # Assume 2% spread cost
-    REQUIRE_NEWS_CONFIRMATION = True  # Require news to confirm outcome
-    REQUIRE_EVENT_PASSED = False  # Require event date to have passed (optional)
+    REQUIRE_NEWS_CONFIRMATION = True  # Require LLM to confirm outcome
+    
+    # Auto-disable settings
+    MIN_TRADES_FOR_EVALUATION = 10  # Need at least 10 trades to evaluate
+    MIN_WIN_RATE = 0.60  # Must win 60% of trades
+    MAX_LOSS_PCT = -0.05  # If cumulative loss exceeds 5%, disable
     
     STATS_FILE = "data/arbitrage_stats.json"
+    STATE_FILE = "data/arbitrage_state.json"
     
     def __init__(self):
         self.opportunities: list[ArbitrageOpportunity] = []
         self._last_scan = None
-        self._headline_analyzer = None
+        self._intelligent_analyzer = None
+        self._news_client = None
         self._stats = ArbitrageStats()
+        self._is_disabled = False
+        self._disable_reason = ""
+        self._trade_history: list[ArbitrageTradeResult] = []
         self._historical_stats = {
-            "total_opportunities": 0,
-            "total_profit_captured": 0.0,
-            "success_rate": 0.0,
-            "by_category": {},
+            "total_trades": 0,
+            "successful_trades": 0,
+            "total_profit": 0.0,
+            "win_rate": 0.0,
+            "is_disabled": False,
+            "disable_reason": "",
         }
-        self._load_stats()
+        self._load_state()
+    
+    def _get_intelligent_analyzer(self):
+        """Lazy load intelligent analyzer (LLM-based)."""
+        if self._intelligent_analyzer is None:
+            try:
+                from polyb0t.services.intelligent_analyzer import get_intelligent_analyzer
+                self._intelligent_analyzer = get_intelligent_analyzer()
+            except ImportError:
+                logger.warning("Intelligent analyzer not available")
+        return self._intelligent_analyzer
+    
+    def _get_news_client(self):
+        """Lazy load news client."""
+        if self._news_client is None:
+            try:
+                from polyb0t.services.news_client import get_news_client
+                self._news_client = get_news_client()
+            except ImportError:
+                logger.warning("News client not available")
+        return self._news_client
     
     def _get_headline_analyzer(self):
-        """Lazy load headline analyzer."""
-        if self._headline_analyzer is None:
-            try:
-                from polyb0t.services.headline_analyzer import get_headline_analyzer
-                self._headline_analyzer = get_headline_analyzer()
-            except ImportError:
-                logger.warning("Headline analyzer not available")
-        return self._headline_analyzer
+        """Lazy load headline analyzer (fallback keyword-based)."""
+        try:
+            from polyb0t.services.headline_analyzer import get_headline_analyzer
+            return get_headline_analyzer()
+        except ImportError:
+            logger.warning("Headline analyzer not available")
+            return None
     
-    def _load_stats(self):
-        """Load historical stats from disk."""
+    def _load_state(self):
+        """Load state including trade history and disabled status."""
+        if os.path.exists(self.STATE_FILE):
+            try:
+                with open(self.STATE_FILE, "r") as f:
+                    state = json.load(f)
+                
+                self._is_disabled = state.get("is_disabled", False)
+                self._disable_reason = state.get("disable_reason", "")
+                self._historical_stats = state.get("stats", self._historical_stats)
+                
+                # Load trade history
+                for trade_dict in state.get("trade_history", []):
+                    try:
+                        self._trade_history.append(ArbitrageTradeResult(
+                            market_id=trade_dict["market_id"],
+                            market_title=trade_dict["market_title"],
+                            predicted_outcome=trade_dict["predicted_outcome"],
+                            entry_price=trade_dict["entry_price"],
+                            exit_price=trade_dict["exit_price"],
+                            profit_loss=trade_dict["profit_loss"],
+                            was_successful=trade_dict["was_successful"],
+                            timestamp=datetime.fromisoformat(trade_dict["timestamp"]),
+                            news_headline=trade_dict.get("news_headline", ""),
+                        ))
+                    except (KeyError, ValueError):
+                        continue
+                
+                if self._is_disabled:
+                    logger.warning(f"Arbitrage scanner is DISABLED: {self._disable_reason}")
+                
+            except Exception as e:
+                logger.debug(f"Could not load arbitrage state: {e}")
+        
+        # Also load legacy stats file
         if os.path.exists(self.STATS_FILE):
             try:
                 with open(self.STATS_FILE, "r") as f:
-                    self._historical_stats = json.load(f)
-            except Exception as e:
-                logger.debug(f"Could not load arbitrage stats: {e}")
+                    legacy = json.load(f)
+                    # Merge legacy stats
+                    for key, value in legacy.items():
+                        if key not in self._historical_stats:
+                            self._historical_stats[key] = value
+            except:
+                pass
     
-    def _save_stats(self):
-        """Save stats to disk."""
+    def _save_state(self):
+        """Save state to disk."""
         try:
-            os.makedirs(os.path.dirname(self.STATS_FILE), exist_ok=True)
-            with open(self.STATS_FILE, "w") as f:
-                json.dump(self._historical_stats, f, indent=2)
+            os.makedirs(os.path.dirname(self.STATE_FILE), exist_ok=True)
+            
+            state = {
+                "is_disabled": self._is_disabled,
+                "disable_reason": self._disable_reason,
+                "stats": self._historical_stats,
+                "trade_history": [t.to_dict() for t in self._trade_history[-100:]],  # Keep last 100
+                "last_updated": datetime.utcnow().isoformat(),
+            }
+            
+            with open(self.STATE_FILE, "w") as f:
+                json.dump(state, f, indent=2)
+                
         except Exception as e:
-            logger.debug(f"Could not save arbitrage stats: {e}")
+            logger.debug(f"Could not save arbitrage state: {e}")
+    
+    def is_disabled(self) -> bool:
+        """Check if arbitrage scanner is disabled."""
+        return self._is_disabled
+    
+    def get_disable_reason(self) -> str:
+        """Get the reason for being disabled."""
+        return self._disable_reason
+    
+    def enable(self):
+        """Manually re-enable the arbitrage scanner."""
+        self._is_disabled = False
+        self._disable_reason = ""
+        logger.info("Arbitrage scanner manually re-enabled")
+        self._save_state()
+    
+    def _check_should_disable(self):
+        """Check if we should auto-disable based on performance."""
+        if len(self._trade_history) < self.MIN_TRADES_FOR_EVALUATION:
+            return  # Not enough data
+        
+        # Look at last N trades
+        recent_trades = self._trade_history[-self.MIN_TRADES_FOR_EVALUATION:]
+        
+        # Calculate win rate
+        wins = sum(1 for t in recent_trades if t.was_successful)
+        win_rate = wins / len(recent_trades)
+        
+        # Calculate cumulative P&L
+        total_pnl = sum(t.profit_loss for t in recent_trades)
+        
+        # Check disable conditions
+        if win_rate < self.MIN_WIN_RATE:
+            self._is_disabled = True
+            self._disable_reason = (
+                f"Win rate too low: {win_rate:.1%} < {self.MIN_WIN_RATE:.0%} "
+                f"(last {len(recent_trades)} trades)"
+            )
+            logger.error(f"AUTO-DISABLING arbitrage scanner: {self._disable_reason}")
+            self._save_state()
+            return
+        
+        if total_pnl < self.MAX_LOSS_PCT:
+            self._is_disabled = True
+            self._disable_reason = (
+                f"Cumulative loss too high: {total_pnl:.1%} < {self.MAX_LOSS_PCT:.0%} "
+                f"(last {len(recent_trades)} trades)"
+            )
+            logger.error(f"AUTO-DISABLING arbitrage scanner: {self._disable_reason}")
+            self._save_state()
+            return
+    
+    def record_trade_result(
+        self,
+        market_id: str,
+        market_title: str,
+        predicted_outcome: str,
+        entry_price: float,
+        actual_outcome: str,  # "YES" or "NO"
+        news_headline: str = "",
+    ):
+        """Record the result of an arbitrage trade.
+        
+        Args:
+            market_id: Market ID
+            market_title: Market title
+            predicted_outcome: What we predicted ("YES" or "NO")
+            entry_price: Price we entered at
+            actual_outcome: Actual outcome ("YES" or "NO")
+            news_headline: The headline that triggered this trade
+        """
+        was_successful = predicted_outcome == actual_outcome
+        
+        if was_successful:
+            exit_price = 1.0
+            profit_loss = 1.0 - entry_price - self.SPREAD_ESTIMATE
+        else:
+            exit_price = 0.0
+            profit_loss = -entry_price - self.SPREAD_ESTIMATE
+        
+        result = ArbitrageTradeResult(
+            market_id=market_id,
+            market_title=market_title,
+            predicted_outcome=predicted_outcome,
+            entry_price=entry_price,
+            exit_price=exit_price,
+            profit_loss=profit_loss,
+            was_successful=was_successful,
+            timestamp=datetime.utcnow(),
+            news_headline=news_headline,
+        )
+        
+        self._trade_history.append(result)
+        
+        # Update stats
+        self._historical_stats["total_trades"] = self._historical_stats.get("total_trades", 0) + 1
+        if was_successful:
+            self._historical_stats["successful_trades"] = self._historical_stats.get("successful_trades", 0) + 1
+        self._historical_stats["total_profit"] = self._historical_stats.get("total_profit", 0) + profit_loss
+        
+        total = self._historical_stats["total_trades"]
+        successes = self._historical_stats["successful_trades"]
+        self._historical_stats["win_rate"] = successes / total if total > 0 else 0
+        
+        logger.info(
+            f"Arbitrage result: {'WIN' if was_successful else 'LOSS'} on {market_title[:30]} "
+            f"(P&L: {profit_loss:+.1%}, win_rate: {self._historical_stats['win_rate']:.1%})"
+        )
+        
+        # Check if we should auto-disable
+        self._check_should_disable()
+        
+        self._save_state()
     
     def scan_market(
         self,
@@ -160,10 +383,8 @@ class ArbitrageScanner:
     ) -> Optional[ArbitrageOpportunity]:
         """Scan a single market for TRUE arbitrage opportunity.
         
-        Requires:
-        1. Price at extreme (>92% or <8%)
-        2. Event date has passed OR news confirms outcome
-        3. Profit exceeds spread cost
+        Uses LLM to intelligently understand news content.
+        Auto-disables if losing money.
         
         Args:
             token_id: Token ID
@@ -182,6 +403,10 @@ class ArbitrageScanner:
         Returns:
             ArbitrageOpportunity if TRUE arbitrage found, None otherwise
         """
+        # === CHECK IF DISABLED ===
+        if self._is_disabled:
+            return None
+        
         self._stats.total_scanned += 1
         
         # Skip if too far from resolution (unless event already passed)
@@ -217,34 +442,72 @@ class ArbitrageScanner:
             self._stats.event_date_qualified += 1
             logger.debug(f"Event date passed for {market_title[:50]}")
         
-        # === CHECK NEWS CONFIRMATION ===
+        # === INTELLIGENT NEWS ANALYSIS ===
         news_confirmed = False
         news_headline = ""
         news_source = ""
         news_confidence = 0.0
+        llm_reasoning = ""
         
-        analyzer = self._get_headline_analyzer()
-        if analyzer:
-            confirmation = analyzer.check_market_outcome(market_id, market_title)
-            if confirmation:
-                # Check if news confirms our expected outcome
-                if confirmation.confirmed_outcome == expected_outcome:
-                    news_confirmed = True
-                    news_headline = confirmation.headline
-                    news_source = confirmation.source
-                    news_confidence = confirmation.confidence
-                    self._stats.news_confirmed += 1
-                    logger.info(
-                        f"NEWS CONFIRMS {expected_outcome} for {market_title[:40]}: "
-                        f"'{news_headline[:60]}' ({news_source})"
-                    )
-                else:
-                    # News contradicts price! Skip this - could be mispricing
-                    logger.warning(
-                        f"News contradicts price for {market_title[:40]}: "
-                        f"Price says {expected_outcome}, news says {confirmation.confirmed_outcome}"
-                    )
-                    return None
+        # First, get news articles
+        news_client = self._get_news_client()
+        intelligent_analyzer = self._get_intelligent_analyzer()
+        
+        if news_client and news_client.is_available():
+            # Extract keywords for search
+            keywords = self._extract_keywords(market_title)
+            if keywords:
+                articles = news_client.search_headlines(" ".join(keywords[:3]), page_size=5)
+                
+                # Analyze each article with LLM
+                for article in articles:
+                    # Skip old articles
+                    article_age = datetime.utcnow() - article.published_at.replace(tzinfo=None)
+                    if article_age > timedelta(days=7):
+                        continue
+                    
+                    # Use intelligent analyzer if available
+                    if intelligent_analyzer and intelligent_analyzer.is_available():
+                        result = intelligent_analyzer.analyze_headline(
+                            market_question=market_title,
+                            headline=article.title,
+                            article_content=article.description,
+                            source=article.source,
+                        )
+                        
+                        if result and result.confirmed_outcome:
+                            # LLM confirmed an outcome!
+                            if result.confirmed_outcome == expected_outcome:
+                                news_confirmed = True
+                                news_headline = article.title
+                                news_source = article.source
+                                news_confidence = result.confidence
+                                llm_reasoning = result.reasoning
+                                self._stats.news_confirmed += 1
+                                logger.info(
+                                    f"LLM CONFIRMS {expected_outcome} for {market_title[:40]}: "
+                                    f"'{news_headline[:50]}...' - {llm_reasoning}"
+                                )
+                                break
+                            else:
+                                # LLM says different outcome than price suggests
+                                logger.warning(
+                                    f"LLM contradicts price for {market_title[:40]}: "
+                                    f"Price={expected_outcome}, LLM={result.confirmed_outcome}"
+                                )
+                                return None
+                    else:
+                        # Fallback to keyword-based analysis
+                        keyword_analyzer = self._get_headline_analyzer()
+                        if keyword_analyzer:
+                            confirmation = keyword_analyzer.check_market_outcome(market_id, market_title)
+                            if confirmation and confirmation.confirmed_outcome == expected_outcome:
+                                news_confirmed = True
+                                news_headline = confirmation.headline
+                                news_source = confirmation.source
+                                news_confidence = confirmation.confidence
+                                self._stats.news_confirmed += 1
+                                break
         
         # === REQUIRE CONFIRMATION ===
         # Must have EITHER event date passed OR news confirmation
@@ -361,6 +624,29 @@ class ArbitrageScanner:
             confidence += 0.05
         
         return min(confidence, 0.99)
+    
+    def _extract_keywords(self, market_title: str) -> list[str]:
+        """Extract searchable keywords from market question."""
+        import re
+        
+        # Remove common question words
+        title = market_title.lower()
+        title = re.sub(r'^(will|does|is|are|has|have|can|could|would|should)\s+', '', title)
+        title = re.sub(r'\?$', '', title)
+        
+        # Extract words
+        words = re.findall(r'[a-zA-Z]+', title)
+        
+        # Stop words
+        stop_words = {
+            "will", "the", "a", "an", "in", "on", "at", "to", "for", "of", "by",
+            "with", "is", "are", "was", "were", "be", "been", "being", "have",
+            "has", "had", "do", "does", "did", "this", "that", "these", "those",
+            "before", "after", "during", "between", "2024", "2025", "2026",
+        }
+        
+        keywords = [w for w in words if w.lower() not in stop_words and len(w) > 2]
+        return keywords[:5]
     
     def get_best_opportunities(self, limit: int = 10) -> list[ArbitrageOpportunity]:
         """Get the best current arbitrage opportunities.
