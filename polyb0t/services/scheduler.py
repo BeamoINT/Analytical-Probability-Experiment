@@ -1736,6 +1736,7 @@ class TradingScheduler:
                             p_model=arb_opp.expected_value,
                             edge=arb_opp.net_profit_pct,
                             edge_raw=arb_opp.net_profit_pct,
+                            edge_net=arb_opp.net_profit_pct,  # Arbitrage edge is already net
                             confidence=arb_opp.confidence,
                             features=features,
                             sizing_result=arb_sizing,
@@ -1791,6 +1792,7 @@ class TradingScheduler:
                     p_model=mid + edge if side == "BUY" else mid - edge,
                     edge=edge,
                     edge_raw=edge,
+                    edge_net=edge * 0.98,  # Estimate net edge after fees/slippage
                     confidence=confidence,
                     features=features,
                     sizing_result=sizing,

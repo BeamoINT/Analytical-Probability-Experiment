@@ -648,6 +648,105 @@ class ArbitrageScanner:
         keywords = [w for w in words if w.lower() not in stop_words and len(w) > 2]
         return keywords[:5]
     
+    def scan_all(
+        self,
+        markets: list,
+        orderbooks: dict,
+    ) -> list[ArbitrageOpportunity]:
+        """Scan all markets for arbitrage opportunities.
+        
+        Args:
+            markets: List of market objects with condition_id, question, outcomes, end_date_iso
+            orderbooks: Dict mapping token_id to orderbook data
+            
+        Returns:
+            List of arbitrage opportunities found
+        """
+        if self._is_disabled:
+            return []
+        
+        self.clear_opportunities()
+        opportunities = []
+        
+        for market in markets:
+            try:
+                # Get market info
+                market_id = getattr(market, 'condition_id', None) or getattr(market, 'id', '')
+                market_title = getattr(market, 'question', '') or getattr(market, 'title', '')
+                end_date = getattr(market, 'end_date_iso', None)
+                outcomes = getattr(market, 'outcomes', [])
+                
+                if not outcomes:
+                    continue
+                
+                # Parse end date
+                event_end_date = None
+                if end_date:
+                    try:
+                        if isinstance(end_date, str):
+                            event_end_date = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+                            event_end_date = event_end_date.replace(tzinfo=None)
+                        else:
+                            event_end_date = end_date
+                    except:
+                        pass
+                
+                # Calculate days to resolution
+                days_to_resolution = 999
+                if event_end_date:
+                    days_to_resolution = (event_end_date - datetime.utcnow()).total_seconds() / 86400
+                
+                # Check each outcome
+                for outcome in outcomes:
+                    token_id = getattr(outcome, 'token_id', None)
+                    if not token_id:
+                        continue
+                    
+                    # Get orderbook data
+                    ob = orderbooks.get(token_id, {})
+                    if not ob:
+                        continue
+                    
+                    # Extract price info
+                    bids = ob.get('bids', [])
+                    asks = ob.get('asks', [])
+                    
+                    if not bids or not asks:
+                        continue
+                    
+                    best_bid = float(bids[0].get('price', 0)) if bids else 0
+                    best_ask = float(asks[0].get('price', 1)) if asks else 1
+                    mid_price = (best_bid + best_ask) / 2
+                    
+                    # Get volume
+                    volume_24h = float(getattr(outcome, 'volume_24h', 0) or 0)
+                    
+                    # Calculate spread
+                    spread_pct = (best_ask - best_bid) / mid_price if mid_price > 0 else 0
+                    
+                    # Scan this market
+                    opp = self.scan_market(
+                        token_id=token_id,
+                        market_id=market_id,
+                        market_title=market_title,
+                        price=mid_price,
+                        bid=best_bid,
+                        ask=best_ask,
+                        volume_24h=volume_24h,
+                        days_to_resolution=days_to_resolution,
+                        spread_pct=spread_pct,
+                        event_end_date=event_end_date,
+                    )
+                    
+                    if opp:
+                        opportunities.append(opp)
+                        
+            except Exception as e:
+                logger.debug(f"Error scanning market for arbitrage: {e}")
+                continue
+        
+        return opportunities
+    
     def get_best_opportunities(self, limit: int = 10) -> list[ArbitrageOpportunity]:
         """Get the best current arbitrage opportunities.
         
