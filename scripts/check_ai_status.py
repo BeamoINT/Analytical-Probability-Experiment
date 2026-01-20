@@ -618,17 +618,35 @@ def main():
         avg_conf = metrics.get('avg_confidence', 0)
         conf_trade_pct = metrics.get('confident_trade_pct', 0)
         
+        # NEW: Profitability simulation metrics (what actually matters!)
+        sim_profit = metrics.get('simulated_profit_pct', 0)
+        sim_trades = metrics.get('simulated_num_trades', 0)
+        sim_win_rate = metrics.get('simulated_win_rate', 0)
+        sim_pf = metrics.get('simulated_profit_factor', 0)
+        sim_sharpe = metrics.get('simulated_sharpe', 0)
+        sim_dd = metrics.get('simulated_max_drawdown', 0)
+        
+        # PRIMARY: Profitability (what actually matters)
+        if sim_trades > 0:
+            profit_icon = "✅" if sim_profit > 0.05 else "🟢" if sim_profit > 0 else "🟡" if sim_profit > -0.05 else "❌"
+            print(f"\n   💰 SIMULATED PROFITABILITY (PRIMARY METRIC):")
+            print(f"   Total Profit:     {profit_icon} {sim_profit:+.2%}")
+            print(f"   Trades Simulated: {sim_trades}")
+            print(f"   Win Rate:         {sim_win_rate:.1%}")
+            print(f"   Profit Factor:    {sim_pf:.2f}x" + (" ✅" if sim_pf > 1.5 else " 🟡" if sim_pf > 1 else " ❌"))
+            print(f"   Sharpe Ratio:     {sim_sharpe:.2f}" + (" ✅" if sim_sharpe > 1 else " 🟡" if sim_sharpe > 0 else ""))
+            print(f"   Max Drawdown:     {sim_dd:.2%}")
+        
+        # Secondary: Old accuracy metrics
         prof_icon = "✅" if prof > 0.55 else "🟡" if prof > 0.50 else "❌"
-        print(f"\n   📊 VALIDATION METRICS (worst-case):")
+        print(f"\n   📊 ACCURACY METRICS (secondary):")
         print(f"   Profitable Acc:   {prof_icon} {format_pct(prof)}")
         print(f"   Directional Acc:  {format_pct(dir_acc)}")
         
-        # Show confidence metrics if available (new classifier model)
+        # Show confidence metrics if available
         if avg_conf > 0 or conf_trade_pct > 0:
-            print(f"\n   🎯 CONFIDENCE METRICS:")
             print(f"   Avg Confidence:   {format_pct(avg_conf)}")
             print(f"   Confident Trades: {format_pct(conf_trade_pct)}")
-            print(f"   (Only trades when >60% confident)")
         
         if n_models > 0:
             print(f"\n   🧠 MODEL DETAILS:")

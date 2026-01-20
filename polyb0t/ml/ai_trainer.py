@@ -31,7 +31,11 @@ CONFIDENCE_THRESHOLD = 0.60  # Only trade when >60% confident
 
 @dataclass
 class ModelMetrics:
-    """Metrics for evaluating model performance."""
+    """Metrics for evaluating model performance.
+    
+    PRIMARY METRIC: simulated_profit_pct - actual P&L from backtesting
+    This is what matters - you can be wrong often but still make money.
+    """
     mse: float  # Mean Squared Error (for regression fallback)
     mae: float  # Mean Absolute Error
     r2: float  # R-squared (for reference)
@@ -43,15 +47,31 @@ class ModelMetrics:
     avg_confidence: float = 0.0  # Average prediction confidence
     confident_trade_pct: float = 0.0  # % of samples where model was confident enough to trade
     
+    # NEW: Profitability simulation metrics (THE METRICS THAT ACTUALLY MATTER)
+    simulated_profit_pct: float = 0.0  # Total P&L from simulated trading
+    simulated_num_trades: int = 0  # Number of trades in simulation
+    simulated_win_rate: float = 0.0  # % of profitable trades
+    simulated_avg_win: float = 0.0  # Average profit on winning trades
+    simulated_avg_loss: float = 0.0  # Average loss on losing trades
+    simulated_profit_factor: float = 0.0  # gross_profit / gross_loss
+    simulated_max_drawdown: float = 0.0  # Worst peak-to-trough decline
+    simulated_sharpe: float = 0.0  # Risk-adjusted return (higher = better)
+    
     def score(self) -> float:
-        """Overall score (higher is better)."""
-        consistency_penalty = min(0.1, self.cv_std * 0.5)
-        return (
-            self.directional_accuracy * 0.3 +
-            self.profitable_accuracy * 0.5 +  # Weight profitable accuracy most
-            self.confident_trade_pct * 0.2 -  # Reward having confident predictions
-            consistency_penalty
-        )
+        """Overall score - PROFITABILITY IS KING."""
+        # Primary: simulated profit (capped at reasonable range)
+        profit_score = max(-0.5, min(0.5, self.simulated_profit_pct * 2))
+        
+        # Secondary: risk-adjusted (Sharpe)
+        sharpe_score = max(-0.2, min(0.2, self.simulated_sharpe * 0.1))
+        
+        # Tertiary: profit factor (how much you make vs lose)
+        pf_score = max(0, min(0.2, (self.simulated_profit_factor - 1) * 0.1))
+        
+        # Penalty for not trading (useless model)
+        trade_penalty = 0 if self.simulated_num_trades >= 50 else -0.3
+        
+        return profit_score + sharpe_score + pf_score + trade_penalty
 
 
 @dataclass
@@ -80,6 +100,15 @@ class ModelInfo:
                 "n_models_ensemble": self.metrics.n_models_ensemble,
                 "avg_confidence": self.metrics.avg_confidence,
                 "confident_trade_pct": self.metrics.confident_trade_pct,
+                # NEW: Profitability metrics (what actually matters)
+                "simulated_profit_pct": self.metrics.simulated_profit_pct,
+                "simulated_num_trades": self.metrics.simulated_num_trades,
+                "simulated_win_rate": self.metrics.simulated_win_rate,
+                "simulated_avg_win": self.metrics.simulated_avg_win,
+                "simulated_avg_loss": self.metrics.simulated_avg_loss,
+                "simulated_profit_factor": self.metrics.simulated_profit_factor,
+                "simulated_max_drawdown": self.metrics.simulated_max_drawdown,
+                "simulated_sharpe": self.metrics.simulated_sharpe,
                 "score": self.metrics.score(),
             },
             "is_active": self.is_active,
@@ -583,77 +612,130 @@ class AITrainer:
         y_reg: np.ndarray,
         sample_weights: np.ndarray
     ) -> Any:
-        """Train a classifier ensemble to predict profitable trades."""
+        """Train a MORE THOROUGH classifier ensemble.
+        
+        This takes longer but produces better models:
+        - More trees in forests
+        - More boosting iterations
+        - Cross-validated hyperparameter selection
+        - Multiple ensemble methods
+        """
         try:
             from sklearn.ensemble import (
                 RandomForestClassifier,
-                GradientBoostingClassifier,
+                ExtraTreesClassifier,
                 HistGradientBoostingClassifier,
+                AdaBoostClassifier,
+                VotingClassifier,
             )
             from sklearn.linear_model import LogisticRegression
             from sklearn.preprocessing import StandardScaler
-            from sklearn.calibration import CalibratedClassifierCV
+            from sklearn.model_selection import cross_val_score
             
-            logger.info(f"Training classifier on {len(X)} samples")
+            logger.info(f"Training THOROUGH classifier on {len(X)} samples...")
             
             # Scale features
             scaler = StandardScaler()
             X_scaled = scaler.fit_transform(X)
             
-            # Train multiple classifiers
             classifiers = []
             
-            # 1. Logistic Regression (calibrated probabilities)
+            # 1. Logistic Regression with cross-validation
+            logger.info("Training LogisticRegression...")
             lr = LogisticRegression(
-                C=0.1,  # Strong regularization
+                C=0.1,
                 class_weight='balanced',
-                max_iter=1000,
+                max_iter=2000,  # More iterations
                 random_state=42,
+                solver='lbfgs',
             )
             lr.fit(X_scaled, y_binary, sample_weight=sample_weights)
-            classifiers.append(("LogisticRegression", lr))
+            lr_score = cross_val_score(lr, X_scaled, y_binary, cv=5, scoring='accuracy').mean()
+            classifiers.append(("LogisticRegression", lr, lr_score))
+            logger.info(f"LogisticRegression CV accuracy: {lr_score:.3f}")
             
-            # 2. Random Forest
+            # 2. Random Forest - MORE TREES, DEEPER
             if len(X) >= 500:
+                logger.info("Training RandomForest (200 trees, depth 8)...")
                 rf = RandomForestClassifier(
-                    n_estimators=50,
-                    max_depth=5,
-                    min_samples_split=30,
-                    min_samples_leaf=15,
-                    max_features=0.3,
+                    n_estimators=200,  # 4x more trees
+                    max_depth=8,  # Deeper
+                    min_samples_split=20,
+                    min_samples_leaf=10,
+                    max_features='sqrt',
                     class_weight='balanced',
                     random_state=42,
                     n_jobs=-1,
+                    oob_score=True,  # Out-of-bag scoring
                 )
                 rf.fit(X_scaled, y_binary, sample_weight=sample_weights)
-                classifiers.append(("RandomForest", rf))
+                rf_score = rf.oob_score_
+                classifiers.append(("RandomForest", rf, rf_score))
+                logger.info(f"RandomForest OOB accuracy: {rf_score:.3f}")
             
-            # 3. Gradient Boosting
+            # 3. Extra Trees (more randomness, often better)
             if len(X) >= 500:
+                logger.info("Training ExtraTrees (200 trees, depth 10)...")
+                et = ExtraTreesClassifier(
+                    n_estimators=200,
+                    max_depth=10,
+                    min_samples_split=15,
+                    min_samples_leaf=8,
+                    max_features='sqrt',
+                    class_weight='balanced',
+                    random_state=42,
+                    n_jobs=-1,
+                    bootstrap=True,
+                    oob_score=True,
+                )
+                et.fit(X_scaled, y_binary, sample_weight=sample_weights)
+                et_score = et.oob_score_
+                classifiers.append(("ExtraTrees", et, et_score))
+                logger.info(f"ExtraTrees OOB accuracy: {et_score:.3f}")
+            
+            # 4. Gradient Boosting - MORE ITERATIONS
+            if len(X) >= 500:
+                logger.info("Training HistGradientBoosting (500 iterations)...")
                 gb = HistGradientBoostingClassifier(
-                    max_iter=100,
-                    max_depth=4,
-                    min_samples_leaf=30,
-                    l2_regularization=5.0,
-                    learning_rate=0.05,
+                    max_iter=500,  # 5x more iterations
+                    max_depth=6,  # Deeper
+                    min_samples_leaf=20,
+                    l2_regularization=2.0,
+                    learning_rate=0.03,  # Lower learning rate with more iterations
                     early_stopping=True,
                     validation_fraction=0.15,
-                    n_iter_no_change=5,
+                    n_iter_no_change=20,
                     class_weight='balanced',
                     random_state=42,
                 )
                 gb.fit(X_scaled, y_binary, sample_weight=sample_weights)
-                classifiers.append(("GradientBoosting", gb))
+                gb_score = cross_val_score(gb, X_scaled, y_binary, cv=3, scoring='accuracy').mean()
+                classifiers.append(("GradientBoosting", gb, gb_score))
+                logger.info(f"GradientBoosting CV accuracy: {gb_score:.3f}")
             
-            # Log performance
-            for name, clf in classifiers:
-                train_acc = clf.score(X_scaled, y_binary)
-                logger.info(f"{name} train accuracy: {train_acc:.3f}")
+            # 5. AdaBoost with stumps (often good for noisy data)
+            if len(X) >= 500:
+                logger.info("Training AdaBoost (200 estimators)...")
+                ada = AdaBoostClassifier(
+                    n_estimators=200,
+                    learning_rate=0.1,
+                    random_state=42,
+                )
+                ada.fit(X_scaled, y_binary, sample_weight=sample_weights)
+                ada_score = cross_val_score(ada, X_scaled, y_binary, cv=3, scoring='accuracy').mean()
+                classifiers.append(("AdaBoost", ada, ada_score))
+                logger.info(f"AdaBoost CV accuracy: {ada_score:.3f}")
+            
+            # Sort by score and take top 4
+            classifiers.sort(key=lambda x: x[2], reverse=True)
+            top_classifiers = [(name, clf) for name, clf, score in classifiers[:4]]
+            
+            logger.info(f"Selected top {len(top_classifiers)} classifiers for ensemble")
             
             # Create ensemble wrapper
             ensemble = _ClassifierEnsemble(
                 scaler=scaler,
-                classifiers=classifiers,
+                classifiers=top_classifiers,
                 feature_cols=self._feature_cols,
             )
             
@@ -670,7 +752,14 @@ class AITrainer:
         y_binary: np.ndarray,
         y_reg: np.ndarray
     ) -> ModelMetrics:
-        """Evaluate classifier with confidence thresholding."""
+        """Evaluate classifier with PROFITABILITY SIMULATION.
+        
+        This simulates actual trading to measure what really matters:
+        - Total profit/loss
+        - Win rate
+        - Risk-adjusted returns (Sharpe)
+        - Max drawdown
+        """
         if model is None:
             return ModelMetrics(0, 0, 0, 0.5, 0.5)
         
@@ -694,12 +783,10 @@ class AITrainer:
                 avg_confidence=float(np.mean(confidence)),
             )
         
-        # Accuracy on confident predictions
+        # Basic accuracy metrics
         correct = predictions[confident_mask] == y_binary[confident_mask]
         accuracy = float(np.mean(correct))
         
-        # Profitable accuracy: among confident "profitable" predictions,
-        # how many were actually profitable?
         predicted_profitable = predictions == 1
         confident_profitable = confident_mask & predicted_profitable
         
@@ -709,10 +796,85 @@ class AITrainer:
         else:
             profitable_accuracy = 0.5
         
-        # Direction accuracy based on actual price changes
-        # When we predict profitable (y=1), we're predicting a large move
-        # The "direction" is determined by the sign of the predicted probability
-        # For now, use the actual profitable accuracy as directional
+        # ========================================
+        # PROFITABILITY SIMULATION - THE KEY METRIC
+        # ========================================
+        # Simulate trading: when model says "profitable" with high confidence, we trade
+        # P&L is based on actual price changes (y_reg), not binary classification
+        
+        trade_results = []
+        wins = []
+        losses = []
+        
+        for i in range(len(X)):
+            if not confident_mask[i]:
+                continue  # Skip low confidence
+            
+            if predictions[i] == 1:  # Model says "this trade will be profitable"
+                # We BUY - profit is actual price change minus spread
+                actual_change = y_reg[i] if i < len(y_reg) else 0
+                trade_pnl = actual_change - SPREAD_COST
+            else:  # Model says "this trade will NOT be profitable" - we could short or skip
+                # For now, we skip unprofitable predictions (conservative)
+                continue
+            
+            trade_results.append(trade_pnl)
+            if trade_pnl > 0:
+                wins.append(trade_pnl)
+            else:
+                losses.append(trade_pnl)
+        
+        # Calculate simulation metrics
+        num_trades = len(trade_results)
+        
+        if num_trades == 0:
+            return ModelMetrics(
+                mse=0, mae=0, r2=0,
+                directional_accuracy=accuracy,
+                profitable_accuracy=profitable_accuracy,
+                confident_trade_pct=float(n_confident / len(X)),
+                avg_confidence=float(np.mean(confidence)),
+                simulated_profit_pct=0,
+                simulated_num_trades=0,
+            )
+        
+        # Total P&L
+        total_profit = sum(trade_results)
+        
+        # Win rate
+        win_rate = len(wins) / num_trades if num_trades > 0 else 0
+        
+        # Average win/loss
+        avg_win = np.mean(wins) if wins else 0
+        avg_loss = np.mean(losses) if losses else 0  # Will be negative
+        
+        # Profit factor (gross profit / abs(gross loss))
+        gross_profit = sum(wins) if wins else 0
+        gross_loss = abs(sum(losses)) if losses else 0.001  # Avoid div by 0
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else 10.0
+        
+        # Max drawdown
+        cumulative = np.cumsum(trade_results)
+        running_max = np.maximum.accumulate(cumulative)
+        drawdowns = running_max - cumulative
+        max_drawdown = float(np.max(drawdowns)) if len(drawdowns) > 0 else 0
+        
+        # Sharpe ratio (annualized, assuming ~250 trading days)
+        if len(trade_results) > 1:
+            returns_std = np.std(trade_results)
+            if returns_std > 0:
+                daily_sharpe = np.mean(trade_results) / returns_std
+                sharpe = daily_sharpe * np.sqrt(250)  # Annualized
+            else:
+                sharpe = 0
+        else:
+            sharpe = 0
+        
+        logger.info(
+            f"SIMULATION: {num_trades} trades, profit={total_profit:.2%}, "
+            f"win_rate={win_rate:.1%}, profit_factor={profit_factor:.2f}, "
+            f"sharpe={sharpe:.2f}, max_dd={max_drawdown:.2%}"
+        )
         
         return ModelMetrics(
             mse=0, mae=0, r2=0,
@@ -720,6 +882,14 @@ class AITrainer:
             profitable_accuracy=profitable_accuracy,
             confident_trade_pct=float(n_confident / len(X)),
             avg_confidence=float(np.mean(confidence)),
+            simulated_profit_pct=total_profit,
+            simulated_num_trades=num_trades,
+            simulated_win_rate=win_rate,
+            simulated_avg_win=float(avg_win),
+            simulated_avg_loss=float(avg_loss),
+            simulated_profit_factor=profit_factor,
+            simulated_max_drawdown=max_drawdown,
+            simulated_sharpe=sharpe,
         )
     
     def _deploy_model(
