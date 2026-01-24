@@ -927,6 +927,15 @@ class AITrainer:
                 "n_models_ensemble": metrics.n_models_ensemble,
                 "avg_confidence": metrics.avg_confidence,
                 "confident_trade_pct": metrics.confident_trade_pct,
+                # Profitability metrics (THE METRICS THAT ACTUALLY MATTER)
+                "simulated_profit_pct": metrics.simulated_profit_pct,
+                "simulated_num_trades": metrics.simulated_num_trades,
+                "simulated_win_rate": metrics.simulated_win_rate,
+                "simulated_avg_win": metrics.simulated_avg_win,
+                "simulated_avg_loss": metrics.simulated_avg_loss,
+                "simulated_profit_factor": metrics.simulated_profit_factor,
+                "simulated_max_drawdown": metrics.simulated_max_drawdown,
+                "simulated_sharpe": metrics.simulated_sharpe,
             },
         }
         
