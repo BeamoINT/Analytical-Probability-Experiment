@@ -197,47 +197,133 @@ def get_log_status():
         "errors_24h": 0,
         "signals_generated": 0,
         "bot_running": False,
+        "recent_simulations": [],  # Last 5 simulation results
+        "recent_errors": [],  # Last 5 error messages
+        "recent_training": None,  # Last training completion
+        "last_training_start": None,
+        "last_training_end": None,
+        "training_in_progress": False,
+        "signals_today": 0,
+        "markets_scanned": 0,
+        "last_cycle_markets": 0,
+        "arbitrage_scans": 0,
+        "recent_activity": [],  # Last 10 notable events
     }
     
     log_path = "live_run.log"
     if os.path.exists(log_path):
         try:
-            # Read last few lines
+            # Read more of the log for better history
             with open(log_path, "rb") as f:
-                # Go to end and read last 50KB
                 f.seek(0, 2)
                 size = f.tell()
-                f.seek(max(0, size - 50000))
+                f.seek(max(0, size - 200000))  # Last 200KB
                 content = f.read().decode('utf-8', errors='ignore')
             
             lines = content.strip().split('\n')
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
             
             for line in reversed(lines):
                 try:
                     data = json.loads(line)
                     ts = data.get("asctime")
+                    msg = data.get("message", "")
+                    level = data.get("levelname", "")
                     
                     if result["last_log"] is None:
                         result["last_log"] = ts
-                        # Check if bot is running (last log within 1 minute)
                         try:
                             log_time = datetime.fromisoformat(ts)
-                            now = datetime.now(timezone.utc).replace(tzinfo=None)
-                            if (now - log_time).total_seconds() < 60:
+                            if (now - log_time).total_seconds() < 120:
                                 result["bot_running"] = True
                         except:
                             pass
                     
-                    msg = data.get("message", "")
+                    # Parse timestamp for time-based filtering
+                    try:
+                        log_time = datetime.fromisoformat(ts)
+                    except:
+                        continue
                     
+                    # AI data collection
                     if "AI data collection" in msg and result["last_ai_collection"] is None:
                         result["last_ai_collection"] = ts
                     
-                    if data.get("levelname") == "ERROR":
+                    # Count errors (last 24h)
+                    if level == "ERROR" and (now - log_time).total_seconds() < 86400:
                         result["errors_24h"] += 1
+                        if len(result["recent_errors"]) < 5:
+                            result["recent_errors"].append({
+                                "time": ts,
+                                "message": msg[:200]  # Truncate long messages
+                            })
+                    
+                    # Training simulations (SIMULATION: lines)
+                    if "SIMULATION:" in msg and len(result["recent_simulations"]) < 5:
+                        # Parse: "SIMULATION: 2556 trades, profit=-3847.12%, ..."
+                        result["recent_simulations"].append({
+                            "time": ts,
+                            "message": msg
+                        })
+                    
+                    # Training start/end
+                    if "Starting thorough classifier training" in msg:
+                        if result["last_training_start"] is None:
+                            result["last_training_start"] = ts
+                            result["training_in_progress"] = True
+                    
+                    if "Model training completed" in msg or "Deployed model v" in msg:
+                        if result["last_training_end"] is None:
+                            result["last_training_end"] = ts
+                            result["training_in_progress"] = False
+                            result["recent_training"] = ts
+                    
+                    # Count today's signals
+                    if "signal" in msg.lower() and log_time >= today_start:
+                        result["signals_today"] += 1
+                    
+                    # Markets scanned
+                    if "Scanned" in msg and "markets" in msg:
+                        try:
+                            # Extract number from "Scanned X markets"
+                            import re
+                            match = re.search(r'Scanned (\d+) markets', msg)
+                            if match:
+                                result["last_cycle_markets"] = int(match.group(1))
+                        except:
+                            pass
+                    
+                    # Arbitrage activity
+                    if "arbitrage" in msg.lower():
+                        result["arbitrage_scans"] += 1
+                    
+                    # Collect recent notable activity
+                    notable_keywords = [
+                        "Deployed model", "Training", "Signal", "Arbitrage", 
+                        "Error", "Warning", "Collected", "Executing", "Trade"
+                    ]
+                    if len(result["recent_activity"]) < 15:
+                        for kw in notable_keywords:
+                            if kw.lower() in msg.lower():
+                                result["recent_activity"].append({
+                                    "time": ts,
+                                    "level": level,
+                                    "message": msg[:150]
+                                })
+                                break
                         
                 except:
                     continue
+            
+            # Check if training is truly in progress (started but not ended)
+            if result["last_training_start"] and result["last_training_end"]:
+                try:
+                    start = datetime.fromisoformat(result["last_training_start"])
+                    end = datetime.fromisoformat(result["last_training_end"])
+                    result["training_in_progress"] = start > end
+                except:
+                    result["training_in_progress"] = False
                     
         except Exception as e:
             result["log_error"] = str(e)
@@ -567,15 +653,49 @@ def get_config_status():
     return result
 
 
+def get_orchestrator_status():
+    """Get AI orchestrator status (training schedule)."""
+    result = {
+        "last_training_time": None,
+        "next_training": None,
+        "training_interval_hours": 6,
+    }
+    
+    state_path = "data/ai_models/orchestrator_state.json"
+    if os.path.exists(state_path):
+        try:
+            with open(state_path, "r") as f:
+                state = json.load(f)
+            result["last_training_time"] = state.get("last_training_time")
+            
+            # Calculate next training
+            if result["last_training_time"]:
+                last = datetime.fromisoformat(result["last_training_time"].replace('Z', '+00:00'))
+                if last.tzinfo:
+                    last = last.replace(tzinfo=None)
+                next_train = last + timedelta(hours=result["training_interval_hours"])
+                result["next_training"] = next_train.isoformat()
+        except:
+            pass
+    
+    return result
+
+
 def main():
     print("\n" + "=" * 70)
     print("                    POLYB0T STATUS DASHBOARD")
+    print("                    " + datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     print("=" * 70)
     
     # Configuration
     config = get_config_status()
+    placing = config['placing_orders'].lower()
+    is_live = placing == 'true' and config['dry_run'].lower() != 'true'
+    mode_icon = "🔴 LIVE" if is_live else "🟡 DRY RUN" if placing == 'true' else "⚪ OFF"
+    
     print(f"\n⚙️  CONFIGURATION:")
-    print(f"   Strategy Mode:    {config['strategy_mode'].upper()}")
+    print(f"   Mode:             {mode_icon}")
+    print(f"   Strategy:         {config['strategy_mode'].upper()}")
     print(f"   Placing Orders:   {config['placing_orders']}")
     print(f"   Dry Run:          {config['dry_run']}")
     
@@ -586,6 +706,13 @@ def main():
     print(f"   Running:          {'YES' if log['bot_running'] else 'NO'}")
     print(f"   Last Activity:    {format_time_ago(log['last_log'])}")
     print(f"   Last AI Collect:  {format_time_ago(log['last_ai_collection'])}")
+    
+    # Training status
+    if log.get("training_in_progress"):
+        print(f"   🔄 Training:       IN PROGRESS (started {format_time_ago(log['last_training_start'])})")
+    elif log.get("recent_training"):
+        print(f"   Last Training:    {format_time_ago(log['recent_training'])}")
+    
     if log["errors_24h"] > 0:
         print(f"   ⚠️  Errors (24h):  {log['errors_24h']}")
     
@@ -916,8 +1043,89 @@ def main():
             for r in rec.get("recommendations", [])[:3]:  # Top 3 recommendations
                 print(f"   • {r}")
     
+    # ==========================================
+    # NEW: Recent Simulation Results (from logs)
+    # ==========================================
+    if log.get("recent_simulations"):
+        print(f"\n📊 RECENT TRAINING SIMULATIONS:")
+        for sim in log["recent_simulations"][:5]:
+            # Parse: "SIMULATION: 2556 trades, profit=+5.2%, win_rate=48.3%, ..."
+            msg = sim["message"]
+            time_ago = format_time_ago(sim["time"])
+            
+            # Extract key metrics
+            import re
+            trades_match = re.search(r'(\d+) trades', msg)
+            profit_match = re.search(r'profit=([+-]?\d+\.?\d*)%', msg)
+            win_match = re.search(r'win_rate=(\d+\.?\d*)%', msg)
+            pf_match = re.search(r'profit_factor=(\d+\.?\d*)', msg)
+            
+            trades = trades_match.group(1) if trades_match else "?"
+            profit = profit_match.group(1) if profit_match else "?"
+            win_rate = win_match.group(1) if win_match else "?"
+            pf = pf_match.group(1) if pf_match else "?"
+            
+            # Determine emoji based on profit
+            try:
+                p = float(profit)
+                emoji = "✅" if p > 5 else "🟢" if p > 0 else "🟡" if p > -5 else "❌"
+            except:
+                emoji = "•"
+            
+            print(f"   {emoji} {time_ago}: {trades} trades, profit={profit}%, win={win_rate}%, PF={pf}")
+    
+    # ==========================================
+    # NEW: Training Schedule
+    # ==========================================
+    orch = get_orchestrator_status()
+    print(f"\n⏰ TRAINING SCHEDULE:")
+    print(f"   Interval:         Every 6 hours")
+    if orch["last_training_time"]:
+        print(f"   Last Training:    {format_time_ago(orch['last_training_time'])}")
+    if orch["next_training"]:
+        next_time = datetime.fromisoformat(orch["next_training"])
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        if next_time > now:
+            delta = next_time - now
+            hours = delta.total_seconds() / 3600
+            print(f"   Next Training:    In {hours:.1f} hours")
+        else:
+            print(f"   Next Training:    Overdue (should run soon)")
+    
+    # ==========================================
+    # NEW: Recent Errors (if any)
+    # ==========================================
+    if log.get("recent_errors"):
+        print(f"\n⚠️  RECENT ERRORS:")
+        for err in log["recent_errors"][:5]:
+            time_ago = format_time_ago(err["time"])
+            msg = err["message"][:100]  # Truncate
+            print(f"   • [{time_ago}] {msg}")
+    
+    # ==========================================
+    # NEW: Recent Activity Log
+    # ==========================================
+    if log.get("recent_activity"):
+        print(f"\n📜 RECENT ACTIVITY:")
+        # Filter to most interesting events
+        shown = 0
+        for activity in log["recent_activity"]:
+            if shown >= 10:
+                break
+            time_ago = format_time_ago(activity["time"])
+            level = activity["level"]
+            msg = activity["message"]
+            
+            # Skip boring messages
+            if any(skip in msg.lower() for skip in ["heartbeat", "checking", "sleeping"]):
+                continue
+            
+            level_icon = "❌" if level == "ERROR" else "⚠️" if level == "WARNING" else "•"
+            print(f"   {level_icon} [{time_ago}] {msg[:80]}")
+            shown += 1
+    
     print("\n" + "=" * 70)
-    print("  Run: poetry run python scripts/check_ai_status.py")
+    print("  This dashboard shows everything - no other commands needed!")
     print("=" * 70 + "\n")
 
 
