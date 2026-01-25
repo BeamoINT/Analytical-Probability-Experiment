@@ -1,0 +1,20 @@
+[Unit]
+Description=PolyB0T Trading Bot with Web Dashboard
+After=network.target
+
+[Service]
+Type=simple
+User=beamo_beamosupport_com
+WorkingDirectory=/home/beamo_beamosupport_com/Analytical-Probability-Experiment
+ExecStart=/bin/bash /home/beamo_beamosupport_com/Analytical-Probability-Experiment/scripts/start_all.sh
+Restart=always
+RestartSec=10
+Environment="PATH=/home/beamo_beamosupport_com/.local/bin:/usr/local/bin:/usr/bin:/bin"
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=polybot
+
+[Install]
+WantedBy=multi-user.target
