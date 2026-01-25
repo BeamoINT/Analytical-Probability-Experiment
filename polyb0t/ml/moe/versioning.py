@@ -203,6 +203,8 @@ class ExpertVersionManager:
     def update_version_metrics(self, metrics: "ExpertMetrics") -> None:
         """Update the current version's metrics after retraining."""
         if not self.versions:
+            # No versions yet - create the first one
+            self.create_version(metrics)
             return
         
         current = self.versions[-1]

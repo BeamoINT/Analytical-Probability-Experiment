@@ -284,8 +284,8 @@ class MoETrainer:
                 except (ValueError, TypeError):
                     row.append(0.0)
             
-            # Get labels
-            price_change_24h = sample.get("price_change_24h", 0)
+            # Get labels (check both formats for compatibility)
+            price_change_24h = sample.get("label_price_change_24h") or sample.get("price_change_24h", 0)
             if price_change_24h is None:
                 continue
             
@@ -380,12 +380,12 @@ class MoETrainer:
                     indices.append(i)
                 elif expert.domain == "other" and category not in [
                     "sports", "politics_us", "politics_intl", "crypto",
-                    "economics", "entertainment"
+                    "economics", "entertainment", "tech", "weather", 
+                    "science", "legal"
                 ]:
                     indices.append(i)
                     
             elif expert.expert_type == "risk":
-                price = features.get("price", 0.5)
                 risk_level = self.pool.get_risk_level(features)
                 if risk_level == expert.domain:
                     indices.append(i)
@@ -393,6 +393,21 @@ class MoETrainer:
             elif expert.expert_type == "time":
                 time_horizon = self.pool.get_time_horizon(features)
                 if time_horizon == expert.domain:
+                    indices.append(i)
+            
+            elif expert.expert_type == "volume":
+                volume_level = self.pool.get_volume_level(features)
+                if volume_level == expert.domain:
+                    indices.append(i)
+                    
+            elif expert.expert_type == "volatility":
+                volatility_level = self.pool.get_volatility_level(features)
+                if volatility_level == expert.domain:
+                    indices.append(i)
+                    
+            elif expert.expert_type == "timing":
+                timing_flag = self.pool.get_timing_flag(features)
+                if timing_flag == expert.domain:
                     indices.append(i)
                     
             elif expert.expert_type == "dynamic":

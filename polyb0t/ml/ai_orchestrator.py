@@ -439,6 +439,17 @@ class AIOrchestrator:
             market_category = None
             market_title = market_slug  # Use slug as title if available
             
+            # ALWAYS categorize markets (don't wait for AI ready)
+            if market_title:
+                try:
+                    market_category, _ = self.category_tracker.categorize_market(
+                        market_id=market_id,
+                        title=market_title,
+                    )
+                except Exception as e:
+                    logger.debug(f"Categorization failed: {e}")
+            
+            # Make prediction if AI is ready
             if self.is_ai_ready():
                 try:
                     # Get prediction from current model
@@ -451,13 +462,6 @@ class AIOrchestrator:
                             predicted_change, confidence = result
                         else:
                             predicted_change = result
-                    
-                    # Categorize the market
-                    if market_title:
-                        market_category, _ = self.category_tracker.categorize_market(
-                            market_id=market_id,
-                            title=market_title,
-                        )
                 except Exception as e:
                     logger.debug(f"Prediction simulation failed: {e}")
             

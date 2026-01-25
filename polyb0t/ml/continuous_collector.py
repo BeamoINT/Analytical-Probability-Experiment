@@ -965,7 +965,7 @@ class ContinuousDataCollector:
                    price_change_15m, price_change_1h, price_change_4h, 
                    price_change_24h, price_change_7d,
                    direction_1h, direction_24h, resolved_outcome,
-                   created_at
+                   created_at, category, market_title
             FROM training_examples
             WHERE schema_version >= ?
         """
@@ -985,7 +985,7 @@ class ContinuousDataCollector:
         data = []
         for (features_json, schema_ver, avail_features_json,
              pc_15m, pc_1h, pc_4h, pc_24h, pc_7d,
-             dir_1h, dir_24h, outcome, created_at) in rows:
+             dir_1h, dir_24h, outcome, created_at, category, market_title) in rows:
             
             features = json.loads(features_json)
             available = json.loads(avail_features_json) if avail_features_json else []
@@ -1007,6 +1007,12 @@ class ContinuousDataCollector:
             features["_schema_version"] = schema_ver
             features["_available_features"] = available
             features["created_at"] = created_at  # For time-based sorting
+            
+            # Add category/market metadata (may override features if stored separately)
+            if category:
+                features["category"] = category
+            if market_title:
+                features["market_title"] = market_title
             
             data.append(features)
             
