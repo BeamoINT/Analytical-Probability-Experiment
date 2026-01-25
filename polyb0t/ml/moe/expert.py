@@ -594,8 +594,8 @@ class Expert:
     def update_state_after_training(self) -> None:
         """Update state after training using version manager."""
         if self._version_manager:
-            # Create new version with current metrics
-            self._version_manager.update_version_metrics(self.metrics)
+            # Create new version with current metrics (pass model for first version)
+            self._version_manager.update_version_metrics(self.metrics, model=self._model)
             
             # Update confidence multiplier based on state
             self._update_confidence_multiplier()

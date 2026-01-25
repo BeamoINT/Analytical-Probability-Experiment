@@ -200,11 +200,15 @@ class ExpertVersionManager:
         
         return version
     
-    def update_version_metrics(self, metrics: "ExpertMetrics") -> None:
+    def update_version_metrics(self, metrics: "ExpertMetrics", model: Any = None) -> None:
         """Update the current version's metrics after retraining."""
         if not self.versions:
             # No versions yet - create the first one
-            self.create_new_version(metrics)
+            if model is not None:
+                self.create_new_version(model, metrics)
+            else:
+                # Create a version without saving model (metrics-only tracking)
+                self._create_metrics_only_version(metrics)
             return
         
         current = self.versions[-1]
@@ -262,6 +266,51 @@ class ExpertVersionManager:
             return False
         
         return True
+    
+    def _create_metrics_only_version(self, metrics: "ExpertMetrics") -> ExpertVersion:
+        """Create a version for metrics tracking without saving model file."""
+        version_id = self.current_version_id + 1
+        
+        # Create version object (no model path)
+        version = ExpertVersion(
+            version_id=version_id,
+            created_at=datetime.utcnow(),
+            model_path="",  # No model file
+            simulated_profit_pct=metrics.simulated_profit_pct,
+            simulated_num_trades=metrics.simulated_num_trades,
+            simulated_win_rate=metrics.simulated_win_rate,
+            simulated_profit_factor=metrics.simulated_profit_factor,
+            simulated_sharpe=metrics.simulated_sharpe,
+            simulated_max_drawdown=metrics.simulated_max_drawdown,
+            training_cycles=1,
+        )
+        
+        # Validate the version
+        version.is_validated = True
+        version.validation_passed = self._validate_version(version)
+        
+        # Update positive/negative cycle tracking
+        if metrics.simulated_profit_pct > 0:
+            version.positive_cycles = 1
+            version.negative_cycles = 0
+        else:
+            version.positive_cycles = 0
+            version.negative_cycles = 1
+        
+        # Add to versions list
+        self.versions.append(version)
+        self.current_version_id = version_id
+        
+        # Update state based on validation
+        self._update_state_after_training(version)
+        
+        logger.info(
+            f"Expert {self.expert_id}: Created v{version_id} (metrics-only), "
+            f"profit={metrics.simulated_profit_pct:+.1%}, "
+            f"validated={version.validation_passed}, state={self.state.value}"
+        )
+        
+        return version
     
     def _update_state_after_training(self, version: ExpertVersion) -> None:
         """Update expert state based on version performance."""
