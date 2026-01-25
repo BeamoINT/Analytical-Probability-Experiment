@@ -536,14 +536,21 @@ class AITrainer:
             # === TRAIN FINAL MODEL ON ALL DATA ===
             final_model = self._train_classifier(X, y_binary, y_reg, sample_weights)
             
-            # Evaluate on held-out portion for final metrics
-            final_metrics = ModelMetrics(
-                mse=0, mae=0,
-                r2=0,
-                directional_accuracy=worst_dir_acc,
-                profitable_accuracy=worst_profit_acc,
-                confident_trade_pct=avg_conf_pct,
+            # === RUN PROFITABILITY SIMULATION ON FINAL MODEL ===
+            # Use 20% holdout for final simulation (most recent data)
+            holdout_size = int(len(X) * 0.2)
+            X_holdout = X[-holdout_size:]
+            y_binary_holdout = y_binary[-holdout_size:]
+            y_reg_holdout = y_reg[-holdout_size:]
+            
+            logger.info(f"Running final profitability simulation on {holdout_size} holdout samples...")
+            final_metrics = self._evaluate_classifier(
+                final_model, X_holdout, y_binary_holdout, y_reg_holdout
             )
+            
+            # Update with worst-case validation results for conservative reporting
+            final_metrics.directional_accuracy = min(worst_dir_acc, final_metrics.directional_accuracy)
+            final_metrics.profitable_accuracy = min(worst_profit_acc, final_metrics.profitable_accuracy)
             
             if hasattr(final_model, 'n_features_'):
                 final_metrics.n_features_used = final_model.n_features_
@@ -553,8 +560,10 @@ class AITrainer:
             final_metrics.n_models_ensemble = getattr(final_model, 'n_models_', 1)
             
             logger.info(
-                f"Final model: profit_acc={final_metrics.profitable_accuracy:.1%}, "
-                f"confident_trades={final_metrics.confident_trade_pct:.1%}"
+                f"FINAL MODEL: profit={final_metrics.simulated_profit_pct:+.1%}, "
+                f"trades={final_metrics.simulated_num_trades}, "
+                f"win_rate={final_metrics.simulated_win_rate:.1%}, "
+                f"profit_factor={final_metrics.simulated_profit_factor:.2f}"
             )
             
             # Deploy
