@@ -259,14 +259,60 @@ def report(today: bool, json_output: bool) -> None:
         click.echo(f"ERROR: {e}")
 
 
+def _show_full_status(json_output: bool, watch: bool, section: str) -> None:
+    """Show comprehensive status using StatusAggregator."""
+    import time
+    from polyb0t.services.status_aggregator import get_status_aggregator
+    
+    aggregator = get_status_aggregator()
+    
+    def display_once() -> None:
+        status_data = aggregator.get_full_status(use_cache=False)
+        
+        if json_output:
+            if section != "all" and section in status_data:
+                click.echo(json.dumps(status_data[section], indent=2))
+            else:
+                click.echo(json.dumps(status_data, indent=2))
+        else:
+            # Clear screen if watching
+            if watch:
+                click.clear()
+            
+            output = aggregator.format_cli_output(status_data)
+            click.echo(output)
+    
+    if watch:
+        try:
+            while True:
+                display_once()
+                time.sleep(5)
+        except KeyboardInterrupt:
+            click.echo("\nStopped watching.")
+    else:
+        display_once()
+
+
 @cli.command()
 @click.option("--json-output", is_flag=True, help="Output as JSON")
-def status(json_output: bool) -> None:
+@click.option("--full", is_flag=True, help="Show comprehensive status including AI/MoE")
+@click.option("--watch", is_flag=True, help="Watch mode - refresh every 5 seconds")
+@click.option("--section", type=click.Choice(["all", "trading", "ai", "moe", "meta"]), default="all", help="Show specific section")
+def status(json_output: bool, full: bool, watch: bool, section: str) -> None:
     """Show status summary (intents + last cycle + optional account monitoring).
 
     This command is read-only and safe in dry-run.
+    
+    Use --full for comprehensive AI/MoE status.
+    Use --watch for real-time updates.
     """
     setup_logging()
+    
+    # If --full flag, use the new StatusAggregator
+    if full or section != "all":
+        _show_full_status(json_output, watch, section)
+        return
+    
     from polyb0t.data.storage import (
         get_session,
         init_db,

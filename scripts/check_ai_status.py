@@ -654,15 +654,22 @@ def get_config_status():
 
 
 def get_moe_status():
-    """Get Mixture of Experts status."""
+    """Get Mixture of Experts status with full state machine support."""
     result = {
         "has_moe": False,
         "total_experts": 0,
         "active_experts": 0,
+        "suspended_experts": 0,
+        "probation_experts": 0,
         "deprecated_experts": 0,
+        "untrained_experts": 0,
+        "rollback_experts": 0,
+        "state_counts": {},
         "total_profit_pct": 0.0,
         "total_trades": 0,
         "experts": [],
+        "suspended": [],
+        "probation": [],
         "deprecated": [],
         "gating": None,
         "best_expert": None,
@@ -686,10 +693,22 @@ def get_moe_status():
             result["last_training"] = state.get("last_training")
             result["training_cycles"] = state.get("total_training_cycles", 0)
             
+            # State counts initialization
+            state_counts = {
+                "untrained": 0,
+                "probation": 0,
+                "active": 0,
+                "suspended": 0,
+                "rollback": 0,
+                "deprecated": 0,
+            }
+            
             # Load individual expert data
             experts_dir = "data/moe_models/experts"
             for expert_id in expert_ids:
                 meta_path = os.path.join(experts_dir, f"{expert_id}.meta.pkl")
+                version_path = os.path.join(experts_dir, f"{expert_id}.versions.json")
+                
                 if os.path.exists(meta_path):
                     try:
                         import pickle
@@ -697,12 +716,39 @@ def get_moe_status():
                             expert_data = pickle.load(f)
                         
                         metrics = expert_data.get("metrics", {})
+                        
+                        # Load versioning state if exists
+                        expert_state = "untrained"  # Default
+                        current_version = None
+                        confidence_mult = expert_data.get("confidence_multiplier", 0.5)
+                        trend = 0.0
+                        
+                        if os.path.exists(version_path):
+                            try:
+                                with open(version_path, "r") as f:
+                                    version_data = json.load(f)
+                                expert_state = version_data.get("state", "untrained")
+                                current_version = version_data.get("current_version_id", None)
+                            except:
+                                pass
+                        
+                        # Calculate trend from training history
+                        training_history = expert_data.get("training_history", [])
+                        if len(training_history) >= 5:
+                            recent = training_history[-5:]
+                            profits = [r.get("profit_pct", 0) for r in recent]
+                            trend = (profits[-1] - profits[0]) / 5
+                        
                         expert_info = {
                             "expert_id": expert_id,
                             "domain": expert_data.get("domain", expert_id),
                             "expert_type": expert_data.get("expert_type", "unknown"),
-                            "is_active": expert_data.get("is_active", True),
-                            "is_deprecated": expert_data.get("is_deprecated", False),
+                            "state": expert_state,
+                            "is_active": expert_state in ["active", "rollback"],
+                            "is_deprecated": expert_state == "deprecated",
+                            "current_version": current_version,
+                            "confidence_mult": confidence_mult,
+                            "trend": trend,
                             "profit_pct": metrics.get("simulated_profit_pct", 0),
                             "num_trades": metrics.get("simulated_num_trades", 0),
                             "win_rate": metrics.get("simulated_win_rate", 0),
@@ -710,17 +756,35 @@ def get_moe_status():
                             "sharpe": metrics.get("simulated_sharpe", 0),
                         }
                         
-                        if expert_info["is_deprecated"]:
+                        # Increment state count
+                        if expert_state in state_counts:
+                            state_counts[expert_state] += 1
+                        
+                        # Categorize by state
+                        if expert_state == "deprecated":
                             result["deprecated"].append(expert_info)
                             result["deprecated_experts"] += 1
-                        elif expert_info["is_active"]:
+                        elif expert_state == "suspended":
+                            result["suspended"].append(expert_info)
+                            result["suspended_experts"] += 1
+                        elif expert_state == "probation":
+                            result["probation"].append(expert_info)
+                            result["probation_experts"] += 1
+                        elif expert_state in ["active", "rollback"]:
                             result["experts"].append(expert_info)
                             result["active_experts"] += 1
+                            if expert_state == "rollback":
+                                result["rollback_experts"] += 1
+                        else:
+                            result["untrained_experts"] += 1
                     except Exception as e:
                         pass
             
+            result["state_counts"] = state_counts
+            
             # Sort experts by profit
             result["experts"].sort(key=lambda x: x["profit_pct"], reverse=True)
+            result["suspended"].sort(key=lambda x: x["profit_pct"], reverse=True)
             
             # Find best expert
             if result["experts"]:
@@ -939,26 +1003,42 @@ def main():
         print(f"   ⚠️  DB Error:      {ai['db_error']}")
     
     # ==========================================
-    # MIXTURE OF EXPERTS STATUS
+    # MIXTURE OF EXPERTS STATUS (24 experts with state machine)
     # ==========================================
     moe = get_moe_status()
     if moe["has_moe"]:
-        print(f"\n🧠 MIXTURE OF EXPERTS:")
-        print(f"   Active Experts:   {moe['active_experts']} / {moe['total_experts']}")
+        print(f"\n🧠 MIXTURE OF EXPERTS (24 experts):")
         
-        if moe["training_cycles"] > 0:
-            print(f"   Training Cycles:  {moe['training_cycles']}")
+        # Show state summary
+        state_counts = moe.get("state_counts", {})
+        print(f"   ┌─────────────────────────────────────────┐")
+        print(f"   │  EXPERT STATES:                         │")
+        print(f"   │    ✅ Active:     {moe['active_experts']:3d}  (trading enabled)   │")
+        print(f"   │    🔄 Probation:  {moe.get('probation_experts', 0):3d}  (proving itself)   │")
+        print(f"   │    ⏸️  Suspended:  {moe.get('suspended_experts', 0):3d}  (training only)    │")
+        print(f"   │    ⏪ Rollback:   {moe.get('rollback_experts', 0):3d}  (using old version)│")
+        print(f"   │    ❌ Deprecated: {moe['deprecated_experts']:3d}  (permanently off)  │")
+        print(f"   │    ⏳ Untrained:  {moe.get('untrained_experts', 0):3d}  (needs data)       │")
+        print(f"   └─────────────────────────────────────────┘")
+        
+        if moe.get("training_cycles", 0) > 0:
+            print(f"\n   Training Cycles:  {moe['training_cycles']}")
             if moe.get("last_training"):
                 print(f"   Last Training:    {format_time_ago(moe['last_training'])}")
         
-        # Show top performing experts
+        # Show active experts (top performers)
         if moe["experts"]:
-            print(f"\n   TOP PERFORMERS (by profit):")
-            for expert in moe["experts"][:5]:
+            print(f"\n   ✅ ACTIVE EXPERTS (trading enabled):")
+            for expert in moe["experts"][:6]:
                 profit = expert["profit_pct"]
                 trades = expert["num_trades"]
                 win_rate = expert["win_rate"]
-                pf = expert["profit_factor"]
+                version = expert.get("current_version", "?")
+                conf = expert.get("confidence_mult", 0.5)
+                trend = expert.get("trend", 0)
+                
+                # Trend indicator
+                trend_icon = "📈" if trend > 0.01 else "📉" if trend < -0.01 else "➡️"
                 
                 if trades == 0:
                     status = "⏳"
@@ -977,13 +1057,31 @@ def main():
                     detail = f"{profit:+.1%}, {trades} trades, {win_rate:.0%} win"
                 
                 domain = expert["domain"]
-                print(f"   {status} {domain}: {detail}")
+                print(f"      {status} {domain} [v{version}] {trend_icon} {detail} (conf:{conf:.1f})")
+        
+        # Show suspended experts (still training)
+        if moe.get("suspended"):
+            print(f"\n   ⏸️  SUSPENDED EXPERTS (training, not trading):")
+            for expert in moe["suspended"][:4]:
+                profit = expert["profit_pct"]
+                trades = expert["num_trades"]
+                trend = expert.get("trend", 0)
+                trend_icon = "📈" if trend > 0.01 else "📉" if trend < -0.01 else "➡️"
+                print(f"      {expert['domain']}: {profit:+.1%} ({trades} trades) {trend_icon}")
+        
+        # Show probation experts
+        if moe.get("probation"):
+            print(f"\n   🔄 PROBATION EXPERTS (new, proving performance):")
+            for expert in moe["probation"][:4]:
+                profit = expert["profit_pct"]
+                trades = expert["num_trades"]
+                print(f"      {expert['domain']}: {profit:+.1%} ({trades} trades)")
         
         # Show deprecated experts
         if moe["deprecated"]:
-            print(f"\n   DEPRECATED EXPERTS ({len(moe['deprecated'])}):")
+            print(f"\n   ❌ DEPRECATED EXPERTS (permanently disabled):")
             for expert in moe["deprecated"][:3]:
-                print(f"   ❌ {expert['domain']}: {expert['profit_pct']:+.1%}")
+                print(f"      {expert['domain']}: {expert['profit_pct']:+.1%}")
         
         # Gating network info
         if moe.get("gating"):
@@ -991,17 +1089,18 @@ def main():
             routing_acc = gating.get("routing_accuracy", 0)
             profit_vs_random = gating.get("profit_vs_random", 0)
             
-            print(f"\n   GATING NETWORK:")
+            print(f"\n   📡 GATING NETWORK:")
             if routing_acc > 0:
                 acc_icon = "✅" if routing_acc > 0.7 else "🟡" if routing_acc > 0.5 else "❌"
-                print(f"   Routing Accuracy: {acc_icon} {routing_acc:.1%}")
-                print(f"   vs Random:        {profit_vs_random:+.2%}")
+                print(f"      Routing Accuracy: {acc_icon} {routing_acc:.1%}")
+                print(f"      vs Random:        {profit_vs_random:+.2%}")
             else:
-                print(f"   Status:           ⏳ Not trained yet")
+                print(f"      Status:           ⏳ Not trained yet")
     else:
         print(f"\n🧠 MIXTURE OF EXPERTS:")
         print(f"   Status:           ⏳ Initializing...")
         print(f"   (Will be created on first training run)")
+        print(f"   (24 experts: 10 category, 3 risk, 3 time, 3 volume, 3 volatility, 2 timing)")
     
     # Category Performance
     categories = get_category_stats()

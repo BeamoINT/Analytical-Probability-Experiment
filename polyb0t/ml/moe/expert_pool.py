@@ -1,6 +1,6 @@
 """Expert Pool manager for MoE architecture.
 
-Manages the lifecycle of all experts: creation, training, deprecation, and persistence.
+Manages the lifecycle of all 24 experts: creation, training, state management, and persistence.
 """
 
 import json
@@ -12,11 +12,16 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from polyb0t.ml.moe.expert import Expert, ExpertMetrics
 from polyb0t.ml.moe.gating import GatingNetwork
+from polyb0t.ml.moe.versioning import ExpertState
 
 logger = logging.getLogger(__name__)
 
 
-# Default expert configurations
+# ============================================================================
+# 24 EXPERT CONFIGURATIONS
+# ============================================================================
+
+# Category Experts (10)
 CATEGORY_EXPERTS = [
     ("sports", "category", "sports"),
     ("politics_us", "category", "politics_us"),
@@ -24,19 +29,55 @@ CATEGORY_EXPERTS = [
     ("crypto", "category", "crypto"),
     ("economics", "category", "economics"),
     ("entertainment", "category", "entertainment"),
-    ("other", "category", "other"),
+    ("tech", "category", "tech"),
+    ("weather", "category", "weather"),
+    ("science", "category", "science"),
+    ("legal", "category", "legal"),
 ]
 
+# Risk Experts (3)
 RISK_EXPERTS = [
-    ("low_risk", "risk", "low_risk"),
-    ("medium_risk", "risk", "medium_risk"),
-    ("high_risk", "risk", "high_risk"),
+    ("low_risk", "risk", "low_risk"),        # price 85-100% or 0-15%
+    ("medium_risk", "risk", "medium_risk"),  # price 15-35% or 65-85%
+    ("high_risk", "risk", "high_risk"),      # price 35-65%
 ]
 
+# Time Horizon Experts (3)
 TIME_EXPERTS = [
-    ("short_term", "time", "short_term"),
-    ("long_term", "time", "long_term"),
+    ("short_term", "time", "short_term"),    # < 3 days
+    ("medium_term", "time", "medium_term"),  # 3-14 days
+    ("long_term", "time", "long_term"),      # > 14 days
 ]
+
+# Volume/Liquidity Experts (3)
+VOLUME_EXPERTS = [
+    ("high_volume", "volume", "high_volume"),      # top 20% by volume
+    ("low_volume", "volume", "low_volume"),        # bottom 20% by volume
+    ("high_liquidity", "volume", "high_liquidity"),  # top 20% by liquidity
+]
+
+# Volatility Experts (3)
+VOLATILITY_EXPERTS = [
+    ("high_volatility", "volatility", "high_volatility"),    # volatility_24h > 5%
+    ("low_volatility", "volatility", "low_volatility"),      # volatility_24h < 1%
+    ("momentum_strong", "volatility", "momentum_strong"),    # momentum_24h > 10%
+]
+
+# Timing Experts (2)
+TIMING_EXPERTS = [
+    ("weekend_trader", "timing", "weekend_trader"),  # is_weekend = True
+    ("market_close", "timing", "market_close"),      # days_to_resolution < 1
+]
+
+# All default experts (24 total)
+ALL_DEFAULT_EXPERTS = (
+    CATEGORY_EXPERTS +
+    RISK_EXPERTS +
+    TIME_EXPERTS +
+    VOLUME_EXPERTS +
+    VOLATILITY_EXPERTS +
+    TIMING_EXPERTS
+)
 
 
 @dataclass
@@ -110,27 +151,11 @@ class ExpertPool:
             self._create_default_experts()
     
     def _create_default_experts(self):
-        """Create the default set of experts."""
-        logger.info("Creating default expert pool...")
+        """Create the default set of 24 experts."""
+        logger.info("Creating default expert pool with 24 experts...")
         
-        # Category experts
-        for expert_id, expert_type, domain in CATEGORY_EXPERTS:
-            self.experts[expert_id] = Expert(
-                expert_id=expert_id,
-                expert_type=expert_type,
-                domain=domain,
-            )
-        
-        # Risk experts
-        for expert_id, expert_type, domain in RISK_EXPERTS:
-            self.experts[expert_id] = Expert(
-                expert_id=expert_id,
-                expert_type=expert_type,
-                domain=domain,
-            )
-        
-        # Time horizon experts
-        for expert_id, expert_type, domain in TIME_EXPERTS:
+        # Create all 24 default experts
+        for expert_id, expert_type, domain in ALL_DEFAULT_EXPERTS:
             self.experts[expert_id] = Expert(
                 expert_id=expert_id,
                 expert_type=expert_type,
@@ -278,6 +303,25 @@ class ExpertPool:
         
         return (final_pred, final_conf, best_expert_id)
     
+    def predict_with_mixture(
+        self,
+        features: Dict[str, Any],
+        mixture_config: Optional[Any] = None,
+    ) -> Optional[Tuple[float, float, Dict[str, Any]]]:
+        """Make a prediction using expert mixture from MetaController.
+        
+        Args:
+            features: Market features
+            mixture_config: Optional MixtureConfig from MetaController
+        
+        Returns:
+            Tuple of (prediction, confidence, metadata) or None
+        """
+        from polyb0t.ml.moe.meta_controller import get_meta_controller
+        
+        meta = get_meta_controller(self)
+        return meta.predict_with_mixture(features, mixture_config)
+    
     def add_expert(self, expert: Expert) -> bool:
         """Add a new expert to the pool.
         
@@ -344,12 +388,50 @@ class ExpertPool:
         """Get the time horizon for a market."""
         days = features.get("days_to_resolution", 30)
         
-        if days < 7:
+        if days < 3:
             return "short_term"
-        elif days > 30:
+        elif days > 14:
             return "long_term"
         else:
             return "medium_term"
+    
+    def get_volume_level(self, features: Dict[str, Any]) -> Optional[str]:
+        """Get volume/liquidity level for a market."""
+        volume = features.get("volume_24h", 0)
+        liquidity = features.get("liquidity", 0)
+        
+        # These thresholds will be adjusted based on actual data distribution
+        if volume > 10000:
+            return "high_volume"
+        elif volume < 1000:
+            return "low_volume"
+        elif liquidity > 50000:
+            return "high_liquidity"
+        return None
+    
+    def get_volatility_level(self, features: Dict[str, Any]) -> Optional[str]:
+        """Get volatility level for a market."""
+        volatility = features.get("volatility_24h", 0)
+        momentum = abs(features.get("momentum_24h", 0))
+        
+        if volatility > 0.05:
+            return "high_volatility"
+        elif volatility < 0.01:
+            return "low_volatility"
+        elif momentum > 0.10:
+            return "momentum_strong"
+        return None
+    
+    def get_timing_flag(self, features: Dict[str, Any]) -> Optional[str]:
+        """Get timing flag for a market."""
+        is_weekend = features.get("is_weekend", False)
+        days_to_resolution = features.get("days_to_resolution", 30)
+        
+        if is_weekend:
+            return "weekend_trader"
+        elif days_to_resolution < 1:
+            return "market_close"
+        return None
     
     def filter_data_for_expert(
         self,
@@ -369,28 +451,52 @@ class ExpertPool:
         
         for sample in data:
             features = sample.get("features", sample)
+            if isinstance(features, str):
+                import json as json_module
+                try:
+                    features = json_module.loads(features)
+                except:
+                    features = {}
+            
+            match = False
             
             if expert.expert_type == "category":
-                # Category experts get data from their category
                 category = self.get_category_for_market(features)
-                if category == expert.domain or expert.domain == "other":
-                    filtered.append(sample)
+                # 'other' expert gets anything not matching the main categories
+                if expert.domain == "other":
+                    match = category not in [
+                        "sports", "politics_us", "politics_intl", "crypto",
+                        "economics", "entertainment", "tech", "weather",
+                        "science", "legal"
+                    ]
+                else:
+                    match = (category == expert.domain)
                     
             elif expert.expert_type == "risk":
-                # Risk experts get data matching their risk level
                 risk_level = self.get_risk_level(features)
-                if risk_level == expert.domain:
-                    filtered.append(sample)
+                match = (risk_level == expert.domain)
                     
             elif expert.expert_type == "time":
-                # Time experts get data matching their time horizon
                 time_horizon = self.get_time_horizon(features)
-                if time_horizon == expert.domain:
-                    filtered.append(sample)
+                match = (time_horizon == expert.domain)
+                    
+            elif expert.expert_type == "volume":
+                volume_level = self.get_volume_level(features)
+                match = (volume_level == expert.domain)
+                    
+            elif expert.expert_type == "volatility":
+                volatility_level = self.get_volatility_level(features)
+                match = (volatility_level == expert.domain)
+                    
+            elif expert.expert_type == "timing":
+                timing_flag = self.get_timing_flag(features)
+                match = (timing_flag == expert.domain)
                     
             elif expert.expert_type == "dynamic":
-                # Dynamic experts have custom filters (stored in domain)
-                # For now, give them a sample of all data
+                # Dynamic experts get all data for now
+                match = True
+            
+            if match:
                 filtered.append(sample)
         
         return filtered
@@ -401,12 +507,29 @@ class ExpertPool:
         active.sort(key=lambda e: e.metrics.simulated_profit_pct, reverse=True)
         return active[:n]
     
+    def get_suspended_experts(self) -> List[Expert]:
+        """Get all suspended experts (still training, not trading)."""
+        return [e for e in self.experts.values() if e.state == ExpertState.SUSPENDED]
+    
+    def get_probation_experts(self) -> List[Expert]:
+        """Get all experts in probation."""
+        return [e for e in self.experts.values() if e.state == ExpertState.PROBATION]
+    
+    def get_experts_by_state(self) -> Dict[str, List[Expert]]:
+        """Get experts grouped by state."""
+        result = {state.value: [] for state in ExpertState}
+        for expert in self.experts.values():
+            result[expert.state.value].append(expert)
+        return result
+    
     def get_stats(self) -> Dict[str, Any]:
         """Get pool statistics for dashboard."""
         active = self.get_active_experts()
         deprecated = self.get_deprecated_experts()
+        suspended = self.get_suspended_experts()
+        probation = self.get_probation_experts()
         
-        # Calculate overall profit
+        # Calculate overall profit from active experts
         total_profit = sum(e.metrics.simulated_profit_pct for e in active)
         total_trades = sum(e.metrics.simulated_num_trades for e in active)
         
@@ -418,16 +541,26 @@ class ExpertPool:
                 best_profit = e.metrics.simulated_profit_pct
                 best_expert = e
         
+        # Count by state
+        state_counts = {}
+        for state in ExpertState:
+            state_counts[state.value] = sum(1 for e in self.experts.values() if e.state == state)
+        
         return {
             "total_experts": len(self.experts),
             "active_experts": len(active),
+            "suspended_experts": len(suspended),
+            "probation_experts": len(probation),
             "deprecated_experts": len(deprecated),
+            "state_counts": state_counts,
             "total_profit_pct": total_profit,
             "total_trades": total_trades,
             "best_expert": best_expert.to_dict() if best_expert else None,
             "gating": self.gating.to_dict() if self.gating else None,
             "state": self.state.to_dict(),
             "experts": [e.to_dict() for e in active],
+            "suspended": [e.to_dict() for e in suspended],
+            "probation": [e.to_dict() for e in probation],
             "deprecated": [e.to_dict() for e in deprecated],
         }
     

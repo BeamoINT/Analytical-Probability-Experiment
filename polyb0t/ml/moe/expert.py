@@ -2,6 +2,8 @@
 
 Each expert is a self-contained classifier ensemble that specializes
 in a particular domain (category, risk level, time horizon).
+
+Includes versioning support for rollback and smart state management.
 """
 
 import logging
@@ -21,6 +23,12 @@ from sklearn.ensemble import (
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import cross_val_score
 from sklearn.preprocessing import StandardScaler
+
+from polyb0t.ml.moe.versioning import (
+    ExpertState,
+    ExpertVersion,
+    ExpertVersionManager,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -163,19 +171,15 @@ class Expert:
     
     Attributes:
         expert_id: Unique identifier
-        expert_type: 'category', 'risk', 'time', or 'dynamic'
+        expert_type: 'category', 'risk', 'time', 'volume', 'volatility', 'timing', or 'dynamic'
         domain: Specific domain (e.g., 'sports', 'low_risk', 'short_term')
-        is_active: Whether this expert is currently active
-        is_deprecated: Whether this expert has been deprecated
     """
     
     expert_id: str
-    expert_type: str  # 'category', 'risk', 'time', 'dynamic'
+    expert_type: str  # 'category', 'risk', 'time', 'volume', 'volatility', 'timing', 'dynamic'
     domain: str  # e.g., 'sports', 'low_risk', 'short_term'
     
-    # State
-    is_active: bool = True
-    is_deprecated: bool = False
+    # State (use versioning system)
     created_at: datetime = field(default_factory=datetime.utcnow)
     
     # Model (set after training)
@@ -185,13 +189,53 @@ class Expert:
     # Performance metrics
     metrics: ExpertMetrics = field(default_factory=ExpertMetrics)
     
-    # Training history
+    # Training history (keep last 20 for trend analysis)
     training_history: List[Dict[str, Any]] = field(default_factory=list, repr=False)
     
+    # Versioning manager
+    _version_manager: Optional[ExpertVersionManager] = field(default=None, repr=False)
+    _versions_dir: str = field(default="data/moe_models/versions", repr=False)
+    
+    # Confidence multiplier (new experts start lower)
+    confidence_multiplier: float = 0.5
+    
     def __post_init__(self):
-        """Initialize feature columns."""
+        """Initialize feature columns and version manager."""
         if not self._feature_cols:
             self._feature_cols = self._get_base_feature_cols()
+        
+        # Initialize version manager
+        if self._version_manager is None:
+            versions_dir = os.path.join(self._versions_dir, self.expert_id)
+            self._version_manager = ExpertVersionManager(
+                self.expert_id, versions_dir
+            )
+    
+    @property
+    def state(self) -> ExpertState:
+        """Get the current state from version manager."""
+        if self._version_manager:
+            return self._version_manager.state
+        return ExpertState.UNTRAINED
+    
+    @property
+    def is_active(self) -> bool:
+        """Check if expert is active (trading enabled)."""
+        if self._version_manager:
+            return self._version_manager.is_trading_enabled()
+        return False
+    
+    @property
+    def is_deprecated(self) -> bool:
+        """Check if expert is deprecated."""
+        return self.state == ExpertState.DEPRECATED
+    
+    @property
+    def current_version(self) -> Optional[int]:
+        """Get current version ID."""
+        if self._version_manager:
+            return self._version_manager.current_version_id
+        return None
     
     def _get_base_feature_cols(self) -> List[str]:
         """Get the base feature columns for training."""
@@ -541,30 +585,69 @@ class Expert:
             return None
     
     def should_deprecate(self) -> bool:
-        """Check if this expert should be deprecated based on performance."""
-        # Already deprecated
-        if self.is_deprecated:
-            return False
+        """Check if this expert should be deprecated.
         
-        # Not enough trades to judge
-        if self.metrics.simulated_num_trades < 20:
-            return False
+        Now uses the state machine - only deprecated state means truly deprecated.
+        """
+        return self.state == ExpertState.DEPRECATED
+    
+    def update_state_after_training(self) -> None:
+        """Update state after training using version manager."""
+        if self._version_manager:
+            # Create new version with current metrics
+            self._version_manager.update_version_metrics(self.metrics)
+            
+            # Update confidence multiplier based on state
+            self._update_confidence_multiplier()
+    
+    def _update_confidence_multiplier(self) -> None:
+        """Update confidence multiplier based on performance history."""
+        if self.state == ExpertState.ACTIVE:
+            # Increase confidence for good performance
+            good_cycles = sum(
+                1 for h in self.training_history[-5:] 
+                if h.get("profit_pct", 0) > 0
+            )
+            # 0.5 base + 0.1 per good cycle, max 1.0
+            self.confidence_multiplier = min(1.0, 0.5 + 0.1 * good_cycles)
+        elif self.state == ExpertState.PROBATION:
+            self.confidence_multiplier = 0.5
+        elif self.state == ExpertState.SUSPENDED:
+            self.confidence_multiplier = 0.0  # No trading
+        else:
+            self.confidence_multiplier = 0.3
+    
+    def calculate_trend(self, window: int = 5) -> float:
+        """Calculate performance trend over last N training cycles.
         
-        # Deprecate if losing too much money
-        if self.metrics.simulated_profit_pct < -0.10:  # -10%
-            return True
+        Returns:
+            Positive = improving, negative = declining
+        """
+        if len(self.training_history) < window:
+            return 0.0
         
-        # Deprecate if very low win rate with negative profit
-        if self.metrics.simulated_win_rate < 0.35 and self.metrics.simulated_profit_pct < 0:
-            return True
+        recent = self.training_history[-window:]
+        profits = [r.get("profit_pct", 0) for r in recent]
         
-        return False
+        if len(profits) < 2:
+            return 0.0
+        
+        # Linear trend
+        return (profits[-1] - profits[0]) / window
     
     def deprecate(self, reason: str = ""):
-        """Mark this expert as deprecated."""
-        self.is_deprecated = True
-        self.is_active = False
+        """Mark this expert as deprecated via state machine."""
+        if self._version_manager:
+            self._version_manager.state = ExpertState.DEPRECATED
+            self._version_manager._consecutive_bad_cycles = 999
         logger.info(f"Expert {self.expert_id} ({self.domain}) DEPRECATED: {reason}")
+    
+    def suspend(self, reason: str = ""):
+        """Temporarily suspend trading for this expert."""
+        if self._version_manager:
+            self._version_manager.state = ExpertState.SUSPENDED
+        self.confidence_multiplier = 0.0
+        logger.info(f"Expert {self.expert_id} ({self.domain}) SUSPENDED: {reason}")
     
     def save(self, path: str):
         """Save expert to disk."""
@@ -574,16 +657,20 @@ class Expert:
             "expert_id": self.expert_id,
             "expert_type": self.expert_type,
             "domain": self.domain,
-            "is_active": self.is_active,
-            "is_deprecated": self.is_deprecated,
             "created_at": self.created_at.isoformat(),
             "metrics": self.metrics.to_dict(),
             "feature_cols": self._feature_cols,
-            "training_history": self.training_history[-10:],  # Keep last 10
+            "training_history": self.training_history[-20:],  # Keep last 20
+            "confidence_multiplier": self.confidence_multiplier,
         }
         
         with open(path + ".meta.pkl", "wb") as f:
             pickle.dump(state, f)
+        
+        # Save version manager state
+        if self._version_manager:
+            version_state_path = path + ".versions.json"
+            self._version_manager.save_state(version_state_path)
         
         if self._model is not None:
             with open(path + ".model.pkl", "wb") as f:
@@ -600,14 +687,21 @@ class Expert:
                 expert_id=state["expert_id"],
                 expert_type=state["expert_type"],
                 domain=state["domain"],
-                is_active=state.get("is_active", True),
-                is_deprecated=state.get("is_deprecated", False),
                 created_at=datetime.fromisoformat(state["created_at"]),
             )
             
             expert.metrics = ExpertMetrics.from_dict(state.get("metrics", {}))
             expert._feature_cols = state.get("feature_cols", expert._get_base_feature_cols())
             expert.training_history = state.get("training_history", [])
+            expert.confidence_multiplier = state.get("confidence_multiplier", 0.5)
+            
+            # Load version manager state
+            version_state_path = path + ".versions.json"
+            if os.path.exists(version_state_path):
+                versions_dir = os.path.join("data/moe_models/versions", expert.expert_id)
+                expert._version_manager = ExpertVersionManager.load_state(
+                    version_state_path, expert.expert_id, versions_dir
+                )
             
             # Load model if exists
             model_path = path + ".model.pkl"
@@ -623,14 +717,23 @@ class Expert:
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for status display."""
+        version_info = None
+        if self._version_manager:
+            version_info = self._version_manager.to_dict()
+        
         return {
             "expert_id": self.expert_id,
             "expert_type": self.expert_type,
             "domain": self.domain,
+            "state": self.state.value,
             "is_active": self.is_active,
             "is_deprecated": self.is_deprecated,
             "created_at": self.created_at.isoformat(),
             "has_model": self._model is not None,
+            "current_version": self.current_version,
+            "confidence_multiplier": self.confidence_multiplier,
+            "trend": self.calculate_trend(),
             "metrics": self.metrics.to_dict(),
             "score": self.metrics.score(),
+            "version_info": version_info,
         }

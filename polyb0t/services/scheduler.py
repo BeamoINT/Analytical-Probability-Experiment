@@ -37,20 +37,28 @@ logger = logging.getLogger(__name__)
 
 
 def _check_strategy_mode() -> None:
-    """Check strategy mode and validate AI readiness."""
+    """Check AI/MoE readiness. Rules mode has been removed."""
     settings = get_settings()
     
-    logger.info(f"Strategy mode: {settings.strategy_mode.upper()}")
+    logger.info("Strategy mode: AI/MoE (rules mode removed)")
     logger.info(f"Placing orders: {settings.placing_orders}")
     
-    if settings.strategy_mode == "ai":
-        try:
-            from polyb0t.ml.ai_orchestrator import check_ai_ready_or_exit
-            check_ai_ready_or_exit()
-        except ImportError as e:
-            logger.error(f"AI mode requested but AI modules not available: {e}")
+    # AI mode is always on now, but we allow running without a trained model
+    # (the bot will just collect data until model is ready)
+    try:
+        from polyb0t.ml.ai_orchestrator import get_ai_orchestrator
+        orchestrator = get_ai_orchestrator()
+        if orchestrator.is_ai_ready():
+            logger.info("AI model is ready for trading")
+        else:
+            logger.info("AI model not ready - will collect training data")
             if settings.placing_orders:
-                raise SystemExit(1)
+                logger.warning("Orders enabled but no trained model - bot will not trade until model is ready")
+    except ImportError as e:
+        logger.error(f"AI modules not available: {e}")
+        if settings.placing_orders:
+            logger.error("Cannot start with orders enabled but no AI module")
+            raise SystemExit(1)
 
 
 class TradingScheduler:
@@ -698,28 +706,23 @@ class TradingScheduler:
                     self.system_monitor.set_context("normal")  # Reset context on error
             
             # === SIGNAL GENERATION ===
-            # Use rules-based OR AI-based signals (NOT hybrid)
+            # AI/MoE-only signal generation (rules mode has been removed)
             signals: list[TradingSignal] = []
             signal_rejections: dict[str, int] = {}
             
-            if self.settings.strategy_mode == "rules":
-                # Rules-based signal generation
-                signals, signal_rejections = self.strategy.generate_signals(
-                    tradable_markets, orderbooks, trades, available_for_signals, reserved_for_signals
-                )
-            elif self.settings.strategy_mode == "ai" and self.ai_orchestrator and self.ai_orchestrator.is_ai_ready():
-                # AI-only signal generation
+            if self.ai_orchestrator and self.ai_orchestrator.is_ai_ready():
+                # AI/MoE signal generation
                 signals, signal_rejections = self._generate_ai_signals(
                     tradable_markets, orderbooks, available_for_signals, reserved_for_signals
                 )
             else:
-                # AI mode but no model - just collect data, no signals
-                logger.debug("AI mode but no model ready - collecting data only")
+                # No model ready - just collect data, no signals
+                logger.debug("AI model not ready - collecting data only")
                 signal_rejections = {"ai_model_not_ready": len(tradable_markets) * 2}
             
             self._save_signals(signals, cycle_id, db_session)
             logger.info(
-                f"Signals computed: {len(signals)} ({self.settings.strategy_mode} mode)",
+                f"Signals computed: {len(signals)} (AI/MoE mode)",
                 extra={"signal_rejections": signal_rejections},
             )
 

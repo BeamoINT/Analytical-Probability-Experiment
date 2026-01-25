@@ -15,6 +15,7 @@ import numpy as np
 from polyb0t.ml.moe.expert import Expert, ExpertMetrics, SPREAD_COST, MIN_PROFIT_THRESHOLD
 from polyb0t.ml.moe.expert_pool import ExpertPool, get_expert_pool
 from polyb0t.ml.moe.auto_discovery import AutoDiscovery
+from polyb0t.ml.moe.versioning import ExpertState
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,7 @@ MIN_TRAINING_SAMPLES = 100
 TRAINING_INTERVAL_HOURS = 6
 HOLDOUT_FRACTION = 0.2
 SAMPLE_WEIGHT_DECAY = 0.5  # Recent data weighted more
+MIN_EXPERT_SAMPLES = 30  # Minimum samples for an expert to train
 
 
 class MoETrainer:
@@ -98,18 +100,26 @@ class MoETrainer:
             sample_weights = self._calculate_sample_weights(timestamps)
             
             # 4. Train each expert on its relevant data
+            # Train ALL non-deprecated experts (including suspended ones)
             expert_results = {}  # expert_id -> list of profits per sample
+            experts_to_train = [
+                e for e in self.pool.experts.values() 
+                if e.state != ExpertState.DEPRECATED
+            ]
             
-            for expert in self.pool.get_active_experts():
-                logger.info(f"Training expert: {expert.expert_id} ({expert.domain})...")
+            logger.info(f"Training {len(experts_to_train)} experts...")
+            
+            for expert in experts_to_train:
+                state_str = expert.state.value
+                logger.info(f"Training expert: {expert.expert_id} ({expert.domain}) [{state_str}]...")
                 
                 # Filter data for this expert
                 indices = self._get_expert_data_indices(
                     expert, training_data, categories
                 )
                 
-                if len(indices) < 50:
-                    logger.info(f"  Skipping - only {len(indices)} samples")
+                if len(indices) < MIN_EXPERT_SAMPLES:
+                    logger.info(f"  Skipping - only {len(indices)} samples (need {MIN_EXPERT_SAMPLES})")
                     continue
                 
                 # Extract subset
@@ -123,18 +133,33 @@ class MoETrainer:
                     X_expert, y_binary_expert, y_reg_expert, weights_expert
                 )
                 
+                # Update state after training (handles versioning, state transitions)
+                expert.update_state_after_training()
+                
                 # Record per-sample profits for gating training
                 expert_results[expert.expert_id] = self._calculate_per_sample_profits(
                     expert, X, y_reg
                 )
+                
+                # Log state transition
+                logger.info(
+                    f"  {expert.expert_id}: state={expert.state.value}, "
+                    f"profit={metrics.simulated_profit_pct:+.1%}, "
+                    f"conf_mult={expert.confidence_multiplier:.2f}"
+                )
             
-            # 5. Train gating network
-            if self.pool.gating and len(expert_results) > 1:
-                logger.info("Training gating network...")
-                self.pool.gating.train(training_data, expert_results)
+            # 5. Train gating network (only use active experts)
+            active_results = {
+                k: v for k, v in expert_results.items()
+                if self.pool.experts.get(k) and self.pool.experts[k].is_active
+            }
+            if self.pool.gating and len(active_results) > 1:
+                logger.info(f"Training gating network on {len(active_results)} active experts...")
+                self.pool.gating.train(training_data, active_results)
             
-            # 6. Check for experts to deprecate
-            deprecated = self._check_deprecations()
+            # 6. Log expert state summary
+            state_summary = self._get_state_summary()
+            logger.info(f"Expert states: {state_summary}")
             
             # 7. Run auto-discovery for new experts
             new_experts = self.auto_discovery.discover(
@@ -148,21 +173,29 @@ class MoETrainer:
             # Calculate training time
             training_time = (datetime.utcnow() - start_time).total_seconds()
             
+            # Count experts by state
+            n_deprecated = sum(1 for e in self.pool.experts.values() if e.state == ExpertState.DEPRECATED)
+            n_suspended = sum(1 for e in self.pool.experts.values() if e.state == ExpertState.SUSPENDED)
+            n_active = sum(1 for e in self.pool.experts.values() if e.state == ExpertState.ACTIVE)
+            
             # Build results summary
             results = {
                 "success": True,
                 "training_time_seconds": training_time,
                 "n_samples": len(training_data),
                 "n_experts_trained": len(expert_results),
-                "n_deprecated": len(deprecated),
+                "n_active": n_active,
+                "n_suspended": n_suspended,
+                "n_deprecated": n_deprecated,
                 "n_new_experts": len(new_experts),
+                "state_summary": state_summary,
                 "pool_stats": self.pool.get_stats(),
             }
             
             logger.info("=" * 60)
             logger.info(f"MOE TRAINING COMPLETE in {training_time:.1f}s")
             logger.info(f"  Experts trained: {len(expert_results)}")
-            logger.info(f"  Experts deprecated: {len(deprecated)}")
+            logger.info(f"  Active: {n_active}, Suspended: {n_suspended}, Deprecated: {n_deprecated}")
             logger.info(f"  New experts created: {len(new_experts)}")
             logger.info("=" * 60)
             
@@ -405,17 +438,52 @@ class MoETrainer:
         
         return profits
     
+    def _get_state_summary(self) -> Dict[str, int]:
+        """Get count of experts by state."""
+        summary = {state.value: 0 for state in ExpertState}
+        for expert in self.pool.experts.values():
+            summary[expert.state.value] += 1
+        return summary
+    
     def _check_deprecations(self) -> List[str]:
-        """Check for and deprecate failing experts."""
+        """Check for and deprecate failing experts.
+        
+        Note: With the new state machine, deprecation happens automatically
+        via update_state_after_training(). This method is kept for
+        additional manual deprecation if needed.
+        """
         deprecated = []
         
-        for expert in self.pool.get_active_experts():
+        for expert in self.pool.experts.values():
             if expert.should_deprecate():
-                reason = f"profit={expert.metrics.simulated_profit_pct:.1%}"
-                self.pool.deprecate_expert(expert.expert_id, reason)
                 deprecated.append(expert.expert_id)
         
         return deprecated
+    
+    def get_expert_trends(self) -> Dict[str, float]:
+        """Get performance trends for all experts."""
+        trends = {}
+        for expert in self.pool.experts.values():
+            trends[expert.expert_id] = expert.calculate_trend()
+        return trends
+    
+    def get_training_stats(self) -> Dict[str, Any]:
+        """Get training statistics."""
+        state_summary = self._get_state_summary()
+        trends = self.get_expert_trends()
+        
+        # Find improving/declining experts
+        improving = [k for k, v in trends.items() if v > 0.01]
+        declining = [k for k, v in trends.items() if v < -0.01]
+        
+        return {
+            "last_training": self._last_training.isoformat() if self._last_training else None,
+            "is_training": self._is_training,
+            "state_summary": state_summary,
+            "improving_experts": improving,
+            "declining_experts": declining,
+            "pool_stats": self.pool.get_stats(),
+        }
 
 
 # Singleton instance

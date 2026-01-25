@@ -36,14 +36,16 @@ class Settings(BaseSettings):
         default=True,
         description="Master switch: when False, bot only monitors and collects data (no trading)"
     )
-    strategy_mode: Literal["rules", "ai"] = Field(
-        default="rules",
-        description="Strategy mode: 'rules' for rule-based trading, 'ai' for AI-only trading"
+    # NOTE: Rules-based trading has been removed. Bot now uses AI/MoE only.
+    # Kept for backward compatibility with .env files
+    strategy_mode: Literal["ai"] = Field(
+        default="ai",
+        description="Strategy mode: AI-only trading with Mixture of Experts (rules mode removed)"
     )
     
     # === AI TRAINING CONFIGURATION ===
     ai_min_training_examples: int = Field(
-        default=1000,
+        default=500,
         description="Minimum training examples before AI can start training"
     )
     ai_retrain_interval_hours: int = Field(
@@ -51,12 +53,12 @@ class Settings(BaseSettings):
         description="How often to retrain the AI model (hours)"
     )
     ai_example_interval_minutes: int = Field(
-        default=15,
-        description="How often to create training examples from tracked positions"
+        default=5,
+        description="How often to create training examples from tracked positions (was 15)"
     )
     ai_max_markets_to_track: int = Field(
-        default=200,
-        description="Maximum number of markets to track for AI training data"
+        default=500,
+        description="Maximum number of markets to track for AI training data (was 200)"
     )
     ai_benchmark_test_size: float = Field(
         default=0.2,
@@ -164,22 +166,22 @@ class Settings(BaseSettings):
         ..., description="Main loop interval (seconds) - live defaults to 10"
     )
 
-    # Live scanning / rate-limit controls
+    # Live scanning / rate-limit controls (increased for MoE training)
     live_scan_markets_limit: int = Field(
-        default=500,
-        description="How many markets to fetch from Gamma in live mode (broad scan).",
+        default=750,
+        description="How many markets to fetch from Gamma in live mode (broad scan). Increased for MoE.",
     )
     live_enrich_markets_limit: int = Field(
-        default=50,
-        description="How many of the scanned markets to enrich with outcomes/token_ids (top by volume).",
+        default=100,
+        description="How many of the scanned markets to enrich with outcomes/token_ids (top by volume). Increased for MoE.",
     )
     live_clob_markets_limit: int = Field(
-        default=50,
-        description="How many markets to fetch orderbooks/trades for per cycle in live mode (top by volume).",
+        default=100,
+        description="How many markets to fetch orderbooks/trades for per cycle in live mode (top by volume). Increased for MoE.",
     )
     live_clob_concurrency: int = Field(
-        default=6,
-        description="Max concurrent CLOB HTTP requests per cycle in live mode (lower = safer on rate limits).",
+        default=10,
+        description="Max concurrent CLOB HTTP requests per cycle in live mode. Increased with rate limiter protection.",
     )
     live_fetch_trades: bool = Field(
         default=False,
@@ -505,8 +507,8 @@ class Settings(BaseSettings):
         description="How long to keep training data (days). 1095 days (3 years) = ~75GB max DB size"
     )
     ml_price_snapshot_interval_minutes: int = Field(
-        default=15,
-        description="Collect dense price snapshots every N minutes for deep learning"
+        default=5,
+        description="Collect dense price snapshots every N minutes for deep learning. Reduced from 15 for MoE."
     )
     ml_enable_backfill: bool = Field(
         default=True,

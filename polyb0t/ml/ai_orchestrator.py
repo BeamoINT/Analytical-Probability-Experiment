@@ -639,7 +639,10 @@ class AIOrchestrator:
         return moe_result is not None or legacy_result is not None
     
     def predict(self, features: dict) -> Optional[Tuple[float, float]]:
-        """Make a prediction using the MoE system.
+        """Make a prediction using the MoE system with expert mixing.
+        
+        Uses the MetaController to combine multiple experts for better
+        predictions based on learned optimal mixtures.
         
         Args:
             features: Feature dictionary.
@@ -650,11 +653,19 @@ class AIOrchestrator:
         if not self.is_ai_ready():
             return None
         
-        # === USE MIXTURE OF EXPERTS ===
+        # === USE MIXTURE OF EXPERTS WITH META-CONTROLLER ===
         if self._use_moe:
-            result = self.expert_pool.predict(features)
+            # Try mixture prediction first (combines multiple experts)
+            from polyb0t.ml.moe.meta_controller import get_meta_controller
+            
+            meta = get_meta_controller(self.expert_pool)
+            result = meta.predict_with_mixture(features)
+            
             if result is not None:
-                prediction, confidence, best_expert = result
+                prediction, confidence, metadata = result
+                
+                # Store metadata for later analysis
+                self._last_prediction_metadata = metadata
                 
                 # Convert binary prediction to edge-like value
                 # 1.0 = strongly profitable, 0.0 = not profitable
@@ -668,6 +679,23 @@ class AIOrchestrator:
                         edge = -(prediction - 0.5) * 2 * confidence  # -1 to 0
                 else:
                     edge = 0  # Not profitable, no signal
+                
+                return (edge, confidence)
+            
+            # Fallback to standard pool predict if mixture fails
+            result = self.expert_pool.predict(features)
+            if result is not None:
+                prediction, confidence, best_expert = result
+                self._last_prediction_metadata = {"best_expert": best_expert}
+                
+                if prediction > 0.5:
+                    momentum = features.get("momentum_24h", 0)
+                    if momentum >= 0:
+                        edge = (prediction - 0.5) * 2 * confidence
+                    else:
+                        edge = -(prediction - 0.5) * 2 * confidence
+                else:
+                    edge = 0
                 
                 return (edge, confidence)
         
@@ -837,31 +865,19 @@ def get_ai_orchestrator() -> AIOrchestrator:
 
 
 def check_ai_ready_or_exit() -> None:
-    """Check if AI is ready; if not and in AI mode, exit with error.
+    """Check if AI is ready. Does NOT exit - allows data collection mode.
     
-    Raises:
-        SystemExit if AI mode is on but no trained model.
+    This function now just logs status. The bot can run without a trained
+    model to collect training data.
     """
-    settings = get_settings()
-    
-    if settings.strategy_mode != "ai":
-        return  # Not in AI mode, no check needed
-        
     orchestrator = get_ai_orchestrator()
     
-    if not orchestrator.is_ai_ready():
-        if settings.placing_orders:
-            logger.error(
-                "❌ AI MODE ENABLED but no trained model available!\n"
-                "Cannot start in AI mode without a trained model.\n"
-                "Either:\n"
-                "  1. Set POLYBOT_STRATEGY_MODE=rules to use rules-based trading\n"
-                "  2. Set POLYBOT_PLACING_ORDERS=false to collect training data first\n"
-                "  3. Wait for AI model to be trained"
-            )
-            raise SystemExit(1)
-        else:
-            logger.warning(
-                "AI mode enabled but no trained model. "
-                "Bot will collect training data until model is ready."
-            )
+    if orchestrator.is_ai_ready():
+        moe_stats = orchestrator.get_moe_stats()
+        active_experts = moe_stats.get("active_experts", 0)
+        logger.info(f"AI ready with {active_experts} active experts (MoE)")
+    else:
+        logger.info(
+            "AI model not ready - bot will collect training data. "
+            "Trading will begin once experts are trained."
+        )
