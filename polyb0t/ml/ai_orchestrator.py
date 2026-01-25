@@ -2,8 +2,8 @@
 
 This module ties together:
 - Data collection
-- Training
-- Prediction
+- Training (both legacy single model and MoE)
+- Prediction using Mixture of Experts
 - Shutdown recovery
 """
 
@@ -13,7 +13,7 @@ import os
 import json
 import threading
 from datetime import datetime, timedelta
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 from polyb0t.config import get_settings
 from polyb0t.ml.continuous_collector import (
@@ -24,11 +24,15 @@ from polyb0t.ml.continuous_collector import (
 from polyb0t.ml.ai_trainer import AITrainer, get_ai_trainer
 from polyb0t.ml.category_tracker import get_category_tracker, MarketCategoryTracker
 
+# MoE imports
+from polyb0t.ml.moe.expert_pool import ExpertPool, get_expert_pool
+from polyb0t.ml.moe.trainer import MoETrainer, get_moe_trainer
+
 logger = logging.getLogger(__name__)
 
 
 class AIOrchestrator:
-    """Orchestrates all AI operations."""
+    """Orchestrates all AI operations including Mixture of Experts."""
     
     def __init__(self):
         """Initialize the orchestrator."""
@@ -50,6 +54,12 @@ class AIOrchestrator:
         # Category tracker for learning which market types to avoid
         self.category_tracker = get_category_tracker()
         
+        # === MIXTURE OF EXPERTS ===
+        # MoE is the primary prediction system
+        self.expert_pool = get_expert_pool()
+        self.moe_trainer = get_moe_trainer()
+        self._use_moe = True  # Always use MoE for predictions
+        
         self._last_training_time: Optional[datetime] = None
         self._last_example_time: Optional[datetime] = None
         self._state_path = os.path.join(self.settings.ai_model_dir, "orchestrator_state.json")
@@ -63,6 +73,8 @@ class AIOrchestrator:
         
         # Check for recovery needed
         self._check_and_recover()
+        
+        logger.info(f"AI Orchestrator initialized with MoE ({len(self.expert_pool.get_active_experts())} experts)")
         
     def _load_state(self) -> None:
         """Load orchestrator state from disk."""
@@ -125,6 +137,14 @@ class AIOrchestrator:
         Returns:
             True if AI model is trained and ready.
         """
+        # Check if MoE has any trained experts
+        if self._use_moe:
+            active_experts = self.expert_pool.get_active_experts()
+            trained_experts = [e for e in active_experts if e._model is not None]
+            if trained_experts:
+                return True
+        
+        # Fallback to legacy trainer
         return self.trainer.has_trained_model()
     
     def get_model_info(self) -> Optional[dict]:
@@ -136,22 +156,33 @@ class AIOrchestrator:
         return self.trainer.get_model_info()
     
     def get_training_stats(self) -> dict:
-        """Get training statistics.
+        """Get training statistics including MoE info.
         
         Returns:
             Dictionary of stats.
         """
         collector_stats = self.collector.get_stats()
         model_info = self.trainer.get_model_info()
+        moe_stats = self.expert_pool.get_stats()
         
         return {
             "collector": collector_stats,
             "model": model_info,
+            "moe": moe_stats,
             "is_ready": self.is_ai_ready(),
             "is_training": self.trainer.is_training(),
             "last_training": self._last_training_time.isoformat() if self._last_training_time else None,
             "can_train": self.trainer.can_train(collector_stats.get("labeled_examples", 0)),
+            "use_moe": self._use_moe,
         }
+    
+    def get_moe_stats(self) -> dict:
+        """Get Mixture of Experts statistics.
+        
+        Returns:
+            Dictionary of MoE stats.
+        """
+        return self.expert_pool.get_stats()
     
     def should_train(self) -> bool:
         """Check if we should start training.
@@ -536,7 +567,7 @@ class AIOrchestrator:
         self.collector.label_examples()
     
     def run_training(self) -> bool:
-        """Run the training process.
+        """Run the training process for both MoE and legacy systems.
         
         Returns:
             True if new model was deployed.
@@ -554,20 +585,42 @@ class AIOrchestrator:
                 f"Not enough training data: {len(training_data)} < {self.settings.ai_min_training_examples}"
             )
             return False
+        
+        moe_result = None
+        legacy_result = None
+        
+        # === MIXTURE OF EXPERTS TRAINING ===
+        # This is the primary training system
+        try:
+            logger.info("=" * 60)
+            logger.info("TRAINING MIXTURE OF EXPERTS")
+            logger.info("=" * 60)
             
-        # Train model
-        result = self.trainer.train_model(training_data)
+            moe_result = self.moe_trainer.train()
+            
+            if moe_result and moe_result.get("success"):
+                logger.info(
+                    f"MoE training complete: "
+                    f"{moe_result.get('n_experts_trained', 0)} experts, "
+                    f"{moe_result.get('training_time_seconds', 0):.1f}s"
+                )
+        except Exception as e:
+            logger.error(f"MoE training failed: {e}", exc_info=True)
+        
+        # === LEGACY SINGLE MODEL TRAINING ===
+        # Keep as fallback
+        try:
+            legacy_result = self.trainer.train_model(training_data)
+            
+            if legacy_result:
+                logger.info(f"Legacy model v{legacy_result.version} deployed (fallback)")
+        except Exception as e:
+            logger.warning(f"Legacy training failed: {e}")
         
         self._last_training_time = datetime.utcnow()
         self._save_state()
         
-        if result:
-            logger.info(f"New AI model v{result.version} deployed with score {result.metrics.score():.3f}")
-        else:
-            logger.info("Training completed but model not deployed (not better than current)")
-        
         # === CATEGORY RE-EVALUATION ===
-        # Check if any avoided categories have improved and should be re-enabled
         try:
             category_summary = self.category_tracker.get_performance_summary()
             avoided = category_summary.get("avoided_categories", [])
@@ -583,10 +636,10 @@ class AIOrchestrator:
         except Exception as e:
             logger.warning(f"Category re-evaluation failed: {e}")
         
-        return result is not None
+        return moe_result is not None or legacy_result is not None
     
-    def predict(self, features: dict) -> Optional[tuple]:
-        """Make a prediction using the AI model.
+    def predict(self, features: dict) -> Optional[Tuple[float, float]]:
+        """Make a prediction using the MoE system.
         
         Args:
             features: Feature dictionary.
@@ -596,6 +649,29 @@ class AIOrchestrator:
         """
         if not self.is_ai_ready():
             return None
+        
+        # === USE MIXTURE OF EXPERTS ===
+        if self._use_moe:
+            result = self.expert_pool.predict(features)
+            if result is not None:
+                prediction, confidence, best_expert = result
+                
+                # Convert binary prediction to edge-like value
+                # 1.0 = strongly profitable, 0.0 = not profitable
+                # Map to: positive = bullish, near-zero = neutral
+                if prediction > 0.5:
+                    # Profitable prediction - determine direction from momentum
+                    momentum = features.get("momentum_24h", 0)
+                    if momentum >= 0:
+                        edge = (prediction - 0.5) * 2 * confidence  # 0 to 1
+                    else:
+                        edge = -(prediction - 0.5) * 2 * confidence  # -1 to 0
+                else:
+                    edge = 0  # Not profitable, no signal
+                
+                return (edge, confidence)
+        
+        # Fallback to legacy trainer
         return self.trainer.predict(features)
     
     def get_ai_signal(
@@ -606,7 +682,7 @@ class AIOrchestrator:
         price: float,
         features: dict,
     ) -> Optional[dict]:
-        """Get an AI trading signal with category-based confidence adjustment.
+        """Get an AI trading signal using Mixture of Experts.
 
         Args:
             token_id: Token ID.
@@ -616,22 +692,38 @@ class AIOrchestrator:
             features: Feature dictionary.
 
         Returns:
-            Signal dict with side, edge, confidence, category info, or None.
+            Signal dict with side, edge, confidence, expert info, or None.
         """
-        result = self.predict(features)
-
-        if result is None:
-            return None
-
-        # Handle both old (float) and new (tuple) return types
-        if isinstance(result, tuple):
-            prediction, model_confidence = result
+        # === MIXTURE OF EXPERTS PREDICTION ===
+        best_expert_id = None
+        
+        if self._use_moe:
+            moe_result = self.expert_pool.predict(features)
+            if moe_result is not None:
+                prediction, model_confidence, best_expert_id = moe_result
+                
+                # Convert binary prediction to edge
+                if prediction > 0.5:
+                    momentum = features.get("momentum_24h", 0)
+                    if momentum >= 0:
+                        edge = (prediction - 0.5) * 2 * model_confidence
+                    else:
+                        edge = -(prediction - 0.5) * 2 * model_confidence
+                else:
+                    edge = 0
+            else:
+                # Fall back to legacy
+                result = self.predict(features)
+                if result is None:
+                    return None
+                edge, model_confidence = result if isinstance(result, tuple) else (result, 0.5)
         else:
-            prediction = result
-            model_confidence = 0.5  # Default for old models
+            result = self.predict(features)
+            if result is None:
+                return None
+            edge, model_confidence = result if isinstance(result, tuple) else (result, 0.5)
 
         # === CATEGORY TRACKING ===
-        # Categorize the market
         category, category_confidence = self.category_tracker.categorize_market(
             market_id=market_id,
             title=market_title,
@@ -646,15 +738,11 @@ class AIOrchestrator:
         # Get category confidence multiplier
         category_multiplier = self.category_tracker.get_confidence_multiplier(category)
 
-        # Convert prediction to signal
-        edge = prediction
-
         # === CONFIDENCE THRESHOLD ===
-        # Only trade when model is confident enough (60%+)
         CONFIDENCE_THRESHOLD = 0.60
         if model_confidence < CONFIDENCE_THRESHOLD:
             logger.debug(
-                f"Skipping {market_id[:12]} - low model confidence "
+                f"Skipping {market_id[:12]} - low confidence "
                 f"({model_confidence:.1%} < {CONFIDENCE_THRESHOLD:.0%})"
             )
             return None
@@ -667,19 +755,19 @@ class AIOrchestrator:
         # Determine side
         side = "BUY" if edge > 0 else "SELL"
         
-        # Base confidence now comes from the model
-        base_confidence = model_confidence
-        
         # Apply category confidence adjustment
-        adjusted_confidence = base_confidence * category_multiplier
+        adjusted_confidence = model_confidence * category_multiplier
         
         # If adjusted confidence is too low, skip
         if adjusted_confidence < 0.3:
             logger.debug(
                 f"Skipping {market_id[:12]} - low category confidence "
-                f"(base={base_confidence:.2f}, mult={category_multiplier:.2f})"
+                f"(base={model_confidence:.2f}, mult={category_multiplier:.2f})"
             )
             return None
+        
+        # Get model version info
+        model_info = self.trainer.get_model_info()
         
         return {
             "token_id": token_id,
@@ -687,11 +775,12 @@ class AIOrchestrator:
             "side": side,
             "edge": edge,
             "confidence": adjusted_confidence,
-            "base_confidence": base_confidence,
+            "base_confidence": model_confidence,
             "category": category,
             "category_multiplier": category_multiplier,
-            "source": "ai_model",
-            "model_version": self.trainer.get_model_info().get("version") if self.trainer.get_model_info() else None,
+            "source": "moe" if self._use_moe and best_expert_id else "ai_model",
+            "best_expert": best_expert_id,
+            "model_version": model_info.get("version") if model_info else None,
         }
     
     def record_prediction_outcome(

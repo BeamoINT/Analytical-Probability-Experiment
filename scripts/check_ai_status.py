@@ -653,6 +653,100 @@ def get_config_status():
     return result
 
 
+def get_moe_status():
+    """Get Mixture of Experts status."""
+    result = {
+        "has_moe": False,
+        "total_experts": 0,
+        "active_experts": 0,
+        "deprecated_experts": 0,
+        "total_profit_pct": 0.0,
+        "total_trades": 0,
+        "experts": [],
+        "deprecated": [],
+        "gating": None,
+        "best_expert": None,
+        "candidates": [],
+    }
+    
+    pool_state_path = "data/moe_models/pool_state.json"
+    if os.path.exists(pool_state_path):
+        result["has_moe"] = True
+        try:
+            with open(pool_state_path, "r") as f:
+                pool_data = json.load(f)
+            
+            state = pool_data.get("state", {})
+            expert_ids = pool_data.get("expert_ids", [])
+            
+            result["total_experts"] = len(expert_ids)
+            result["total_profit_pct"] = state.get("total_profit_pct", 0)
+            result["total_trades"] = state.get("total_trades", 0)
+            result["best_expert_id"] = state.get("best_expert_id")
+            result["last_training"] = state.get("last_training")
+            result["training_cycles"] = state.get("total_training_cycles", 0)
+            
+            # Load individual expert data
+            experts_dir = "data/moe_models/experts"
+            for expert_id in expert_ids:
+                meta_path = os.path.join(experts_dir, f"{expert_id}.meta.pkl")
+                if os.path.exists(meta_path):
+                    try:
+                        import pickle
+                        with open(meta_path, "rb") as f:
+                            expert_data = pickle.load(f)
+                        
+                        metrics = expert_data.get("metrics", {})
+                        expert_info = {
+                            "expert_id": expert_id,
+                            "domain": expert_data.get("domain", expert_id),
+                            "expert_type": expert_data.get("expert_type", "unknown"),
+                            "is_active": expert_data.get("is_active", True),
+                            "is_deprecated": expert_data.get("is_deprecated", False),
+                            "profit_pct": metrics.get("simulated_profit_pct", 0),
+                            "num_trades": metrics.get("simulated_num_trades", 0),
+                            "win_rate": metrics.get("simulated_win_rate", 0),
+                            "profit_factor": metrics.get("simulated_profit_factor", 0),
+                            "sharpe": metrics.get("simulated_sharpe", 0),
+                        }
+                        
+                        if expert_info["is_deprecated"]:
+                            result["deprecated"].append(expert_info)
+                            result["deprecated_experts"] += 1
+                        elif expert_info["is_active"]:
+                            result["experts"].append(expert_info)
+                            result["active_experts"] += 1
+                    except Exception as e:
+                        pass
+            
+            # Sort experts by profit
+            result["experts"].sort(key=lambda x: x["profit_pct"], reverse=True)
+            
+            # Find best expert
+            if result["experts"]:
+                result["best_expert"] = result["experts"][0]
+            
+            # Load gating info
+            gating_meta_path = "data/moe_models/gating.meta.pkl"
+            if os.path.exists(gating_meta_path):
+                try:
+                    import pickle
+                    with open(gating_meta_path, "rb") as f:
+                        gating_data = pickle.load(f)
+                    result["gating"] = {
+                        "n_experts": len(gating_data.get("expert_ids", [])),
+                        "routing_accuracy": gating_data.get("metrics", {}).get("routing_accuracy", 0),
+                        "profit_vs_random": gating_data.get("metrics", {}).get("profit_vs_random", 0),
+                    }
+                except:
+                    pass
+                    
+        except Exception as e:
+            result["error"] = str(e)
+    
+    return result
+
+
 def get_orchestrator_status():
     """Get AI orchestrator status (training schedule)."""
     result = {
@@ -843,6 +937,71 @@ def main():
     print(f"   Price History:    {ai['price_points']:,}")
     if ai.get("db_error"):
         print(f"   ⚠️  DB Error:      {ai['db_error']}")
+    
+    # ==========================================
+    # MIXTURE OF EXPERTS STATUS
+    # ==========================================
+    moe = get_moe_status()
+    if moe["has_moe"]:
+        print(f"\n🧠 MIXTURE OF EXPERTS:")
+        print(f"   Active Experts:   {moe['active_experts']} / {moe['total_experts']}")
+        
+        if moe["training_cycles"] > 0:
+            print(f"   Training Cycles:  {moe['training_cycles']}")
+            if moe.get("last_training"):
+                print(f"   Last Training:    {format_time_ago(moe['last_training'])}")
+        
+        # Show top performing experts
+        if moe["experts"]:
+            print(f"\n   TOP PERFORMERS (by profit):")
+            for expert in moe["experts"][:5]:
+                profit = expert["profit_pct"]
+                trades = expert["num_trades"]
+                win_rate = expert["win_rate"]
+                pf = expert["profit_factor"]
+                
+                if trades == 0:
+                    status = "⏳"
+                    detail = "not trained"
+                elif profit > 0.05:
+                    status = "✅"
+                    detail = f"{profit:+.1%}, {trades} trades, {win_rate:.0%} win"
+                elif profit > 0:
+                    status = "🟢"
+                    detail = f"{profit:+.1%}, {trades} trades, {win_rate:.0%} win"
+                elif profit > -0.05:
+                    status = "🟡"
+                    detail = f"{profit:+.1%}, {trades} trades, {win_rate:.0%} win"
+                else:
+                    status = "❌"
+                    detail = f"{profit:+.1%}, {trades} trades, {win_rate:.0%} win"
+                
+                domain = expert["domain"]
+                print(f"   {status} {domain}: {detail}")
+        
+        # Show deprecated experts
+        if moe["deprecated"]:
+            print(f"\n   DEPRECATED EXPERTS ({len(moe['deprecated'])}):")
+            for expert in moe["deprecated"][:3]:
+                print(f"   ❌ {expert['domain']}: {expert['profit_pct']:+.1%}")
+        
+        # Gating network info
+        if moe.get("gating"):
+            gating = moe["gating"]
+            routing_acc = gating.get("routing_accuracy", 0)
+            profit_vs_random = gating.get("profit_vs_random", 0)
+            
+            print(f"\n   GATING NETWORK:")
+            if routing_acc > 0:
+                acc_icon = "✅" if routing_acc > 0.7 else "🟡" if routing_acc > 0.5 else "❌"
+                print(f"   Routing Accuracy: {acc_icon} {routing_acc:.1%}")
+                print(f"   vs Random:        {profit_vs_random:+.2%}")
+            else:
+                print(f"   Status:           ⏳ Not trained yet")
+    else:
+        print(f"\n🧠 MIXTURE OF EXPERTS:")
+        print(f"   Status:           ⏳ Initializing...")
+        print(f"   (Will be created on first training run)")
     
     # Category Performance
     categories = get_category_stats()
