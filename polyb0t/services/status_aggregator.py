@@ -481,12 +481,21 @@ class StatusAggregator:
         status = ArbitrageStatus()
         
         try:
+            # First check settings to see if arbitrage is enabled
+            from polyb0t.config.settings import get_settings
+            settings = get_settings()
+            status.is_enabled = settings.enable_arbitrage_scanner
+            
+            # Then check state file for stats
             arb_path = DATA_DIR / "arbitrage_state.json"
             if arb_path.exists():
                 with open(arb_path, "r") as f:
                     arb = json.load(f)
                 
-                status.is_enabled = not arb.get("is_disabled", False)
+                # If disabled in state file, override
+                if arb.get("is_disabled", False):
+                    status.is_enabled = False
+                    
                 stats = arb.get("stats", {})
                 status.total_trades = stats.get("total_trades", 0)
                 status.win_rate = stats.get("win_rate", 0)
