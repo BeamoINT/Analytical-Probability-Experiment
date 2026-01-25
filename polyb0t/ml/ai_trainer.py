@@ -799,10 +799,16 @@ class AITrainer:
         # ========================================
         # PROFITABILITY SIMULATION - THE KEY METRIC
         # ========================================
-        # Simulate trading: when model says "profitable" with high confidence, we trade
-        # P&L is based on actual price changes (y_reg), not binary classification
+        # Simulate trading with REALISTIC position sizing
+        # Each trade risks a fixed % of portfolio (like real trading)
         
-        trade_results = []
+        POSITION_SIZE = 0.05  # 5% of portfolio per trade
+        
+        portfolio = 1.0  # Start with $1 (100%)
+        peak_portfolio = 1.0
+        max_drawdown = 0.0
+        
+        trade_returns = []  # Returns on each trade (for Sharpe)
         wins = []
         losses = []
         
@@ -813,19 +819,32 @@ class AITrainer:
             if predictions[i] == 1:  # Model says "this trade will be profitable"
                 # We BUY - profit is actual price change minus spread
                 actual_change = y_reg[i] if i < len(y_reg) else 0
-                trade_pnl = actual_change - SPREAD_COST
-            else:  # Model says "this trade will NOT be profitable" - we could short or skip
-                # For now, we skip unprofitable predictions (conservative)
-                continue
-            
-            trade_results.append(trade_pnl)
-            if trade_pnl > 0:
-                wins.append(trade_pnl)
+                trade_return = actual_change - SPREAD_COST
+                
+                # Apply position sizing: we risk 5% of portfolio
+                # If trade returns +10%, we make 0.5% on portfolio (5% * 10%)
+                portfolio_return = POSITION_SIZE * trade_return
+                
+                portfolio = portfolio * (1 + portfolio_return)
+                trade_returns.append(portfolio_return)
+                
+                if portfolio_return > 0:
+                    wins.append(portfolio_return)
+                else:
+                    losses.append(portfolio_return)
+                
+                # Track drawdown
+                if portfolio > peak_portfolio:
+                    peak_portfolio = portfolio
+                current_dd = (peak_portfolio - portfolio) / peak_portfolio
+                if current_dd > max_drawdown:
+                    max_drawdown = current_dd
             else:
-                losses.append(trade_pnl)
+                # Skip unprofitable predictions
+                continue
         
         # Calculate simulation metrics
-        num_trades = len(trade_results)
+        num_trades = len(trade_returns)
         
         if num_trades == 0:
             return ModelMetrics(
@@ -838,42 +857,37 @@ class AITrainer:
                 simulated_num_trades=0,
             )
         
-        # Total P&L
-        total_profit = sum(trade_results)
+        # Total P&L as percentage gain/loss on portfolio
+        total_profit = portfolio - 1.0  # e.g., 0.15 = +15% gain
         
         # Win rate
         win_rate = len(wins) / num_trades if num_trades > 0 else 0
         
-        # Average win/loss
+        # Average win/loss (as portfolio %)
         avg_win = np.mean(wins) if wins else 0
-        avg_loss = np.mean(losses) if losses else 0  # Will be negative
+        avg_loss = np.mean(losses) if losses else 0
         
-        # Profit factor (gross profit / abs(gross loss))
+        # Profit factor
         gross_profit = sum(wins) if wins else 0
-        gross_loss = abs(sum(losses)) if losses else 0.001  # Avoid div by 0
+        gross_loss = abs(sum(losses)) if losses else 0.001
         profit_factor = gross_profit / gross_loss if gross_loss > 0 else 10.0
         
-        # Max drawdown
-        cumulative = np.cumsum(trade_results)
-        running_max = np.maximum.accumulate(cumulative)
-        drawdowns = running_max - cumulative
-        max_drawdown = float(np.max(drawdowns)) if len(drawdowns) > 0 else 0
-        
-        # Sharpe ratio (annualized, assuming ~250 trading days)
-        if len(trade_results) > 1:
-            returns_std = np.std(trade_results)
+        # Sharpe ratio (annualized)
+        if len(trade_returns) > 1:
+            returns_std = np.std(trade_returns)
             if returns_std > 0:
-                daily_sharpe = np.mean(trade_results) / returns_std
-                sharpe = daily_sharpe * np.sqrt(250)  # Annualized
+                # Assume ~4 trades per day average
+                trades_per_year = num_trades * (365 / 7)  # Scale to annual
+                sharpe = (np.mean(trade_returns) / returns_std) * np.sqrt(trades_per_year)
             else:
                 sharpe = 0
         else:
             sharpe = 0
         
         logger.info(
-            f"SIMULATION: {num_trades} trades, profit={total_profit:.2%}, "
+            f"SIMULATION: {num_trades} trades, profit={total_profit:+.1%}, "
             f"win_rate={win_rate:.1%}, profit_factor={profit_factor:.2f}, "
-            f"sharpe={sharpe:.2f}, max_dd={max_drawdown:.2%}"
+            f"sharpe={sharpe:.2f}, max_dd={max_drawdown:.1%}"
         )
         
         return ModelMetrics(
