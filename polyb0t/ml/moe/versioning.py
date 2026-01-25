@@ -204,7 +204,7 @@ class ExpertVersionManager:
         """Update the current version's metrics after retraining."""
         if not self.versions:
             # No versions yet - create the first one
-            self.create_version(metrics)
+            self.create_new_version(metrics)
             return
         
         current = self.versions[-1]
