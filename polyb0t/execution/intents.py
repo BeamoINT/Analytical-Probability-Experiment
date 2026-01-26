@@ -229,7 +229,7 @@ class IntentManager:
             True if commit succeeded, False if rollback occurred.
         """
         try:
-            self._safe_commit()
+            self.db_session.commit()
             return True
         except Exception as e:
             logger.error(f"Database commit failed, rolling back: {e}")
