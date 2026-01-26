@@ -21,7 +21,7 @@ SYSTEM_PROMPT = """You summarize trading bot updates in 2-3 sentences. Be concis
 class NotificationSummarizer:
     """Uses GPT to create human-readable summaries of bot events."""
     
-    MODEL = "gpt-4o-mini"  # Use mini for cost efficiency
+    MODEL = "gpt-5.2"  # Using GPT-5.2 for best quality
     MAX_TOKENS = 100  # Short summaries only
     TEMPERATURE = 0.5  # More focused responses
     
