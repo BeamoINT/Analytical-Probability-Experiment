@@ -2059,12 +2059,20 @@ class TradingScheduler:
         try:
             mode = "LIVE" if self.settings.placing_orders else "DATA_COLLECTION"
             
-            # Get AI stats for balance display
+            # Get actual USDC balance
             balance = 0.0
-            if self.ai_orchestrator:
-                stats = self.ai_orchestrator.get_training_stats()
-                examples = stats.get("collector", {}).get("total_examples", 0)
-                balance = examples  # Show training examples as "balance" for now
+            try:
+                from polyb0t.services.balance import BalanceService
+                from polyb0t.data.storage import get_session
+                db_session = get_session()
+                balance_svc = BalanceService(db_session)
+                snap = balance_svc.fetch_usdc_balance()
+                balance = snap.total_usdc
+                balance_svc.close()
+                db_session.close()
+            except Exception as e:
+                logger.debug(f"Could not fetch balance: {e}")
+                # Fallback to 0
             
             await self.discord_notifier.send_startup_notification(
                 mode=mode,
@@ -2097,22 +2105,35 @@ class TradingScheduler:
             return
         
         try:
+            # Get actual USDC balance
+            portfolio_value = 0.0
+            try:
+                from polyb0t.services.balance import BalanceService
+                from polyb0t.data.storage import get_session
+                db_session = get_session()
+                balance_svc = BalanceService(db_session)
+                snap = balance_svc.fetch_usdc_balance()
+                portfolio_value = snap.total_usdc
+                balance_svc.close()
+                db_session.close()
+            except Exception as e:
+                logger.debug(f"Could not fetch balance for hourly: {e}")
+            
             # Get AI stats
             ai_status = {}
-            portfolio_value = 0.0
+            active_positions = 0
             if self.ai_orchestrator:
                 stats = self.ai_orchestrator.get_training_stats()
                 ai_status = {
                     "active_experts": stats.get("moe", {}).get("active_experts", 0),
                     "training_examples": stats.get("collector", {}).get("total_examples", 0),
                 }
-                portfolio_value = float(stats.get("collector", {}).get("total_examples", 0))
             
             await self.discord_notifier.send_hourly_summary(
                 portfolio_value=portfolio_value,
                 unrealized_pnl=0.0,
                 trades_this_hour=0,
-                active_positions=0,
+                active_positions=active_positions,
                 ai_status=ai_status,
             )
             logger.info("Discord hourly summary sent")
@@ -2125,15 +2146,23 @@ class TradingScheduler:
             return
         
         try:
-            # Get AI stats for report
-            examples = 0
-            if self.ai_orchestrator:
-                stats = self.ai_orchestrator.get_training_stats()
-                examples = stats.get("collector", {}).get("total_examples", 0)
+            # Get actual USDC balance
+            balance = 0.0
+            try:
+                from polyb0t.services.balance import BalanceService
+                from polyb0t.data.storage import get_session
+                db_session = get_session()
+                balance_svc = BalanceService(db_session)
+                snap = balance_svc.fetch_usdc_balance()
+                balance = snap.total_usdc
+                balance_svc.close()
+                db_session.close()
+            except Exception as e:
+                logger.debug(f"Could not fetch balance for daily: {e}")
             
             await self.discord_notifier.send_daily_report(
-                starting_balance=float(examples),
-                ending_balance=float(examples),
+                starting_balance=balance,
+                ending_balance=balance,
                 total_trades=0,
                 win_rate=0.0,
                 best_trade=0.0,
