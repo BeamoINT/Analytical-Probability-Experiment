@@ -2057,6 +2057,19 @@ class TradingScheduler:
             return
         
         try:
+            # Rate limit: don't send if one was sent in the last 5 minutes
+            # This prevents spam when the bot restarts frequently
+            import os
+            startup_marker = "/tmp/polybot_startup_sent"
+            if os.path.exists(startup_marker):
+                try:
+                    mtime = os.path.getmtime(startup_marker)
+                    if time.time() - mtime < 300:  # 5 minutes
+                        logger.info("Skipping startup notification (sent recently)")
+                        return
+                except Exception:
+                    pass
+            
             mode = "LIVE" if self.settings.placing_orders else "DATA_COLLECTION"
             
             # Get actual USDC balance
@@ -2078,6 +2091,14 @@ class TradingScheduler:
                 mode=mode,
                 balance=balance,
             )
+            
+            # Mark that we sent a notification
+            try:
+                with open(startup_marker, "w") as f:
+                    f.write(str(time.time()))
+            except Exception:
+                pass
+            
             logger.info("Discord startup notification sent")
         except Exception as e:
             logger.warning(f"Failed to send Discord startup notification: {e}")
