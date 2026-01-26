@@ -222,6 +222,9 @@ class MoETrainer:
             logger.info(f"  New experts created: {len(new_experts)}")
             logger.info("=" * 60)
             
+            # Send Discord notification
+            self._send_training_discord_notification(results)
+            
             return results
             
         except Exception as e:
@@ -640,6 +643,68 @@ class MoETrainer:
         )
         
         return cross_features
+    
+    def _send_training_discord_notification(self, results: Dict[str, Any]) -> None:
+        """Send Discord notification with training results."""
+        try:
+            import asyncio
+            from polyb0t.services.discord_notifier import get_discord_notifier
+            
+            notifier = get_discord_notifier()
+            if not notifier.enabled:
+                return
+            
+            # Get expert performance summary
+            expert_perfs = []
+            for expert in self.pool.experts.values():
+                if expert.is_active:
+                    profit = expert.metrics.simulated_profit_pct if expert.metrics else 0
+                    expert_perfs.append((expert.expert_id, profit))
+            
+            # Sort by profit
+            expert_perfs.sort(key=lambda x: x[1], reverse=True)
+            
+            # Build embed
+            from polyb0t.services.discord_notifier import DiscordEmbed, COLOR_TRAINING
+            
+            fields = [
+                {"name": "Training Time", "value": f"{results.get('training_time_seconds', 0):.1f}s", "inline": True},
+                {"name": "Samples", "value": f"{results.get('n_samples', 0):,}", "inline": True},
+                {"name": "Experts Trained", "value": str(results.get('n_experts_trained', 0)), "inline": True},
+                {"name": "Active", "value": str(results.get('n_active', 0)), "inline": True},
+                {"name": "Suspended", "value": str(results.get('n_suspended', 0)), "inline": True},
+                {"name": "Deprecated", "value": str(results.get('n_deprecated', 0)), "inline": True},
+            ]
+            
+            # Add top 3 experts
+            if expert_perfs:
+                top_3 = expert_perfs[:3]
+                top_str = "\n".join([f"{e[0]}: {e[1]:+.1%}" for e in top_3])
+                fields.append({"name": "Top Experts", "value": f"```{top_str}```", "inline": False})
+            
+            embed = DiscordEmbed(
+                title="🎓 MoE Training Complete",
+                color=COLOR_TRAINING,
+                fields=fields,
+            )
+            
+            # Send async
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.create_task(notifier.send(embed))
+                else:
+                    loop.run_until_complete(notifier.send(embed))
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(notifier.send(embed))
+                loop.close()
+                
+            logger.info("Discord training notification sent")
+            
+        except Exception as e:
+            logger.debug(f"Failed to send Discord training notification: {e}")
 
 
 # Singleton instance
