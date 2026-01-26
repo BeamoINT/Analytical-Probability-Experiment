@@ -97,10 +97,33 @@ class DiscordNotifier:
         self._error_count = 0
         self._max_errors = 10  # Disable after too many errors
         
+        # GPT summarizer (lazy loaded)
+        self._summarizer = None
+        
         if self.enabled:
             logger.info("Discord notifier initialized")
         else:
             logger.info("Discord notifier disabled (no webhook URL)")
+    
+    def _get_summarizer(self):
+        """Lazy load the GPT summarizer."""
+        if self._summarizer is None:
+            try:
+                from polyb0t.services.notification_summarizer import get_notification_summarizer
+                self._summarizer = get_notification_summarizer()
+            except Exception as e:
+                logger.debug(f"Could not load summarizer: {e}")
+        return self._summarizer
+    
+    async def _get_summary(self, event_type: str, data: Dict[str, Any]) -> Optional[str]:
+        """Get GPT summary for an event."""
+        summarizer = self._get_summarizer()
+        if summarizer and summarizer.enabled:
+            try:
+                return await summarizer.summarize(event_type, data)
+            except Exception as e:
+                logger.debug(f"Summary failed: {e}")
+        return None
     
     async def send(self, embed: DiscordEmbed, username: str = "Polybot") -> bool:
         """Send an embed message to Discord.
@@ -170,6 +193,26 @@ class DiscordNotifier:
         # Direction emoji
         direction = "📈" if outcome.profit_pct > 0 else "📉"
         
+        # Get top expert
+        top_expert = ""
+        if outcome.expert_predictions:
+            top_expert = max(outcome.expert_predictions.keys(), 
+                           key=lambda k: outcome.expert_weights.get(k, 0))
+        
+        # Get GPT summary
+        trade_data = {
+            "market_title": outcome.market_title,
+            "side": outcome.side,
+            "entry_price": outcome.entry_price,
+            "exit_price": outcome.exit_price,
+            "profit_pct": outcome.profit_pct,
+            "profit_usd": outcome.profit_usd,
+            "hold_time_hours": outcome.hold_time_hours,
+            "prediction_confidence": outcome.prediction_confidence,
+            "top_expert": top_expert,
+        }
+        summary = await self._get_summary("trade", trade_data)
+        
         fields = [
             {"name": "Market", "value": outcome.market_title[:50] or outcome.token_id[:16], "inline": False},
             {"name": "Side", "value": outcome.side, "inline": True},
@@ -180,9 +223,7 @@ class DiscordNotifier:
             {"name": "Hold Time", "value": f"{outcome.hold_time_hours:.1f}h", "inline": True},
         ]
         
-        if outcome.expert_predictions:
-            top_expert = max(outcome.expert_predictions.keys(), 
-                           key=lambda k: outcome.expert_weights.get(k, 0))
+        if top_expert:
             fields.append({
                 "name": "Top Expert", 
                 "value": top_expert, 
@@ -191,6 +232,7 @@ class DiscordNotifier:
         
         embed = DiscordEmbed(
             title=f"{direction} Trade Closed",
+            description=summary or "",
             color=color,
             fields=fields,
             footer=f"Confidence: {outcome.prediction_confidence:.1%}",
@@ -209,6 +251,18 @@ class DiscordNotifier:
         
         direction = "🐋📈" if whale_event.is_buy else "🐋📉"
         
+        # Get GPT summary
+        whale_data = {
+            "asset_id": whale_event.asset_id,
+            "side": whale_event.side,
+            "value_usd": whale_event.value_usd,
+            "price": whale_event.price,
+            "size": whale_event.size,
+            "pct_of_volume": getattr(whale_event, 'pct_of_volume', 0) or 0,
+            "is_buy": whale_event.is_buy,
+        }
+        summary = await self._get_summary("whale", whale_data)
+        
         fields = [
             {"name": "Asset", "value": whale_event.asset_id[:20] + "...", "inline": True},
             {"name": "Side", "value": whale_event.side, "inline": True},
@@ -226,6 +280,7 @@ class DiscordNotifier:
         
         embed = DiscordEmbed(
             title=f"{direction} Whale Detected",
+            description=summary or "",
             color=COLOR_WHALE,
             fields=fields,
         )
@@ -254,11 +309,25 @@ class DiscordNotifier:
             color = COLOR_INFO
             emoji = "ℹ️"
         
+        # Get GPT summary
+        state_data = {
+            "expert_id": expert_id,
+            "old_state": old_state,
+            "new_state": new_state,
+            "profit_pct": profit_pct,
+        }
+        summary = await self._get_summary("expert_state", state_data)
+        
+        # Combine summary with state transition
+        description = summary or f"**{expert_id}**: {old_state} → {new_state}"
+        
         embed = DiscordEmbed(
             title=f"{emoji} Expert State Change",
-            description=f"**{expert_id}**: {old_state} → {new_state}",
+            description=description,
             color=color,
             fields=[
+                {"name": "Expert", "value": expert_id, "inline": True},
+                {"name": "Transition", "value": f"{old_state} → {new_state}", "inline": True},
                 {"name": "Profit", "value": f"{profit_pct:+.1%}", "inline": True},
             ],
         )
@@ -270,16 +339,41 @@ class DiscordNotifier:
         num_experts: int,
         training_time: float,
         active_count: int,
+        training_data: Optional[Dict[str, Any]] = None,
     ) -> bool:
-        """Send training completion notification."""
+        """Send training completion notification.
+        
+        Args:
+            num_experts: Number of experts trained
+            training_time: Training time in seconds
+            active_count: Number of active experts
+            training_data: Optional full training results for GPT summary
+        """
+        # Get GPT summary if we have full training data
+        summary = None
+        if training_data:
+            summary = await self._get_summary("training", training_data)
+        
+        fields = [
+            {"name": "Experts Trained", "value": str(num_experts), "inline": True},
+            {"name": "Active Experts", "value": str(active_count), "inline": True},
+            {"name": "Training Time", "value": f"{training_time:.1f}s", "inline": True},
+        ]
+        
+        # Add more fields if we have full data
+        if training_data:
+            if training_data.get("n_samples"):
+                fields.append({"name": "Samples", "value": f"{training_data['n_samples']:,}", "inline": True})
+            if training_data.get("n_suspended"):
+                fields.append({"name": "Suspended", "value": str(training_data["n_suspended"]), "inline": True})
+            if training_data.get("n_deprecated"):
+                fields.append({"name": "Deprecated", "value": str(training_data["n_deprecated"]), "inline": True})
+        
         embed = DiscordEmbed(
             title="🎓 Training Complete",
+            description=summary or "",
             color=COLOR_TRAINING,
-            fields=[
-                {"name": "Experts Trained", "value": str(num_experts), "inline": True},
-                {"name": "Active Experts", "value": str(active_count), "inline": True},
-                {"name": "Training Time", "value": f"{training_time:.1f}s", "inline": True},
-            ],
+            fields=fields,
         )
         
         return await self.send(embed)
@@ -329,6 +423,16 @@ class DiscordNotifier:
         
         pnl_emoji = "📈" if unrealized_pnl >= 0 else "📉"
         
+        # Get GPT summary
+        hourly_data = {
+            "portfolio_value": portfolio_value,
+            "unrealized_pnl": unrealized_pnl,
+            "trades_this_hour": trades_this_hour,
+            "active_positions": active_positions,
+            "ai_status": ai_status,
+        }
+        summary = await self._get_summary("hourly", hourly_data)
+        
         fields = [
             {"name": "Portfolio Value", "value": f"${portfolio_value:,.2f}", "inline": True},
             {"name": "Unrealized P&L", "value": f"{pnl_emoji} ${unrealized_pnl:+,.2f}", "inline": True},
@@ -340,6 +444,7 @@ class DiscordNotifier:
         
         embed = DiscordEmbed(
             title="📊 Hourly Status",
+            description=summary or "",
             color=COLOR_INFO,
             fields=fields,
         )
@@ -366,6 +471,17 @@ class DiscordNotifier:
         color = COLOR_SUCCESS if daily_pnl >= 0 else COLOR_ERROR
         emoji = "📈" if daily_pnl >= 0 else "📉"
         
+        # Get GPT summary
+        daily_data = {
+            "starting_balance": starting_balance,
+            "ending_balance": ending_balance,
+            "total_trades": total_trades,
+            "win_rate": win_rate,
+            "best_trade": best_trade,
+            "worst_trade": worst_trade,
+        }
+        summary = await self._get_summary("daily", daily_data)
+        
         fields = [
             {"name": "Starting Balance", "value": f"${starting_balance:,.2f}", "inline": True},
             {"name": "Ending Balance", "value": f"${ending_balance:,.2f}", "inline": True},
@@ -391,6 +507,7 @@ class DiscordNotifier:
         
         embed = DiscordEmbed(
             title="📅 Daily Performance Report",
+            description=summary or "",
             color=color,
             fields=fields,
             footer=f"Date: {datetime.utcnow().strftime('%Y-%m-%d')}",

@@ -645,7 +645,7 @@ class MoETrainer:
         return cross_features
     
     def _send_training_discord_notification(self, results: Dict[str, Any]) -> None:
-        """Send Discord notification with training results."""
+        """Send Discord notification with training results and GPT summary."""
         try:
             import asyncio
             from polyb0t.services.discord_notifier import get_discord_notifier
@@ -654,7 +654,7 @@ class MoETrainer:
             if not notifier.enabled:
                 return
             
-            # Get expert performance summary
+            # Get expert performance summary for context
             expert_perfs = []
             for expert in self.pool.experts.values():
                 if expert.is_active:
@@ -664,41 +664,31 @@ class MoETrainer:
             # Sort by profit
             expert_perfs.sort(key=lambda x: x[1], reverse=True)
             
-            # Build embed
-            from polyb0t.services.discord_notifier import DiscordEmbed, COLOR_TRAINING
-            
-            fields = [
-                {"name": "Training Time", "value": f"{results.get('training_time_seconds', 0):.1f}s", "inline": True},
-                {"name": "Samples", "value": f"{results.get('n_samples', 0):,}", "inline": True},
-                {"name": "Experts Trained", "value": str(results.get('n_experts_trained', 0)), "inline": True},
-                {"name": "Active", "value": str(results.get('n_active', 0)), "inline": True},
-                {"name": "Suspended", "value": str(results.get('n_suspended', 0)), "inline": True},
-                {"name": "Deprecated", "value": str(results.get('n_deprecated', 0)), "inline": True},
-            ]
-            
-            # Add top 3 experts
+            # Add top experts to results for GPT context
             if expert_perfs:
                 top_3 = expert_perfs[:3]
-                top_str = "\n".join([f"{e[0]}: {e[1]:+.1%}" for e in top_3])
-                fields.append({"name": "Top Experts", "value": f"```{top_str}```", "inline": False})
+                results["top_experts"] = ", ".join([f"{e[0]} ({e[1]:+.1%})" for e in top_3])
             
-            embed = DiscordEmbed(
-                title="🎓 MoE Training Complete",
-                color=COLOR_TRAINING,
-                fields=fields,
-            )
+            # Use the notify_training_complete method which includes GPT summarization
+            async def send_notification():
+                await notifier.notify_training_complete(
+                    num_experts=results.get("n_experts_trained", 0),
+                    training_time=results.get("training_time_seconds", 0),
+                    active_count=results.get("n_active", 0),
+                    training_data=results,  # Pass full data for GPT summary
+                )
             
             # Send async
             try:
                 loop = asyncio.get_event_loop()
                 if loop.is_running():
-                    asyncio.create_task(notifier.send(embed))
+                    asyncio.create_task(send_notification())
                 else:
-                    loop.run_until_complete(notifier.send(embed))
+                    loop.run_until_complete(send_notification())
             except RuntimeError:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
-                loop.run_until_complete(notifier.send(embed))
+                loop.run_until_complete(send_notification())
                 loop.close()
                 
             logger.info("Discord training notification sent")
