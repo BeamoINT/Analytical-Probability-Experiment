@@ -1,13 +1,13 @@
 """Meta-Controller AI System for Expert Mixing.
 
 The Meta-Controller learns optimal combinations of experts for different
-market types. It uses rules-based hints (e.g., legal expert for legal markets)
-combined with learned supporting experts.
+market types. It uses ensemble predictions from ALL active experts.
 
 Key features:
-- Rules-based primary expert selection
-- Learned supporting expert combinations
-- Mixture performance tracking
+- Ensemble predictions using all active experts (not single routing)
+- Softmax-based weighting using expert performance history
+- Synergy bonuses when expert pairs have positive correlation
+- Confidence based on expert agreement and performance
 - Dynamic weight adjustment based on P&L
 """
 
@@ -416,66 +416,143 @@ class MetaController:
         self,
         features: Dict[str, Any],
         config: Optional[MixtureConfig] = None,
+        use_all_experts: bool = True,  # Always use ensemble by default
+        use_two_stage: bool = True,  # Enable cross-expert awareness
     ) -> Tuple[float, float, Dict[str, Any]]:
-        """Make a prediction using an expert mixture.
+        """Make a prediction using two-stage cross-expert aware ensemble.
+        
+        Two-Stage Prediction:
+        1. Stage 1: Collect independent predictions from all experts
+        2. Compute consensus features (mean, std, agreement, bullish ratio)
+        3. Stage 2: Re-predict with cross-expert awareness features
+        
+        Each expert's weight is based on:
+        - Recent profit performance
+        - Prediction confidence
+        - Expert confidence multiplier
         
         Returns:
             Tuple of (prediction, confidence, metadata)
         """
-        if config is None:
-            config = self.get_mixture_config(features)
-        
         if self.expert_pool is None:
             return 0.5, 0.0, {"error": "No expert pool"}
         
-        # Get predictions from all experts in mixture
+        # Get ALL active experts
+        active_experts = self.expert_pool.get_active_experts()
+        
+        if not active_experts:
+            # Fallback to old routing-based approach
+            if config is None:
+                config = self.get_mixture_config(features)
+            use_all_experts = False
+        
         predictions = {}
         weights = {}
+        expert_scores = {}  # For softmax weighting
+        first_round_predictions = {}  # For two-stage prediction
+        first_round_confidences = {}
         
-        # Primary expert gets highest weight (1.0)
-        primary = self.expert_pool.experts.get(config.primary_expert_id)
-        if primary and primary.is_active:
-            result = primary.predict(features)
-            if result:
-                pred, conf = result
-                predictions[config.primary_expert_id] = pred
-                weights[config.primary_expert_id] = conf * primary.confidence_multiplier
-        
-        # Supporting experts
-        for expert_id, support_weight in config.supporting_experts:
-            expert = self.expert_pool.experts.get(expert_id)
-            if expert and expert.is_active:
+        if use_all_experts:
+            # === STAGE 1: Collect independent predictions from ALL experts ===
+            for expert in active_experts:
                 result = expert.predict(features)
                 if result:
                     pred, conf = result
-                    predictions[expert_id] = pred
-                    # Weight = learned support weight * confidence * expert's confidence multiplier
-                    weights[expert_id] = support_weight * conf * expert.confidence_multiplier
+                    first_round_predictions[expert.expert_id] = pred
+                    first_round_confidences[expert.expert_id] = conf
+            
+            # === COMPUTE CONSENSUS FEATURES ===
+            consensus_features = self._compute_consensus_features(
+                first_round_predictions, first_round_confidences
+            )
+            
+            # === STAGE 2: Re-predict with cross-expert awareness ===
+            if use_two_stage and first_round_predictions:
+                # Enhance features with consensus
+                enhanced_features = {**features, **consensus_features}
+                
+                # Re-predict with cross-expert awareness
+                for expert in active_experts:
+                    result = expert.predict(enhanced_features)
+                    if result:
+                        pred, conf = result
+                        predictions[expert.expert_id] = pred
+                        
+                        # Score = based on profit history + confidence
+                        profit_score = 1.0 + max(-0.5, min(1.0, expert.metrics.simulated_profit_pct))
+                        expert_scores[expert.expert_id] = profit_score * conf * expert.confidence_multiplier
+            else:
+                # Use first-round predictions directly
+                predictions = first_round_predictions
+                for expert_id, pred in predictions.items():
+                    expert = self.expert_pool.experts.get(expert_id)
+                    if expert:
+                        conf = first_round_confidences.get(expert_id, 0.5)
+                        profit_score = 1.0 + max(-0.5, min(1.0, expert.metrics.simulated_profit_pct))
+                        expert_scores[expert_id] = profit_score * conf * expert.confidence_multiplier
+            
+            # Apply softmax to normalize weights
+            if expert_scores:
+                weights = self._softmax_weights(expert_scores)
+        else:
+            # === FALLBACK: Use config-based routing ===
+            if config is None:
+                config = self.get_mixture_config(features)
+                
+            # Primary expert gets highest weight (1.0)
+            primary = self.expert_pool.experts.get(config.primary_expert_id)
+            if primary and primary.is_active:
+                result = primary.predict(features)
+                if result:
+                    pred, conf = result
+                    predictions[config.primary_expert_id] = pred
+                    weights[config.primary_expert_id] = conf * primary.confidence_multiplier
+            
+            # Supporting experts
+            for expert_id, support_weight in config.supporting_experts:
+                expert = self.expert_pool.experts.get(expert_id)
+                if expert and expert.is_active:
+                    result = expert.predict(features)
+                    if result:
+                        pred, conf = result
+                        predictions[expert_id] = pred
+                        weights[expert_id] = support_weight * conf * expert.confidence_multiplier
         
         if not predictions:
-            return 0.5, 0.0, {"error": "No predictions from mixture"}
+            return 0.5, 0.0, {"error": "No predictions from ensemble"}
         
-        # Combine predictions based on strategy
-        if config.combination_strategy == CombinationStrategy.WEIGHTED_AVERAGE:
-            final_pred, final_conf = self._weighted_average(predictions, weights)
-        elif config.combination_strategy == CombinationStrategy.VOTING:
-            final_pred, final_conf = self._voting(predictions, weights)
-        else:
-            final_pred, final_conf = self._weighted_average(predictions, weights)
+        # Combine predictions using weighted average with ensemble confidence
+        final_pred, final_conf = self._weighted_average(predictions, weights)
         
-        # Apply confidence boost
-        final_conf = min(1.0, final_conf * config.confidence_boost)
+        # For ensemble mode, enhance confidence with performance awareness
+        if use_all_experts and self.expert_pool:
+            expert_performances = {}
+            for expert in self.expert_pool.get_active_experts():
+                expert_performances[expert.expert_id] = expert.metrics.simulated_profit_pct
+            
+            enhanced_conf = self._calculate_ensemble_confidence(
+                predictions, weights, expert_performances
+            )
+            final_conf = enhanced_conf
         
         # Record for learning
         mixture_id = f"mix_{self._next_mixture_id}"
         self._next_mixture_id += 1
         
+        # Determine primary expert (highest weight) for history tracking
+        if weights:
+            primary_expert = max(weights.keys(), key=lambda k: weights[k])
+            supporting = [e for e in weights.keys() if e != primary_expert]
+        else:
+            primary_expert = "ensemble"
+            supporting = list(predictions.keys())
+        
         outcome = MixtureOutcome(
             mixture_id=mixture_id,
             timestamp=datetime.utcnow(),
             market_id=features.get("market_id", "unknown"),
-            primary_expert=config.primary_expert_id,
-            supporting_experts=[e for e, _ in config.supporting_experts],
+            primary_expert=primary_expert,
+            supporting_experts=supporting,
             expert_weights=weights,
             prediction=final_pred,
             confidence=final_conf,
@@ -486,14 +563,25 @@ class MetaController:
         if len(self.mixture_history) > 1000:
             self.mixture_history = self.mixture_history[-1000:]
         
+        # Include consensus features in metadata for tracking
+        consensus_info = {}
+        if use_all_experts and first_round_predictions:
+            consensus_info = self._compute_consensus_features(
+                first_round_predictions, first_round_confidences
+            )
+        
         metadata = {
             "mixture_id": mixture_id,
-            "primary_expert": config.primary_expert_id,
-            "supporting_experts": [e for e, _ in config.supporting_experts],
+            "ensemble_mode": use_all_experts,
+            "two_stage": use_two_stage,
+            "num_experts_used": len(predictions),
+            "primary_expert": primary_expert,
+            "supporting_experts": supporting,
             "expert_predictions": predictions,
             "expert_weights": weights,
-            "combination_strategy": config.combination_strategy.value,
-            "confidence_boost": config.confidence_boost,
+            "first_round_predictions": first_round_predictions,
+            "consensus_features": consensus_info,
+            "combination_strategy": "two_stage_ensemble" if (use_all_experts and use_two_stage) else ("ensemble" if use_all_experts else "routed"),
         }
         
         return final_pred, final_conf, metadata
@@ -546,6 +634,164 @@ class MetaController:
         confidence = abs(votes_yes - votes_no) / total
         
         return prediction, confidence
+    
+    def _softmax_weights(
+        self,
+        scores: Dict[str, float],
+        temperature: float = 1.0,
+    ) -> Dict[str, float]:
+        """Apply softmax to convert scores to normalized weights.
+        
+        Args:
+            scores: Expert ID -> raw score (higher = better)
+            temperature: Controls sharpness (lower = more peaked)
+            
+        Returns:
+            Expert ID -> normalized weight (sums to 1.0)
+        """
+        if not scores:
+            return {}
+        
+        # Apply temperature scaling
+        scaled = {k: v / temperature for k, v in scores.items()}
+        
+        # Softmax: exp(x) / sum(exp(x))
+        max_score = max(scaled.values())  # For numerical stability
+        exp_scores = {k: np.exp(v - max_score) for k, v in scaled.items()}
+        total = sum(exp_scores.values())
+        
+        if total == 0:
+            # Uniform weights if all zeros
+            n = len(scores)
+            return {k: 1.0 / n for k in scores}
+        
+        return {k: v / total for k, v in exp_scores.items()}
+    
+    def _compute_consensus_features(
+        self,
+        predictions: Dict[str, float],
+        confidences: Dict[str, float],
+    ) -> Dict[str, float]:
+        """Compute consensus features from first-round expert predictions.
+        
+        These features enable cross-expert awareness - each expert can see
+        what the collective is predicting and adjust accordingly.
+        
+        Args:
+            predictions: Expert ID -> prediction value (0-1)
+            confidences: Expert ID -> confidence value (0-1)
+            
+        Returns:
+            Dict of consensus feature name -> value
+        """
+        if not predictions:
+            return {
+                "expert_consensus_mean": 0.5,
+                "expert_consensus_std": 0.0,
+                "expert_agreement_score": 0.5,
+                "expert_bullish_ratio": 0.5,
+                "top_3_consensus": 0.5,
+                "expert_confidence_mean": 0.5,
+                "expert_count": 0,
+            }
+        
+        preds = list(predictions.values())
+        confs = list(confidences.values())
+        
+        # Basic statistics
+        mean_pred = float(np.mean(preds))
+        std_pred = float(np.std(preds)) if len(preds) > 1 else 0.0
+        
+        # Agreement score: 1 = all agree, 0 = maximum disagreement
+        # Scaled so 0.5 std = 0 agreement
+        agreement_score = max(0.0, min(1.0, 1.0 - std_pred * 2))
+        
+        # Bullish ratio: % of experts predicting > 0.5
+        bullish_count = sum(1 for p in preds if p > 0.5)
+        bullish_ratio = bullish_count / len(preds)
+        
+        # Top 3 by confidence consensus
+        if len(confidences) >= 3:
+            top_3_ids = sorted(confidences.keys(), key=lambda k: confidences[k], reverse=True)[:3]
+            top_3_preds = [predictions[eid] for eid in top_3_ids]
+            top_3_consensus = float(np.mean(top_3_preds))
+        else:
+            top_3_consensus = mean_pred
+        
+        # Mean confidence
+        mean_conf = float(np.mean(confs)) if confs else 0.5
+        
+        return {
+            "expert_consensus_mean": mean_pred,
+            "expert_consensus_std": std_pred,
+            "expert_agreement_score": agreement_score,
+            "expert_bullish_ratio": bullish_ratio,
+            "top_3_consensus": top_3_consensus,
+            "expert_confidence_mean": mean_conf,
+            "expert_count": len(predictions),
+        }
+    
+    def _calculate_ensemble_confidence(
+        self,
+        predictions: Dict[str, float],
+        weights: Dict[str, float],
+        expert_performances: Dict[str, float],
+    ) -> float:
+        """Calculate ensemble confidence based on agreement and performance.
+        
+        Confidence formula:
+        - Base: agreement between experts (1 - std of predictions)
+        - Boost: if majority of high-performing experts agree
+        - Penalty: if expert with best recent performance disagrees
+        
+        Args:
+            predictions: Expert ID -> prediction value
+            weights: Expert ID -> weight
+            expert_performances: Expert ID -> recent profit (for boost/penalty)
+            
+        Returns:
+            Confidence score 0 to 1
+        """
+        if not predictions:
+            return 0.0
+        
+        preds = list(predictions.values())
+        
+        # Base confidence: agreement (lower std = higher agreement)
+        std = np.std(preds) if len(preds) > 1 else 0
+        agreement = max(0, 1.0 - std * 2)
+        
+        # Find weighted average prediction
+        total_weight = sum(weights.values())
+        if total_weight == 0:
+            return agreement * 0.5
+        
+        weighted_pred = sum(predictions[e] * weights[e] for e in predictions) / total_weight
+        
+        # Boost: if best performers agree with ensemble prediction
+        if expert_performances:
+            top_performers = sorted(
+                expert_performances.items(),
+                key=lambda x: x[1],
+                reverse=True
+            )[:3]  # Top 3 performers
+            
+            agreeing = 0
+            for expert_id, _ in top_performers:
+                if expert_id in predictions:
+                    expert_pred = predictions[expert_id]
+                    # Check if prediction is in same direction
+                    if (expert_pred > 0.5 and weighted_pred > 0.5) or \
+                       (expert_pred < 0.5 and weighted_pred < 0.5):
+                        agreeing += 1
+            
+            # Boost if majority of top performers agree
+            boost = 1.0 + 0.15 * (agreeing / len(top_performers))
+        else:
+            boost = 1.0
+        
+        confidence = min(1.0, agreement * boost)
+        return confidence
     
     def record_trade_outcome(
         self,

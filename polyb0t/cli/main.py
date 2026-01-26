@@ -1246,6 +1246,283 @@ def _print_intents(intents: list) -> None:
     click.echo("")
 
 
+@cli.command()
+@click.option(
+    "--start",
+    type=str,
+    default=None,
+    help="Start date (YYYY-MM-DD). Defaults to 30 days ago.",
+)
+@click.option(
+    "--end",
+    type=str,
+    default=None,
+    help="End date (YYYY-MM-DD). Defaults to today.",
+)
+@click.option(
+    "--capital",
+    type=float,
+    default=10000.0,
+    help="Initial capital for backtest (default: 10000).",
+)
+@click.option(
+    "--strategy",
+    type=click.Choice(["moe", "momentum", "mean_reversion"]),
+    default="moe",
+    help="Strategy to backtest (default: moe).",
+)
+@click.option(
+    "--output",
+    type=click.Choice(["text", "json"]),
+    default="text",
+    help="Output format.",
+)
+def backtest(
+    start: str,
+    end: str,
+    capital: float,
+    strategy: str,
+    output: str,
+) -> None:
+    """Run a backtest on historical data.
+    
+    Examples:
+        polyb0t backtest --start 2024-01-01 --end 2024-06-30 --capital 10000
+        polyb0t backtest --strategy momentum --output json
+    """
+    setup_logging()
+    
+    from datetime import datetime, timedelta
+    
+    # Parse dates
+    if end:
+        end_date = datetime.strptime(end, "%Y-%m-%d")
+    else:
+        end_date = datetime.utcnow()
+    
+    if start:
+        start_date = datetime.strptime(start, "%Y-%m-%d")
+    else:
+        start_date = end_date - timedelta(days=30)
+    
+    click.echo(f"\n{'='*60}")
+    click.echo("POLYBOT BACKTEST")
+    click.echo(f"{'='*60}")
+    click.echo(f"Period: {start_date.date()} to {end_date.date()}")
+    click.echo(f"Capital: ${capital:,.2f}")
+    click.echo(f"Strategy: {strategy}")
+    click.echo(f"{'='*60}\n")
+    
+    try:
+        from polyb0t.backtest.engine import BacktestEngine, BacktestConfig
+        from polyb0t.backtest.strategies import (
+            MoEBacktestStrategy,
+            MomentumStrategy,
+            MeanReversionStrategy,
+        )
+        from polyb0t.ml.continuous_collector import get_data_collector
+        
+        # Load historical data
+        click.echo("Loading historical data...")
+        collector = get_data_collector()
+        training_data = collector.get_training_data(only_labeled=False)
+        
+        if not training_data:
+            click.echo("ERROR: No historical data found. Run the bot first to collect data.")
+            return
+        
+        click.echo(f"Loaded {len(training_data)} data points")
+        
+        # Create strategy
+        if strategy == "moe":
+            strat = MoEBacktestStrategy()
+        elif strategy == "momentum":
+            strat = MomentumStrategy()
+        else:
+            strat = MeanReversionStrategy()
+        
+        # Configure backtest
+        config = BacktestConfig(
+            start_date=start_date,
+            end_date=end_date,
+            initial_capital=capital,
+        )
+        
+        # Run backtest
+        click.echo(f"\nRunning backtest with {strat.name}...")
+        engine = BacktestEngine(config)
+        result = engine.run(strat, training_data)
+        
+        # Display results
+        if output == "json":
+            click.echo(json.dumps(result.to_dict(), indent=2))
+        else:
+            click.echo(f"\n{'='*60}")
+            click.echo("BACKTEST RESULTS")
+            click.echo(f"{'='*60}")
+            
+            m = result.metrics
+            click.echo(f"\n--- Performance ---")
+            click.echo(f"Total Return:     {m.total_return_pct:+.2f}%")
+            click.echo(f"Total P&L:        ${m.total_return_usd:+,.2f}")
+            click.echo(f"Final Equity:     ${result.equity_curve[-1]:,.2f}")
+            
+            click.echo(f"\n--- Risk Metrics ---")
+            click.echo(f"Sharpe Ratio:     {m.sharpe_ratio:.2f}")
+            click.echo(f"Sortino Ratio:    {m.sortino_ratio:.2f}")
+            click.echo(f"Max Drawdown:     {m.max_drawdown_pct:.2f}%")
+            click.echo(f"Volatility:       {m.volatility*100:.2f}%")
+            
+            click.echo(f"\n--- Trade Statistics ---")
+            click.echo(f"Total Trades:     {m.total_trades}")
+            click.echo(f"Win Rate:         {m.win_rate:.1%}")
+            click.echo(f"Profit Factor:    {m.profit_factor:.2f}")
+            click.echo(f"Avg Trade:        {m.avg_trade_pct:+.2f}%")
+            click.echo(f"Best Trade:       {m.best_trade_pct:+.2f}%")
+            click.echo(f"Worst Trade:      {m.worst_trade_pct:+.2f}%")
+            click.echo(f"Avg Hold Time:    {m.avg_hold_time_hours:.1f} hours")
+            
+            if m.max_win_streak > 0 or m.max_loss_streak > 0:
+                click.echo(f"\n--- Streaks ---")
+                click.echo(f"Max Win Streak:   {m.max_win_streak}")
+                click.echo(f"Max Loss Streak:  {m.max_loss_streak}")
+            
+            click.echo(f"\n{'='*60}\n")
+        
+    except Exception as e:
+        logger.error(f"Backtest error: {e}", exc_info=True)
+        click.echo(f"ERROR: {e}")
+
+
+@cli.command()
+@click.option(
+    "--strategies",
+    type=str,
+    default="moe,momentum,mean_reversion",
+    help="Comma-separated list of strategies to compare.",
+)
+@click.option(
+    "--start",
+    type=str,
+    default=None,
+    help="Start date (YYYY-MM-DD).",
+)
+@click.option(
+    "--end",
+    type=str,
+    default=None,
+    help="End date (YYYY-MM-DD).",
+)
+@click.option(
+    "--capital",
+    type=float,
+    default=10000.0,
+    help="Initial capital.",
+)
+def backtest_compare(
+    strategies: str,
+    start: str,
+    end: str,
+    capital: float,
+) -> None:
+    """Compare multiple strategies on the same data.
+    
+    Example:
+        polyb0t backtest-compare --strategies moe,momentum
+    """
+    setup_logging()
+    
+    from datetime import datetime, timedelta
+    
+    # Parse dates
+    if end:
+        end_date = datetime.strptime(end, "%Y-%m-%d")
+    else:
+        end_date = datetime.utcnow()
+    
+    if start:
+        start_date = datetime.strptime(start, "%Y-%m-%d")
+    else:
+        start_date = end_date - timedelta(days=30)
+    
+    strategy_list = [s.strip() for s in strategies.split(",")]
+    
+    click.echo(f"\n{'='*60}")
+    click.echo("STRATEGY COMPARISON")
+    click.echo(f"{'='*60}")
+    click.echo(f"Period: {start_date.date()} to {end_date.date()}")
+    click.echo(f"Strategies: {', '.join(strategy_list)}")
+    click.echo(f"{'='*60}\n")
+    
+    try:
+        from polyb0t.backtest.engine import BacktestEngine, BacktestConfig
+        from polyb0t.backtest.strategies import (
+            MoEBacktestStrategy,
+            MomentumStrategy,
+            MeanReversionStrategy,
+        )
+        from polyb0t.ml.continuous_collector import get_data_collector
+        
+        # Load data once
+        click.echo("Loading historical data...")
+        collector = get_data_collector()
+        training_data = collector.get_training_data(only_labeled=False)
+        
+        if not training_data:
+            click.echo("ERROR: No historical data found.")
+            return
+        
+        click.echo(f"Loaded {len(training_data)} data points\n")
+        
+        # Run each strategy
+        results = {}
+        
+        for strat_name in strategy_list:
+            if strat_name == "moe":
+                strat = MoEBacktestStrategy()
+            elif strat_name == "momentum":
+                strat = MomentumStrategy()
+            elif strat_name == "mean_reversion":
+                strat = MeanReversionStrategy()
+            else:
+                click.echo(f"Unknown strategy: {strat_name}")
+                continue
+            
+            click.echo(f"Testing {strat.name}...")
+            
+            config = BacktestConfig(
+                start_date=start_date,
+                end_date=end_date,
+                initial_capital=capital,
+            )
+            
+            engine = BacktestEngine(config)
+            result = engine.run(strat, training_data)
+            results[strat.name] = result
+        
+        # Display comparison table
+        click.echo(f"\n{'='*80}")
+        click.echo("COMPARISON RESULTS")
+        click.echo(f"{'='*80}")
+        
+        header = f"{'Strategy':<25} {'Return':>10} {'Sharpe':>8} {'Drawdown':>10} {'Trades':>8} {'WinRate':>8}"
+        click.echo(header)
+        click.echo("-" * 80)
+        
+        for name, result in sorted(results.items(), key=lambda x: x[1].metrics.total_return_pct, reverse=True):
+            m = result.metrics
+            click.echo(
+                f"{name:<25} {m.total_return_pct:>+9.2f}% {m.sharpe_ratio:>8.2f} "
+                f"{m.max_drawdown_pct:>9.2f}% {m.total_trades:>8} {m.win_rate:>7.1%}"
+            )
+        
+        click.echo(f"\n{'='*80}\n")
+        
+    except Exception as e:
+        logger.error(f"Comparison error: {e}", exc_info=True)
+        click.echo(f"ERROR: {e}")
+
+
 if __name__ == "__main__":
     cli()
 

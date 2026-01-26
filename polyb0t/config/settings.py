@@ -49,8 +49,8 @@ class Settings(BaseSettings):
         description="Minimum training examples before AI can start training"
     )
     ai_retrain_interval_hours: int = Field(
-        default=6,
-        description="How often to retrain the AI model (hours)"
+        default=2,
+        description="How often to retrain the AI model (hours) - frequent training for faster learning"
     )
     ai_example_interval_minutes: int = Field(
         default=2,
@@ -93,6 +93,36 @@ class Settings(BaseSettings):
 
     # Database
     db_url: str = Field(default="sqlite:///./polybot.db", description="Database connection URL")
+
+    # === DISCORD NOTIFICATIONS ===
+    discord_webhook_url: str = Field(
+        default="",
+        description="Discord webhook URL for notifications"
+    )
+    discord_notifications_enabled: bool = Field(
+        default=True,
+        description="Enable Discord notifications"
+    )
+    discord_notify_on_trade: bool = Field(
+        default=True,
+        description="Send notification on trade execution"
+    )
+    discord_notify_on_whale: bool = Field(
+        default=True,
+        description="Send notification on whale activity"
+    )
+    discord_notify_on_error: bool = Field(
+        default=True,
+        description="Send notification on errors"
+    )
+    discord_hourly_summary: bool = Field(
+        default=True,
+        description="Send hourly status summary"
+    )
+    discord_daily_report: bool = Field(
+        default=True,
+        description="Send daily performance report"
+    )
 
     # Market Filtering
     resolve_min_days: int = Field(default=30, description="Minimum days until resolution")

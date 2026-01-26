@@ -30,6 +30,13 @@ RECOVERY_PROFIT_THRESHOLD = 0.0  # 0%
 RECOVERY_WIN_RATE_THRESHOLD = 0.45  # 45%
 RECOVERY_CONSECUTIVE_CYCLES = 2
 
+# Auto-deprecation thresholds (horrible performance with large sample)
+AUTO_DEPRECATE_PROFIT_THRESHOLD = -0.25  # -25%
+AUTO_DEPRECATE_MIN_TRADES = 100  # Need 100+ trades to confirm bad performance
+
+# Instant activation thresholds (skip probation for strong performers)
+INSTANT_ACTIVATE_PROFIT_THRESHOLD = 0.10  # +10%
+
 
 class ExpertState(Enum):
     """State machine for expert lifecycle."""
@@ -316,9 +323,29 @@ class ExpertVersionManager:
         """Update expert state based on version performance."""
         old_state = self.state
         
+        # === AUTO-DEPRECATION CHECK (applies to all states) ===
+        # If performance is terrible with large sample size, auto-deprecate
+        if (version.simulated_num_trades >= AUTO_DEPRECATE_MIN_TRADES and
+            version.simulated_profit_pct <= AUTO_DEPRECATE_PROFIT_THRESHOLD):
+            self.state = ExpertState.DEPRECATED
+            logger.warning(
+                f"Expert {self.expert_id}: AUTO-DEPRECATED - "
+                f"profit={version.simulated_profit_pct:+.1%} with {version.simulated_num_trades} trades"
+            )
+            if old_state != self.state:
+                logger.info(f"Expert {self.expert_id}: State {old_state.value} -> {self.state.value}")
+            return
+        
         if self.state == ExpertState.UNTRAINED:
-            # First training - go to probation
-            self.state = ExpertState.PROBATION
+            # First training - check for instant activation
+            if (version.validation_passed and 
+                version.simulated_profit_pct >= INSTANT_ACTIVATE_PROFIT_THRESHOLD):
+                # Skip probation for strong performers
+                self.state = ExpertState.ACTIVE
+                logger.info(f"Expert {self.expert_id}: INSTANT ACTIVATION (profit={version.simulated_profit_pct:+.1%})")
+            else:
+                # Normal path - go to probation
+                self.state = ExpertState.PROBATION
             
         elif self.state == ExpertState.PROBATION:
             if version.validation_passed:

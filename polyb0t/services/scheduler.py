@@ -110,6 +110,28 @@ class TradingScheduler:
             self.arbitrage_scanner = ArbitrageScanner()
             logger.info("Arbitrage scanner enabled")
 
+        # WebSocket client for real-time market data
+        self.ws_client = None
+        self._ws_connected = False
+        try:
+            from polyb0t.data.ws_client import get_ws_client
+            self.ws_client = get_ws_client()
+            logger.info("WebSocket client initialized")
+        except Exception as e:
+            logger.warning(f"WebSocket client not available: {e}")
+        
+        # Whale tracker for detecting large market-moving trades
+        self.whale_tracker = None
+        try:
+            from polyb0t.services.whale_tracker import get_whale_tracker
+            self.whale_tracker = get_whale_tracker()
+            # Connect to WebSocket if available
+            if self.ws_client:
+                self.whale_tracker.connect_to_websocket(self.ws_client)
+            logger.info("Whale tracker initialized")
+        except Exception as e:
+            logger.warning(f"Whale tracker not available: {e}")
+
         logger.info(
             f"Trading scheduler initialized "
             f"(mode={self.settings.strategy_mode}, placing_orders={self.settings.placing_orders})"
@@ -119,6 +141,18 @@ class TradingScheduler:
         """Run main trading loop continuously."""
         self.is_running = True
         logger.info("Starting trading loop")
+        
+        # Start WebSocket connection for real-time market data
+        if self.ws_client:
+            try:
+                connected = await self.ws_client.connect()
+                if connected:
+                    self._ws_connected = True
+                    logger.info("WebSocket connected - using real-time market data")
+                else:
+                    logger.warning("WebSocket connection failed - falling back to HTTP polling")
+            except Exception as e:
+                logger.warning(f"WebSocket startup error: {e} - falling back to HTTP polling")
         
         # Backfill missing price data on startup (if enabled)
         if self.settings.ml_enable_backfill:
@@ -1477,12 +1511,14 @@ class TradingScheduler:
     ) -> tuple[dict[str, OrderBook], dict[str, list[Trade]], dict[str, Any]]:
         """Fetch orderbook and trade data.
 
+        Uses WebSocket data when available, falls back to HTTP polling.
+
         Args:
             markets: List of markets.
             db_session: Database session.
 
         Returns:
-            Tuple of (orderbooks dict, trades dict).
+            Tuple of (orderbooks dict, trades dict, diagnostics).
         """
         orderbooks: dict[str, OrderBook] = {}
         trades: dict[str, list[Trade]] = {}
@@ -1492,6 +1528,53 @@ class TradingScheduler:
             for outcome in market.outcomes:
                 if outcome.token_id:
                     token_market_pairs.append((outcome.token_id, market.condition_id))
+        
+        # === TRY WEBSOCKET FIRST ===
+        ws_hits = 0
+        ws_misses = []
+        
+        if self._ws_connected and self.ws_client:
+            # Subscribe to any new markets
+            all_token_ids = [tid for tid, _ in token_market_pairs]
+            await self.ws_client.subscribe(all_token_ids)
+            
+            # Get data from WebSocket cache
+            for token_id, market_id in token_market_pairs:
+                ws_book = self.ws_client.get_orderbook(token_id)
+                if ws_book and ws_book.best_bid and ws_book.best_ask:
+                    # Convert WebSocket orderbook to our format
+                    ob = OrderBook(
+                        token_id=token_id,
+                        timestamp=ws_book.last_update,
+                        bids=[(level.price, level.size) for level in ws_book.bids],
+                        asks=[(level.price, level.size) for level in ws_book.asks],
+                    )
+                    orderbooks[token_id] = ob
+                    self._save_orderbook(ob, market_id, db_session)
+                    ws_hits += 1
+                else:
+                    ws_misses.append((token_id, market_id))
+            
+            # Get recent trades from WebSocket
+            for token_id, _ in token_market_pairs:
+                ws_trades = self.ws_client.get_recent_trades(asset_id=token_id, limit=50)
+                if ws_trades:
+                    trades[token_id] = [
+                        Trade(
+                            token_id=t.asset_id,
+                            price=t.price,
+                            size=t.size,
+                            side=t.side,
+                            timestamp=t.timestamp,
+                        )
+                        for t in ws_trades
+                    ]
+            
+            if ws_hits > 0:
+                logger.info(f"WebSocket provided {ws_hits}/{len(token_market_pairs)} orderbooks")
+            
+            # Only need to HTTP fetch the misses
+            token_market_pairs = ws_misses
 
         markets_no_outcomes = sum(1 for m in markets if not m.outcomes)
         missing_tokens = sum(1 for m in markets for o in m.outcomes if not o.token_id)
@@ -1932,3 +2015,16 @@ class TradingScheduler:
         """Stop trading loop."""
         logger.info("Stopping trading loop")
         self.is_running = False
+        
+        # Disconnect WebSocket
+        if self.ws_client and self._ws_connected:
+            import asyncio
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.create_task(self.ws_client.disconnect())
+                else:
+                    loop.run_until_complete(self.ws_client.disconnect())
+            except Exception as e:
+                logger.warning(f"WebSocket disconnect error: {e}")
+            self._ws_connected = False

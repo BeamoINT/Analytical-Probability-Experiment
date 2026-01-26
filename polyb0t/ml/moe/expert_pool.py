@@ -69,14 +69,22 @@ TIMING_EXPERTS = [
     ("market_close", "timing", "market_close"),      # days_to_resolution < 1
 ]
 
-# All default experts (24 total)
+# Prediction Horizon Experts (3) - different prediction timeframes
+HORIZON_EXPERTS = [
+    ("horizon_1h", "horizon", "1h"),    # Predict 1-hour price changes
+    ("horizon_4h", "horizon", "4h"),    # Predict 4-hour price changes
+    ("horizon_24h", "horizon", "24h"),  # Predict 24-hour price changes
+]
+
+# All default experts (27 total)
 ALL_DEFAULT_EXPERTS = (
     CATEGORY_EXPERTS +
     RISK_EXPERTS +
     TIME_EXPERTS +
     VOLUME_EXPERTS +
     VOLATILITY_EXPERTS +
-    TIMING_EXPERTS
+    TIMING_EXPERTS +
+    HORIZON_EXPERTS
 )
 
 

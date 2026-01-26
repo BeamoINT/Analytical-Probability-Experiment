@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 # Training constants
 MIN_TRAINING_SAMPLES = 100
-TRAINING_INTERVAL_HOURS = 6
+TRAINING_INTERVAL_HOURS = 2  # Train every 2 hours for faster learning
 HOLDOUT_FRACTION = 0.2
 SAMPLE_WEIGHT_DECAY = 0.5  # Recent data weighted more
 MIN_EXPERT_SAMPLES = 30  # Minimum samples for an expert to train
@@ -113,6 +113,11 @@ class MoETrainer:
                 state_str = expert.state.value
                 logger.info(f"Training expert: {expert.expert_id} ({expert.domain}) [{state_str}]...")
                 
+                # Determine which horizon labels to use for this expert
+                horizon = self._get_expert_horizon(expert)
+                y_binary_horizon = y_binary[horizon]
+                y_reg_horizon = y_reg[horizon]
+                
                 # Filter data for this expert
                 indices = self._get_expert_data_indices(
                     expert, training_data, categories
@@ -124,8 +129,8 @@ class MoETrainer:
                 
                 # Extract subset
                 X_expert = X[indices]
-                y_binary_expert = y_binary[indices]
-                y_reg_expert = y_reg[indices]
+                y_binary_expert = y_binary_horizon[indices]
+                y_reg_expert = y_reg_horizon[indices]
                 weights_expert = sample_weights[indices]
                 
                 # Train
@@ -138,7 +143,7 @@ class MoETrainer:
                 
                 # Record per-sample profits for gating training
                 expert_results[expert.expert_id] = self._calculate_per_sample_profits(
-                    expert, X, y_reg
+                    expert, X, y_reg_horizon
                 )
                 
                 # Log state transition
@@ -148,7 +153,25 @@ class MoETrainer:
                     f"conf_mult={expert.confidence_multiplier:.2f}"
                 )
             
-            # 5. Train gating network (only use active experts)
+            # 5. CROSS-EXPERT AWARENESS: Compute consensus features for training
+            # After first-pass training, collect predictions from all trained experts
+            logger.info("Computing cross-expert consensus features...")
+            cross_expert_features = self._compute_cross_expert_training_features(
+                experts_to_train, X, training_data
+            )
+            
+            # Add consensus features to feature matrix for second pass
+            if cross_expert_features is not None:
+                X_enhanced = np.hstack([X, cross_expert_features])
+                logger.info(f"Enhanced features: {X.shape[1]} -> {X_enhanced.shape[1]} (added cross-expert)")
+                
+                # Optional: Do a second training pass with cross-expert features
+                # This allows experts to learn from each other's signals
+                # (Commented out for now to avoid double training time - enable if needed)
+                # self._second_pass_training(experts_to_train, X_enhanced, y_binary, y_reg, 
+                #                           sample_weights, training_data, categories)
+            
+            # 6. Train gating network (only use active experts)
             active_results = {
                 k: v for k, v in expert_results.items()
                 if self.pool.experts.get(k) and self.pool.experts[k].is_active
@@ -251,17 +274,18 @@ class MoETrainer:
     
     def _prepare_data(
         self, data: List[Dict[str, Any]]
-    ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray], Optional[List[str]], Optional[List[str]]]:
-        """Prepare feature matrix and labels.
+    ) -> Tuple[Optional[np.ndarray], Optional[Dict[str, np.ndarray]], Optional[Dict[str, np.ndarray]], Optional[List[str]], Optional[List[str]]]:
+        """Prepare feature matrix and labels for multiple horizons.
         
         Returns:
-            Tuple of (X, y_binary, y_reg, timestamps, categories)
+            Tuple of (X, y_binary_dict, y_reg_dict, timestamps, categories)
+            where y_binary_dict and y_reg_dict have keys: '1h', '4h', '24h'
         """
         feature_cols = self._get_feature_cols()
         
         X_list = []
-        y_binary_list = []
-        y_reg_list = []
+        y_binary_dict = {'1h': [], '4h': [], '24h': []}
+        y_reg_dict = {'1h': [], '4h': [], '24h': []}
         timestamps = []
         categories = []
         
@@ -284,27 +308,36 @@ class MoETrainer:
                 except (ValueError, TypeError):
                     row.append(0.0)
             
-            # Get labels (check both formats for compatibility)
-            price_change_24h = sample.get("label_price_change_24h") or sample.get("price_change_24h", 0)
-            if price_change_24h is None:
+            # Get labels for each horizon
+            pc_1h = sample.get("label_price_change_1h") or sample.get("price_change_1h", 0)
+            pc_4h = sample.get("label_price_change_4h") or sample.get("price_change_4h", 0)
+            pc_24h = sample.get("label_price_change_24h") or sample.get("price_change_24h", 0)
+            
+            # Skip if no 24h label (minimum requirement)
+            if pc_24h is None:
                 continue
             
-            # Binary: is this trade profitable after spread?
-            is_profitable = abs(price_change_24h) > (SPREAD_COST + MIN_PROFIT_THRESHOLD)
+            # Use 24h as fallback if shorter horizons not available
+            pc_1h = pc_1h if pc_1h is not None else pc_24h
+            pc_4h = pc_4h if pc_4h is not None else pc_24h
             
             X_list.append(row)
-            y_binary_list.append(1 if is_profitable else 0)
-            y_reg_list.append(float(price_change_24h))
             timestamps.append(sample.get("created_at", ""))
             categories.append(features.get("category", sample.get("category", "other")))
+            
+            # Calculate binary labels (is trade profitable?) for each horizon
+            for horizon, pc in [('1h', pc_1h), ('4h', pc_4h), ('24h', pc_24h)]:
+                is_profitable = abs(float(pc)) > (SPREAD_COST + MIN_PROFIT_THRESHOLD)
+                y_binary_dict[horizon].append(1 if is_profitable else 0)
+                y_reg_dict[horizon].append(float(pc))
         
         if not X_list:
             return None, None, None, None, None
         
         return (
             np.array(X_list),
-            np.array(y_binary_list),
-            np.array(y_reg_list),
+            {k: np.array(v) for k, v in y_binary_dict.items()},
+            {k: np.array(v) for k, v in y_reg_dict.items()},
             timestamps,
             categories,
         )
@@ -409,12 +442,32 @@ class MoETrainer:
                 timing_flag = self.pool.get_timing_flag(features)
                 if timing_flag == expert.domain:
                     indices.append(i)
+            
+            elif expert.expert_type == "horizon":
+                # Horizon experts use ALL data (they differ by label, not filtering)
+                indices.append(i)
                     
             elif expert.expert_type == "dynamic":
                 # Dynamic experts get a sample of all data for now
                 indices.append(i)
         
         return np.array(indices)
+    
+    def _get_expert_horizon(self, expert: Expert) -> str:
+        """Get the prediction horizon for an expert.
+        
+        Horizon experts use their domain directly (1h, 4h, 24h).
+        All other experts default to 24h predictions.
+        
+        Returns:
+            Horizon string: '1h', '4h', or '24h'
+        """
+        if expert.expert_type == "horizon":
+            # Domain is '1h', '4h', or '24h'
+            return expert.domain
+        else:
+            # All other experts use 24h predictions by default
+            return "24h"
     
     def _calculate_per_sample_profits(
         self,
@@ -499,6 +552,94 @@ class MoETrainer:
             "declining_experts": declining,
             "pool_stats": self.pool.get_stats(),
         }
+    
+    def _compute_cross_expert_training_features(
+        self,
+        experts: List,
+        X: np.ndarray,
+        training_data: List[Dict],
+    ) -> Optional[np.ndarray]:
+        """Compute cross-expert consensus features for training data.
+        
+        After all experts are trained, collect their predictions on the
+        training set and compute consensus features that can be used
+        for enhanced training or as additional input features.
+        
+        Args:
+            experts: List of trained experts
+            X: Feature matrix (n_samples x n_features)
+            training_data: Original training data dicts
+            
+        Returns:
+            Array of shape (n_samples, n_cross_features) or None if no experts
+        """
+        trained_experts = [e for e in experts if e._model is not None]
+        
+        if len(trained_experts) < 2:
+            logger.info("Not enough trained experts for cross-expert features")
+            return None
+        
+        n_samples = len(X)
+        
+        # Collect predictions from all trained experts
+        all_predictions = {}
+        all_confidences = {}
+        
+        for expert in trained_experts:
+            try:
+                X_enhanced = expert._add_interaction_features(X)
+                probs = expert._model.predict_proba(X_enhanced)
+                
+                # Prediction = probability of class 1 (profitable)
+                predictions = probs[:, 1] if probs.shape[1] > 1 else probs[:, 0]
+                confidences = np.max(probs, axis=1)
+                
+                all_predictions[expert.expert_id] = predictions
+                all_confidences[expert.expert_id] = confidences
+                
+            except Exception as e:
+                logger.debug(f"Error getting predictions from {expert.expert_id}: {e}")
+                continue
+        
+        if len(all_predictions) < 2:
+            return None
+        
+        # Convert to arrays
+        pred_matrix = np.array(list(all_predictions.values()))  # (n_experts, n_samples)
+        conf_matrix = np.array(list(all_confidences.values()))
+        
+        # Compute per-sample consensus features
+        consensus_mean = np.mean(pred_matrix, axis=0)
+        consensus_std = np.std(pred_matrix, axis=0)
+        agreement_score = np.clip(1.0 - consensus_std * 2, 0, 1)
+        bullish_ratio = np.mean(pred_matrix > 0.5, axis=0)
+        mean_confidence = np.mean(conf_matrix, axis=0)
+        
+        # Top-3 consensus (by average confidence)
+        if len(all_confidences) >= 3:
+            avg_confs = {k: np.mean(v) for k, v in all_confidences.items()}
+            top_3_ids = sorted(avg_confs.keys(), key=lambda k: avg_confs[k], reverse=True)[:3]
+            top_3_preds = np.array([all_predictions[eid] for eid in top_3_ids])
+            top_3_consensus = np.mean(top_3_preds, axis=0)
+        else:
+            top_3_consensus = consensus_mean
+        
+        # Stack into cross-expert feature matrix
+        cross_features = np.column_stack([
+            consensus_mean,
+            consensus_std,
+            agreement_score,
+            bullish_ratio,
+            mean_confidence,
+            top_3_consensus,
+        ])
+        
+        logger.info(
+            f"Computed cross-expert features: {cross_features.shape[1]} features "
+            f"from {len(all_predictions)} experts"
+        )
+        
+        return cross_features
 
 
 # Singleton instance

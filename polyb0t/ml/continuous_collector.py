@@ -122,9 +122,20 @@ class MarketSnapshot:
     total_no_shares: float = 0.0
     open_interest: float = 0.0
     
-    # === RELATED MARKETS ===
+    # === RELATED MARKETS / CORRELATION ===
     num_related_markets: int = 0
     avg_related_price: float = 0.0
+    correlated_market_count: int = 0  # Markets with significant price correlation
+    correlated_avg_price: float = 0.0  # Average price of correlated markets
+    correlated_momentum: float = 0.0  # Momentum agreement with correlated markets (-1 to +1)
+    avg_correlation_strength: float = 0.0  # Average correlation coefficient
+    
+    # === WHALE TRACKING FEATURES ===
+    whale_activity_1h: int = 0  # Number of whale trades in last hour
+    whale_net_direction_1h: float = 0.0  # Net whale direction (-1 to +1)
+    whale_activity_24h: int = 0  # Number of whale trades in last 24 hours
+    whale_net_direction_24h: float = 0.0  # Net whale direction 24h
+    largest_trade_24h: float = 0.0  # Largest single trade in USD
     
     # === SOCIAL/ENGAGEMENT (if available) ===
     comment_count: int = 0

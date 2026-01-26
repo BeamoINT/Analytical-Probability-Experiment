@@ -2,8 +2,8 @@
 
 This module ties together:
 - Data collection
-- Training (both legacy single model and MoE)
-- Prediction using Mixture of Experts
+- Training using Mixture of Experts (MoE only - legacy model deprecated)
+- Prediction using ensemble of multiple experts
 - Shutdown recovery
 """
 
@@ -135,17 +135,12 @@ class AIOrchestrator:
         """Check if AI model is ready for trading.
         
         Returns:
-            True if AI model is trained and ready.
+            True if MoE has active trained experts.
         """
-        # Check if MoE has any trained experts
-        if self._use_moe:
-            active_experts = self.expert_pool.get_active_experts()
-            trained_experts = [e for e in active_experts if e._model is not None]
-            if trained_experts:
-                return True
-        
-        # Fallback to legacy trainer
-        return self.trainer.has_trained_model()
+        # Only check MoE - legacy model is deprecated
+        active_experts = self.expert_pool.get_active_experts()
+        trained_experts = [e for e in active_experts if e._model is not None]
+        return len(trained_experts) > 0
     
     def get_model_info(self) -> Optional[dict]:
         """Get information about the current AI model.
@@ -332,6 +327,17 @@ class AIOrchestrator:
         price_vs_volume_ratio: float = 0,
         liquidity_per_dollar_volume: float = 0,
         spread_adjusted_edge: float = 0,
+        # Whale tracking features
+        whale_activity_1h: int = 0,
+        whale_net_direction_1h: float = 0,
+        whale_activity_24h: int = 0,
+        whale_net_direction_24h: float = 0,
+        largest_trade_24h: float = 0,
+        # Correlation features
+        correlated_market_count: int = 0,
+        correlated_avg_price: float = 0,
+        correlated_momentum: float = 0,
+        avg_correlation_strength: float = 0,
     ) -> bool:
         """Collect a comprehensive market snapshot for training data.
         
@@ -341,6 +347,36 @@ class AIOrchestrator:
         Returns:
             True if a training example was created, False otherwise.
         """
+        # Try to get whale features from whale tracker if not provided
+        if whale_activity_1h == 0:
+            try:
+                from polyb0t.services.whale_tracker import get_whale_tracker
+                whale_tracker = get_whale_tracker()
+                whale_features = whale_tracker.get_whale_features(token_id)
+                whale_activity_1h = whale_features.get("whale_activity_1h", 0)
+                whale_net_direction_1h = whale_features.get("whale_net_direction_1h", 0.0)
+                whale_activity_24h = whale_features.get("whale_activity_24h", 0)
+                whale_net_direction_24h = whale_features.get("whale_net_direction_24h", 0.0)
+                largest_trade_24h = whale_features.get("largest_trade_24h", 0.0)
+            except Exception:
+                pass  # Whale tracker not available
+        
+        # Try to get correlation features from correlation tracker if not provided
+        if correlated_market_count == 0:
+            try:
+                from polyb0t.services.correlation_tracker import get_correlation_tracker
+                corr_tracker = get_correlation_tracker()
+                # Record price for correlation calculation
+                corr_tracker.record_price(token_id, price)
+                # Get correlation features
+                corr_features = corr_tracker.get_correlation_features(token_id)
+                correlated_market_count = corr_features.get("correlated_market_count", 0)
+                correlated_avg_price = corr_features.get("correlated_avg_price", 0.0)
+                correlated_momentum = corr_features.get("correlated_momentum", 0.0)
+                avg_correlation_strength = corr_features.get("avg_correlation_strength", 0.0)
+            except Exception:
+                pass  # Correlation tracker not available
+        
         # Compute spread if not provided
         if spread == 0 and price > 0:
             spread = ask - bid
@@ -424,6 +460,17 @@ class AIOrchestrator:
             price_vs_volume_ratio=price_vs_volume_ratio,
             liquidity_per_dollar_volume=liquidity_per_dollar_volume,
             spread_adjusted_edge=spread_adjusted_edge,
+            # Whale features
+            whale_activity_1h=whale_activity_1h,
+            whale_net_direction_1h=whale_net_direction_1h,
+            whale_activity_24h=whale_activity_24h,
+            whale_net_direction_24h=whale_net_direction_24h,
+            largest_trade_24h=largest_trade_24h,
+            # Correlation features
+            correlated_market_count=correlated_market_count,
+            correlated_avg_price=correlated_avg_price,
+            correlated_momentum=correlated_momentum,
+            avg_correlation_strength=avg_correlation_strength,
         )
         
         self.collector.record_snapshot(snapshot)
@@ -611,15 +658,7 @@ class AIOrchestrator:
         except Exception as e:
             logger.error(f"MoE training failed: {e}", exc_info=True)
         
-        # === LEGACY SINGLE MODEL TRAINING ===
-        # Keep as fallback
-        try:
-            legacy_result = self.trainer.train_model(training_data)
-            
-            if legacy_result:
-                logger.info(f"Legacy model v{legacy_result.version} deployed (fallback)")
-        except Exception as e:
-            logger.warning(f"Legacy training failed: {e}")
+        # Legacy model training removed - MoE is the only training system
         
         self._last_training_time = datetime.utcnow()
         self._save_state()
@@ -640,7 +679,7 @@ class AIOrchestrator:
         except Exception as e:
             logger.warning(f"Category re-evaluation failed: {e}")
         
-        return moe_result is not None or legacy_result is not None
+        return moe_result is not None
     
     def predict(self, features: dict) -> Optional[Tuple[float, float]]:
         """Make a prediction using the MoE system with expert mixing.
@@ -703,8 +742,8 @@ class AIOrchestrator:
                 
                 return (edge, confidence)
         
-        # Fallback to legacy trainer
-        return self.trainer.predict(features)
+        # No MoE prediction available
+        return None
     
     def get_ai_signal(
         self,
