@@ -2057,10 +2057,10 @@ class TradingScheduler:
             return
         
         try:
-            # Get balance
-            from polyb0t.services.balance import get_balance_manager
-            balance_mgr = get_balance_manager()
-            balance = balance_mgr.get_total_balance()
+            # Get balance from account state
+            from polyb0t.data.account_state import get_account_state
+            account_state = get_account_state()
+            balance = account_state.usdc_balance
             
             mode = "LIVE" if self.settings.placing_orders else "DATA_COLLECTION"
             
@@ -2095,13 +2095,13 @@ class TradingScheduler:
             return
         
         try:
-            from polyb0t.services.balance import get_balance_manager
-            balance_mgr = get_balance_manager()
+            from polyb0t.data.account_state import get_account_state
+            account_state = get_account_state()
             
             # Get portfolio value and positions
-            portfolio_value = balance_mgr.get_total_balance()
+            portfolio_value = account_state.usdc_balance
             unrealized_pnl = 0.0  # TODO: Calculate from positions
-            active_positions = len(self.portfolio.positions) if hasattr(self.portfolio, 'positions') else 0
+            active_positions = len(account_state.positions) if account_state.positions else 0
             
             # Get AI stats
             ai_status = {}
@@ -2132,10 +2132,10 @@ class TradingScheduler:
             return
         
         try:
-            from polyb0t.services.balance import get_balance_manager
-            balance_mgr = get_balance_manager()
+            from polyb0t.data.account_state import get_account_state
+            account_state = get_account_state()
             
-            ending_balance = balance_mgr.get_total_balance()
+            ending_balance = account_state.usdc_balance
             starting_balance = ending_balance  # TODO: Get from daily snapshot
             
             await self.discord_notifier.send_daily_report(
