@@ -435,6 +435,13 @@ class DiscordNotifier:
         }
         summary = await self._get_summary("hourly", hourly_data)
         
+        # Fallback description if GPT fails
+        if not summary:
+            active_experts = ai_status.get('active_experts', 0)
+            total_experts = ai_status.get('total_experts', 0)
+            next_train = training_info.get("time_until_training", "soon")
+            summary = f"System running with {active_experts}/{total_experts} active experts. Next training in {next_train}. Collecting market data."
+        
         # Build fields with more stats
         fields = [
             {"name": "💰 Balance", "value": f"${portfolio_value:,.2f}", "inline": True},
@@ -486,9 +493,6 @@ class DiscordNotifier:
         This is sent once per training cycle to explain how the model is performing.
         """
         try:
-            # Get GPT debrief on model performance
-            summary = await self._get_summary("model_debrief", metrics)
-            
             # Compact fields layout - 3 per row
             active = metrics.get("active_experts", 0)
             total = metrics.get("total_experts", 0)
@@ -498,6 +502,17 @@ class DiscordNotifier:
             best_profit = metrics.get("best_expert_profit", 0)
             training_examples = metrics.get("training_examples", 0)
             labeled = metrics.get("labeled_examples", 0)
+            
+            # Get GPT debrief on model performance
+            summary = await self._get_summary("model_debrief", metrics)
+            
+            # Fallback description if GPT fails
+            if not summary:
+                if active > 0:
+                    health = "healthy" if suspended == 0 else "learning"
+                    summary = f"Training complete. {active} of {total} experts are active and making predictions. System is {health} with {training_examples:,} training examples."
+                else:
+                    summary = f"Training complete. System is warming up with {training_examples:,} examples. Experts will activate once enough data is collected."
             
             fields = [
                 {"name": "🤖 Experts", "value": f"{active} active / {total} total", "inline": True},
@@ -509,7 +524,7 @@ class DiscordNotifier:
             
             embed = DiscordEmbed(
                 title="🤖 AI Training Complete",
-                description=summary or "Model training completed.",
+                description=summary,
                 color=COLOR_TRAINING,
                 fields=fields,
             )

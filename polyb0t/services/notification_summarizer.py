@@ -126,50 +126,63 @@ class NotificationSummarizer:
         return f"""AI model: {active}/{total} experts active, {suspended} suspended, {examples} training examples, best expert {best_profit:+.1%}. Is this healthy? 2 sentences max."""
     
     def _call_gpt(self, user_prompt: str) -> Optional[str]:
-        """Call the OpenAI API to get a summary."""
-        try:
-            response = requests.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": self.MODEL,
-                    "messages": [
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": user_prompt}
-                    ],
-                    "max_tokens": self.MAX_TOKENS,
-                    "temperature": self.TEMPERATURE,
-                },
-                timeout=15,
-            )
-            
-            if response.status_code == 429:
-                logger.warning("OpenAI rate limit - skipping summary")
-                return None
-            
-            if response.status_code != 200:
-                logger.warning(f"OpenAI error: {response.status_code}")
-                return None
-            
-            data = response.json()
-            content = data["choices"][0]["message"]["content"]
-            
-            # Clean up the response - Discord embed description limit is 4096
-            summary = content.strip()
-            if len(summary) > 500:
-                summary = summary[:497] + "..."
-            
-            return summary
-            
-        except requests.RequestException as e:
-            logger.warning(f"GPT request failed: {e}")
-            return None
-        except (KeyError, IndexError) as e:
-            logger.warning(f"Failed to parse GPT response: {e}")
-            return None
+        """Call the OpenAI API to get a summary with model fallback."""
+        # Try primary model first, then fallback
+        models_to_try = [self.MODEL, "gpt-4o", "gpt-4o-mini"]
+        
+        for model in models_to_try:
+            try:
+                response = requests.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": model,
+                        "messages": [
+                            {"role": "system", "content": SYSTEM_PROMPT},
+                            {"role": "user", "content": user_prompt}
+                        ],
+                        "max_tokens": self.MAX_TOKENS,
+                        "temperature": self.TEMPERATURE,
+                    },
+                    timeout=15,
+                )
+                
+                if response.status_code == 429:
+                    logger.warning(f"OpenAI rate limit on {model} - skipping")
+                    return None
+                
+                if response.status_code != 200:
+                    # Log detailed error for debugging
+                    error_text = response.text[:300] if response.text else "No response body"
+                    logger.warning(f"OpenAI error with {model}: {response.status_code} - {error_text}")
+                    # Try next model
+                    continue
+                
+                data = response.json()
+                content = data["choices"][0]["message"]["content"]
+                
+                # Clean up the response
+                summary = content.strip()
+                if len(summary) > 500:
+                    summary = summary[:497] + "..."
+                
+                if model != self.MODEL:
+                    logger.info(f"Used fallback model {model} for summary")
+                
+                return summary
+                
+            except requests.RequestException as e:
+                logger.warning(f"GPT request failed with {model}: {e}")
+                continue
+            except (KeyError, IndexError) as e:
+                logger.warning(f"Failed to parse GPT response from {model}: {e}")
+                continue
+        
+        logger.warning("All GPT models failed - no summary available")
+        return None
 
 
 # Singleton instance
