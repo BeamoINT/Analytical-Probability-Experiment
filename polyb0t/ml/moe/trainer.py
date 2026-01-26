@@ -265,7 +265,8 @@ class MoETrainer:
                     import json
                     try:
                         d["features"] = json.loads(d["features"])
-                    except:
+                    except (json.JSONDecodeError, TypeError) as e:
+                        logger.debug(f"Could not parse features JSON: {e}")
                         d["features"] = {}
                 data.append(d)
             
@@ -299,7 +300,7 @@ class MoETrainer:
                 import json
                 try:
                     features = json.loads(features)
-                except:
+                except (json.JSONDecodeError, TypeError):
                     features = {}
             
             # Extract feature vector
@@ -374,7 +375,7 @@ class MoETrainer:
             try:
                 t = datetime.fromisoformat(ts.replace('Z', '+00:00'))
                 times.append(t.timestamp())
-            except:
+            except (ValueError, AttributeError):
                 times.append(0)
         
         times = np.array(times)
@@ -408,7 +409,7 @@ class MoETrainer:
                 import json
                 try:
                     features = json.loads(features)
-                except:
+                except (json.JSONDecodeError, TypeError):
                     features = {}
             
             if expert.expert_type == "category":

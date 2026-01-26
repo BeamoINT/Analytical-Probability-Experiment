@@ -4,7 +4,7 @@ import asyncio
 import logging
 import time
 import uuid
-from typing import Any, Optional
+from typing import Any
 from datetime import datetime
 
 from sqlalchemy.orm import Session
@@ -89,7 +89,7 @@ class TradingScheduler:
         self.market_filter = MarketFilter()
         
         # AI orchestrator (for AI mode and data collection)
-        self.ai_orchestrator: Optional[Any] = None
+        self.ai_orchestrator: Any | None = None
         if self.settings.strategy_mode == "ai" or not self.settings.placing_orders:
             try:
                 from polyb0t.ml.ai_orchestrator import get_ai_orchestrator
@@ -150,7 +150,7 @@ class TradingScheduler:
         
         # Track last training time when we showed metrics debrief
         # This ensures we only show the model performance debrief once per training cycle
-        self._last_metrics_debrief_training_time: Optional[datetime] = None
+        self._last_metrics_debrief_training_time: datetime | None = None
 
         logger.info(
             f"Trading scheduler initialized "
@@ -328,7 +328,8 @@ class TradingScheduler:
                                 and float(getattr(p, "quantity", 0) or 0) > 0
                                 and str(getattr(p, "side", "LONG")).upper() == "LONG"
                             }
-                        except Exception:
+                        except Exception as e:
+                            logger.debug(f"Could not extract held long tokens: {e}")
                             held_long_token_ids = set()
                         
                         # CRITICAL: Track markets where we already have positions
@@ -346,7 +347,8 @@ class TradingScheduler:
                                     f"Markets with existing positions (blocked for new buys): {len(markets_with_existing_positions)} markets",
                                     extra={"market_ids": list(markets_with_existing_positions)[:10]},  # Log first 10
                                 )
-                        except Exception:
+                        except Exception as e:
+                            logger.debug(f"Could not extract markets with existing positions: {e}")
                             markets_with_existing_positions = set()
 
                         db_session.add(
@@ -1086,7 +1088,8 @@ class TradingScheduler:
                             try:
                                 if intent_manager.approve_intent(it.intent_id, approved_by="auto") is not None:
                                     auto_approved_existing += 1
-                            except Exception:
+                            except Exception as e:
+                                logger.debug(f"Could not auto-approve intent {it.intent_id}: {e}")
                                 continue
                         if auto_approved_existing:
                             logger.info(
@@ -1096,8 +1099,8 @@ class TradingScheduler:
                             # Execute immediately in this cycle as well.
                             if executor is not None and not bool(self.settings.dry_run):
                                 execution_summary = executor.process_approved_intents(cycle_id=cycle_id)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"Error in auto-approve flow: {e}")
 
                 # Create intents from signals (signals are already sized and validated)
                 created = 0
@@ -1136,7 +1139,8 @@ class TradingScheduler:
                             v = r.size_usd if getattr(r, "size_usd", None) is not None else r.size
                             if v:
                                 daily_notional_used += float(v)
-                    except Exception:
+                    except Exception as e:
+                        logger.debug(f"Could not calculate daily notional used: {e}")
                         daily_notional_used = 0.0
 
                 # Check if in listen-only mode (global stop-loss triggered)
@@ -1146,8 +1150,8 @@ class TradingScheduler:
                         from polyb0t.models.smart_heuristics import get_smart_heuristics_engine
                         heuristics = get_smart_heuristics_engine()
                         is_listen_only = heuristics.is_listen_only()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"Could not check listen-only mode: {e}")
                 
                 if is_listen_only:
                     logger.warning(
@@ -1349,7 +1353,8 @@ class TradingScheduler:
                         try:
                             if intent_manager.approve_intent(iid, approved_by="auto") is not None:
                                 auto_approved += 1
-                        except Exception:
+                        except Exception as e:
+                            logger.debug(f"Could not auto-approve intent {iid}: {e}")
                             continue
 
                     if executor is not None and not self.settings.dry_run and auto_approved:
@@ -1918,7 +1923,7 @@ class TradingScheduler:
                 
         return signals, rejections
 
-    def _days_to_resolution(self, end_date: Optional[datetime]) -> float:
+    def _days_to_resolution(self, end_date: datetime | None) -> float:
         """Calculate days until market resolution, handling timezone-aware dates.
         
         Args:
@@ -1941,7 +1946,8 @@ class TradingScheduler:
                 
             delta = end_naive - now
             return max(0.0, delta.days + delta.seconds / 86400)
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Could not calculate days to resolution: {e}")
             return 30.0
 
     def _save_signals(
@@ -2076,8 +2082,8 @@ class TradingScheduler:
                         logger.info("Skipping startup notification (sent within last hour)")
                         self._startup_notification_sent = True
                         return
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Could not read startup marker: {e}")
             
             mode = "LIVE" if self.settings.placing_orders else "DATA_COLLECTION"
             
@@ -2106,8 +2112,8 @@ class TradingScheduler:
             try:
                 with open(startup_marker, "w") as f:
                     f.write(str(time.time()))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Could not write startup marker: {e}")
             
             logger.info("Discord startup notification sent")
         except Exception as e:

@@ -100,7 +100,8 @@ class CLOBClient:
             return status, response.json()
         except httpx.HTTPStatusError as e:
             return e.response.status_code, None
-        except Exception:
+        except Exception as e:
+            logger.debug(f"CLOB API request failed: {e}")
             return None, None
 
     @staticmethod
@@ -169,7 +170,8 @@ class CLOBClient:
                 if isinstance(item, dict):
                     try:
                         trades.append(self._parse_trade(token_id, item))
-                    except Exception:
+                    except Exception as e:
+                        logger.debug(f"Failed to parse trade: {e}")
                         continue
             return trades, status, template
         return [], last_status, None

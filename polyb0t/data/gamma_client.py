@@ -64,7 +64,8 @@ class GammaClient:
             return status, response.json()
         except httpx.HTTPStatusError as e:
             return e.response.status_code, None
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Gamma API request failed: {e}")
             return None, None
 
     @retry(
@@ -122,7 +123,8 @@ class GammaClient:
                 market = self._parse_market(item)
                 markets.append(market)
                 diag["parsed"] += 1
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Failed to parse market: {e}")
                 diag["failed_parse"] += 1
                 continue
         return markets, diag
@@ -248,7 +250,7 @@ class GammaClient:
                 if s.startswith("[") and s.endswith("]"):
                     try:
                         return json.loads(s)
-                    except Exception:
+                    except (json.JSONDecodeError, TypeError):
                         return v
             return v
 
@@ -273,7 +275,7 @@ class GammaClient:
                 if obj.get(k) is not None:
                     try:
                         return float(obj.get(k))
-                    except Exception:
+                    except (ValueError, TypeError):
                         continue
             return None
 
@@ -311,7 +313,7 @@ class GammaClient:
                     pr = prices[i] if isinstance(prices, list) and i < len(prices) else None
                     try:
                         pr_f = float(pr) if pr is not None else None
-                    except Exception:
+                    except (ValueError, TypeError):
                         pr_f = None
                     outcomes.append(
                         MarketOutcome(

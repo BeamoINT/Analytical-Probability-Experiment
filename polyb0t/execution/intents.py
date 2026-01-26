@@ -159,6 +159,23 @@ class IntentManager:
         self.db_session = db_session
         self.settings = get_settings()
 
+    def _safe_commit(self) -> bool:
+        """Safely commit database changes with rollback on error.
+        
+        Returns:
+            True if commit succeeded, False if rollback occurred.
+        """
+        try:
+            self._safe_commit()
+            return True
+        except Exception as e:
+            logger.error(f"Database commit failed, rolling back: {e}")
+            try:
+                self.db_session.rollback()
+            except Exception as re:
+                logger.error(f"Rollback also failed: {re}")
+            return False
+
     def create_intent_from_signal(
         self,
         signal: TradingSignal,
@@ -466,7 +483,7 @@ class IntentManager:
             expires_at=intent.expires_at,
         )
         self.db_session.add(db_intent)
-        self.db_session.commit()
+        self._safe_commit()
 
     def approve_intent(
         self, intent_id: str, approved_by: str = "user"
@@ -493,7 +510,7 @@ class IntentManager:
         if intent.is_expired():
             intent.status = IntentStatus.EXPIRED
             db_intent.status = IntentStatus.EXPIRED.value
-            self.db_session.commit()
+            self._safe_commit()
             logger.warning(f"Intent expired: {intent_id}")
             return None
 
@@ -510,7 +527,7 @@ class IntentManager:
         db_intent.status = IntentStatus.APPROVED.value
         db_intent.approved_at = intent.approved_at
         db_intent.approved_by = approved_by
-        self.db_session.commit()
+        self._safe_commit()
 
         # In dry-run, approvals should never place real orders; we finalize to a terminal state
         # so the intent doesn't keep reappearing in "approved" queues.
@@ -524,7 +541,7 @@ class IntentManager:
                 "message": "Approved in dry-run; no order was submitted",
             }
             db_intent.submitted_order_id = f"dryrun:{intent_id[:8]}"
-            self.db_session.commit()
+            self._safe_commit()
             intent.status = IntentStatus.EXECUTED_DRYRUN
             intent.executed_at = now
             intent.execution_result = db_intent.execution_result
@@ -559,7 +576,7 @@ class IntentManager:
             return False
 
         db_intent.status = IntentStatus.REJECTED.value
-        self.db_session.commit()
+        self._safe_commit()
 
         logger.info(f"Rejected intent: {intent_id[:8]}", extra={"intent_id": intent_id})
 
@@ -601,7 +618,7 @@ class IntentManager:
             oid = execution_result.get("order_id") or execution_result.get("submitted_order_id")
             if oid:
                 db_intent.submitted_order_id = str(oid)
-        self.db_session.commit()
+        self._safe_commit()
 
         logger.info(
             f"Marked intent as executed: {intent_id[:8]}",
@@ -632,7 +649,7 @@ class IntentManager:
         db_intent.executed_at = datetime.utcnow()
         db_intent.execution_result = {"dry_run": True, "success": True, "message": note}
         db_intent.submitted_order_id = f"dryrun:{intent_id[:8]}"
-        self.db_session.commit()
+        self._safe_commit()
         return True
 
     def mark_failed(self, intent_id: str, error: str) -> bool:
@@ -665,7 +682,7 @@ class IntentManager:
         db_intent.status = IntentStatus.FAILED.value
         db_intent.execution_result = {"error": error}
         db_intent.error_message = error
-        self.db_session.commit()
+        self._safe_commit()
 
         logger.error(
             f"Marked intent as failed: {intent_id[:8]}",
@@ -694,7 +711,7 @@ class IntentManager:
             count += 1
 
         if count > 0:
-            self.db_session.commit()
+            self._safe_commit()
             logger.info(f"Expired {count} old intents")
 
         return count
@@ -725,7 +742,7 @@ class IntentManager:
                 count += 1
 
         if count:
-            self.db_session.commit()
+            self._safe_commit()
             logger.info(f"Expired {count} stale open intents")
 
         return count
@@ -767,7 +784,7 @@ class IntentManager:
                 continue
 
         if updated:
-            self.db_session.commit()
+            self._safe_commit()
         return updated
 
     def cleanup_duplicate_pending_intents(self, mode: str = "supersede") -> dict[str, int]:
@@ -831,7 +848,7 @@ class IntentManager:
                 expired_null_fp += 1
 
         if deduped or expired_null_fp:
-            self.db_session.commit()
+            self._safe_commit()
 
         return {
             "scanned": len(pending),
@@ -1068,5 +1085,5 @@ class IntentManager:
                 updated = True
 
         if updated:
-            self.db_session.commit()
+            self._safe_commit()
         return updated

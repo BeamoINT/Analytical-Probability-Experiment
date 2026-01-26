@@ -463,7 +463,7 @@ class ExpertPool:
                 import json as json_module
                 try:
                     features = json_module.loads(features)
-                except:
+                except (json_module.JSONDecodeError, TypeError):
                     features = {}
             
             match = False

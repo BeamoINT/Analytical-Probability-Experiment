@@ -213,6 +213,7 @@ class LiveExecutor:
         logger.info(f"About to submit order via CLOBTradingClient: {order_details}")
         
         # Attempt best-effort submit (may fail depending on Polymarket auth requirements).
+        client = None
         try:
             from polyb0t.services.clob_trading import CLOBTradingClient
 
@@ -233,7 +234,6 @@ class LiveExecutor:
                 size_usd=float(intent.size_usd or 0.0),
                 fee_rate_bps=int(self.settings.fee_bps),
             )
-            client.close()
             logger.info(f"CLOBTradingClient returned: success={res.success}, order_id={res.order_id}")
             if not res.success:
                 logger.error(f"Order rejected: {res.message}")
@@ -249,6 +249,12 @@ class LiveExecutor:
         except Exception as e:
             logger.error(f"Exception in order submission: {type(e).__name__}: {e}", exc_info=True)
             return {"success": False, "error": f"Order submit error: {e}"}
+        finally:
+            if client:
+                try:
+                    client.close()
+                except Exception:
+                    pass
 
         # For now, simulate successful order placement
         order_id = str(uuid.uuid4())
@@ -495,6 +501,7 @@ class LiveExecutor:
             extra=order_details,
         )
 
+        client = None
         try:
             from polyb0t.services.clob_trading import CLOBTradingClient
 
@@ -516,12 +523,18 @@ class LiveExecutor:
                 size_usd=actual_size_usd,
                 fee_rate_bps=int(self.settings.fee_bps),
             )
-            client.close()
             if not res.success:
                 return {"success": False, "error": res.message, "status_code": res.status_code, "raw": res.raw}
             return {"success": True, "order_id": res.order_id, "message": f"Close order submitted ({'panic' if use_market_sell else 'limit'})", "details": order_details}
         except Exception as e:
+            logger.error(f"Close submit error: {e}")
             return {"success": False, "error": f"Close submit error: {e}"}
+        finally:
+            if client:
+                try:
+                    client.close()
+                except Exception:
+                    pass
 
     def _execute_cancel_order(self, intent: TradeIntent, cycle_id: str) -> dict[str, Any]:
         """Cancel a previously submitted order (requires explicit approval).
@@ -543,6 +556,7 @@ class LiveExecutor:
         if not target:
             return {"success": False, "error": "Cancel intent missing target order id in signal_data"}
 
+        client = None
         try:
             from polyb0t.services.clob_trading import CLOBTradingClient
 
@@ -557,12 +571,18 @@ class LiveExecutor:
                 funder=(self.settings.funder_address or self.settings.user_address),
             )
             res = client.cancel_order(str(target))
-            client.close()
             if not res.success:
                 return {"success": False, "error": res.message, "status_code": res.status_code, "raw": res.raw}
             return {"success": True, "order_id": str(target), "message": "Order cancel submitted"}
         except Exception as e:
+            logger.error(f"Cancel error: {e}")
             return {"success": False, "error": f"Cancel error: {e}"}
+        finally:
+            if client:
+                try:
+                    client.close()
+                except Exception:
+                    pass
 
     def _has_live_credentials(self) -> bool:
         """Check whether live execution credentials are configured."""

@@ -120,7 +120,7 @@ class MoEBacktestStrategy:
             import json
             try:
                 features = json.loads(features)
-            except:
+            except (json.JSONDecodeError, TypeError):
                 features = snapshot
         
         try:
@@ -169,7 +169,7 @@ class MoEBacktestStrategy:
             import json
             try:
                 features = json.loads(features)
-            except:
+            except (json.JSONDecodeError, TypeError):
                 features = snapshot
         
         price = features.get("price", position.current_price)
@@ -195,7 +195,7 @@ class MoEBacktestStrategy:
                     ts = datetime.fromisoformat(ts.replace('Z', '+00:00'))
                     if ts - position.entry_time > timedelta(hours=48):
                         return True
-                except:
+                except (ValueError, AttributeError):
                     pass
         
         return False
@@ -223,7 +223,7 @@ class MomentumStrategy:
             import json
             try:
                 features = json.loads(features)
-            except:
+            except (json.JSONDecodeError, TypeError):
                 features = snapshot
         
         momentum = features.get("momentum_24h", 0)
@@ -252,7 +252,7 @@ class MomentumStrategy:
             import json
             try:
                 features = json.loads(features)
-            except:
+            except (json.JSONDecodeError, TypeError):
                 features = snapshot
         
         momentum = features.get("momentum_24h", 0)
@@ -289,7 +289,7 @@ class MeanReversionStrategy:
             import json
             try:
                 features = json.loads(features)
-            except:
+            except (json.JSONDecodeError, TypeError):
                 features = snapshot
         
         price = features.get("price", 0.5)
@@ -318,7 +318,7 @@ class MeanReversionStrategy:
             import json
             try:
                 features = json.loads(features)
-            except:
+            except (json.JSONDecodeError, TypeError):
                 features = snapshot
         
         price = features.get("price", 0.5)
