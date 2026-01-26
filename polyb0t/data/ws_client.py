@@ -390,36 +390,49 @@ class PolymarketWebSocket:
         """Handle incoming WebSocket message."""
         try:
             data = json.loads(raw_message)
-            event_type = data.get("event_type", "")
             
-            if event_type == "book":
-                await self._handle_book_message(data)
-                
-            elif event_type == "price_change":
-                await self._handle_price_change(data)
-                
-            elif event_type == "last_trade_price":
-                await self._handle_trade(data)
-                
-            elif event_type == "best_bid_ask":
-                await self._handle_best_bid_ask(data)
-                
-            elif event_type == "tick_size_change":
-                logger.debug(f"Tick size change: {data.get('asset_id')}")
-                
-            elif event_type == "new_market":
-                logger.info(f"New market: {data.get('question')}")
-                
-            elif event_type == "market_resolved":
-                logger.info(f"Market resolved: {data.get('question')} -> {data.get('winning_outcome')}")
-                
+            # Handle array of messages (Polymarket sometimes sends batches)
+            if isinstance(data, list):
+                for item in data:
+                    if isinstance(item, dict):
+                        await self._process_single_message(item)
+            elif isinstance(data, dict):
+                await self._process_single_message(data)
             else:
-                logger.debug(f"Unknown event type: {event_type}")
+                logger.debug(f"Unexpected message type: {type(data)}")
                 
         except json.JSONDecodeError:
             logger.warning(f"Invalid JSON message: {raw_message[:100]}")
         except Exception as e:
             logger.error(f"Error handling message: {e}")
+    
+    async def _process_single_message(self, data: Dict[str, Any]) -> None:
+        """Process a single message dict."""
+        event_type = data.get("event_type", "")
+        
+        if event_type == "book":
+            await self._handle_book_message(data)
+            
+        elif event_type == "price_change":
+            await self._handle_price_change(data)
+            
+        elif event_type == "last_trade_price":
+            await self._handle_trade(data)
+            
+        elif event_type == "best_bid_ask":
+            await self._handle_best_bid_ask(data)
+            
+        elif event_type == "tick_size_change":
+            logger.debug(f"Tick size change: {data.get('asset_id')}")
+            
+        elif event_type == "new_market":
+            logger.info(f"New market: {data.get('question')}")
+            
+        elif event_type == "market_resolved":
+            logger.info(f"Market resolved: {data.get('question')} -> {data.get('winning_outcome')}")
+            
+        elif event_type:
+            logger.debug(f"Unknown event type: {event_type}")
     
     async def _handle_book_message(self, data: Dict[str, Any]) -> None:
         """Handle full orderbook snapshot."""
