@@ -22,7 +22,7 @@ class NotificationSummarizer:
     """Uses GPT to create human-readable summaries of bot events."""
     
     MODEL = "gpt-5.2"  # Using GPT-5.2 for best quality
-    MAX_TOKENS = 100  # Short summaries only
+    MAX_TOKENS = 200  # Allow fuller responses
     TEMPERATURE = 0.5  # More focused responses
     
     def __init__(self):
@@ -159,8 +159,8 @@ class NotificationSummarizer:
             
             # Clean up the response - Discord embed description limit is 4096
             summary = content.strip()
-            if len(summary) > 300:
-                summary = summary[:297] + "..."
+            if len(summary) > 500:
+                summary = summary[:497] + "..."
             
             return summary
             
