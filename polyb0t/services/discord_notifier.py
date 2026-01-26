@@ -418,31 +418,52 @@ class DiscordNotifier:
         ai_status: Dict[str, Any],
         training_info: Optional[Dict[str, Any]] = None,
         model_metrics: Optional[Dict[str, Any]] = None,
+        performance_stats: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """Send hourly status summary with training info and optional model metrics debrief."""
         if not self.hourly_summary:
             return False
         
         training_info = training_info or {}
+        performance_stats = performance_stats or {}
         
         # Get GPT summary for hourly status
         hourly_data = {
             "portfolio_value": portfolio_value,
-            "unrealized_pnl": unrealized_pnl,
-            "trades_this_hour": trades_this_hour,
-            "active_positions": active_positions,
             "ai_status": ai_status,
             "time_until_training": training_info.get("time_until_training", "Unknown"),
         }
         summary = await self._get_summary("hourly", hourly_data)
         
+        # Build fields with more stats
         fields = [
-            {"name": "Balance", "value": f"${portfolio_value:,.2f}", "inline": True},
-            {"name": "Active Experts", "value": str(ai_status.get("active_experts", 0)), "inline": True},
-            {"name": "Training Examples", "value": f"{ai_status.get('training_examples', 0):,}", "inline": True},
-            {"name": "Next Training", "value": training_info.get("time_until_training", "Unknown"), "inline": True},
-            {"name": "Last Training", "value": training_info.get("last_training", "Never"), "inline": True},
+            {"name": "💰 Balance", "value": f"${portfolio_value:,.2f}", "inline": True},
+            {"name": "📈 Positions", "value": str(active_positions), "inline": True},
+            {"name": "🤖 Active Experts", "value": f"{ai_status.get('active_experts', 0)}/{ai_status.get('total_experts', 0)}", "inline": True},
         ]
+        
+        # Add performance stats if available
+        if performance_stats:
+            win_rate = performance_stats.get("win_rate", 0)
+            total_pnl = performance_stats.get("total_pnl_pct", 0)
+            trades_today = performance_stats.get("trades_today", 0)
+            fields.extend([
+                {"name": "🎯 Win Rate", "value": f"{win_rate:.0%}" if win_rate else "N/A", "inline": True},
+                {"name": "📊 Today's P&L", "value": f"{total_pnl:+.1%}" if total_pnl else "N/A", "inline": True},
+                {"name": "🔄 Trades Today", "value": str(trades_today), "inline": True},
+            ])
+        
+        # Training info
+        fields.extend([
+            {"name": "📚 Training Data", "value": f"{ai_status.get('training_examples', 0):,} examples", "inline": True},
+            {"name": "⏱️ Next Training", "value": training_info.get("time_until_training", "Unknown"), "inline": True},
+        ])
+        
+        # Market conditions if available
+        markets_scanned = performance_stats.get("markets_scanned", 0)
+        markets_tradable = performance_stats.get("markets_tradable", 0)
+        if markets_scanned:
+            fields.append({"name": "🔍 Markets", "value": f"{markets_tradable}/{markets_scanned} tradable", "inline": True})
         
         embed = DiscordEmbed(
             title="📊 Hourly Status",
@@ -460,7 +481,7 @@ class DiscordNotifier:
         return result
     
     async def _send_model_metrics_debrief(self, metrics: Dict[str, Any]) -> bool:
-        """Send a GPT-summarized debrief on model performance metrics.
+        """Send a compact model performance debrief after training.
         
         This is sent once per training cycle to explain how the model is performing.
         """
@@ -468,41 +489,29 @@ class DiscordNotifier:
             # Get GPT debrief on model performance
             summary = await self._get_summary("model_debrief", metrics)
             
-            # Build fields with key metrics
+            # Compact fields layout - 3 per row
+            active = metrics.get("active_experts", 0)
+            total = metrics.get("total_experts", 0)
+            suspended = metrics.get("suspended_experts", 0)
+            deprecated = metrics.get("deprecated_experts", 0)
+            trades = metrics.get("total_simulated_trades", 0)
+            best_profit = metrics.get("best_expert_profit", 0)
+            training_examples = metrics.get("training_examples", 0)
+            labeled = metrics.get("labeled_examples", 0)
+            
             fields = [
-                {"name": "Total Experts", "value": str(metrics.get("total_experts", 0)), "inline": True},
-                {"name": "Active", "value": str(metrics.get("active_experts", 0)), "inline": True},
-                {"name": "Suspended", "value": str(metrics.get("suspended_experts", 0)), "inline": True},
-                {"name": "Probation", "value": str(metrics.get("probation_experts", 0)), "inline": True},
-                {"name": "Deprecated", "value": str(metrics.get("deprecated_experts", 0)), "inline": True},
-                {"name": "Simulated Trades", "value": str(metrics.get("total_simulated_trades", 0)), "inline": True},
+                {"name": "🤖 Experts", "value": f"{active} active / {total} total", "inline": True},
+                {"name": "⏸️ Status", "value": f"{suspended} suspended, {deprecated} deprecated", "inline": True},
+                {"name": "📊 Trades", "value": f"{trades:,} simulated", "inline": True},
+                {"name": "🏆 Best Expert", "value": f"{best_profit:+.1%} profit", "inline": True},
+                {"name": "📚 Data", "value": f"{training_examples:,} ({labeled:,} labeled)", "inline": True},
             ]
             
-            # Add best expert if available
-            best_expert = metrics.get("best_expert", "N/A")
-            best_profit = metrics.get("best_expert_profit", 0)
-            if best_expert and best_expert != "N/A":
-                fields.append({
-                    "name": "Best Expert",
-                    "value": f"{best_expert} ({best_profit:+.1%})",
-                    "inline": False,
-                })
-            
-            # Add training data info
-            training_examples = metrics.get("training_examples", 0)
-            labeled_examples = metrics.get("labeled_examples", 0)
-            fields.append({
-                "name": "Training Data",
-                "value": f"{training_examples:,} examples ({labeled_examples:,} labeled)",
-                "inline": False,
-            })
-            
             embed = DiscordEmbed(
-                title="🤖 AI Model Performance Debrief",
-                description=summary or "Model metrics from the latest training cycle.",
+                title="🤖 AI Training Complete",
+                description=summary or "Model training completed.",
                 color=COLOR_TRAINING,
                 fields=fields,
-                footer="This debrief is shown once per training cycle",
             )
             
             return await self.send(embed)

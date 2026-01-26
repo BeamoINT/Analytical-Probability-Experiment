@@ -1361,13 +1361,20 @@ class TradingScheduler:
                         auto_execution = executor.process_approved_intents(cycle_id=cycle_id)
 
                 # Comprehensive cycle summary (single structured log)
+                markets_scanned_count = len(markets) if 'markets' in locals() else 0
+                markets_tradable_count = len(tradable_markets)
+                
+                # Store for hourly Discord summary
+                self._last_markets_scanned = markets_scanned_count
+                self._last_markets_tradable = markets_tradable_count
+                
                 logger.info(
                     "Cycle summary",
                     extra={
                         "cycle_id": cycle_id,
-                        "markets_scanned": len(markets) if 'markets' in locals() else 0,
+                        "markets_scanned": markets_scanned_count,
                         "markets_filtered": filter_rejections,
-                        "markets_tradable": len(tradable_markets),
+                        "markets_tradable": markets_tradable_count,
                         "signals_generated": len(signals),
                         "signal_rejections": signal_rejections,
                         "intents_created": created,
@@ -2224,6 +2231,42 @@ class TradingScheduler:
                         "labeled_examples": stats.get("collector", {}).get("labeled_examples", 0),
                     }
             
+            # Collect performance stats
+            performance_stats = {}
+            try:
+                from polyb0t.data.storage import get_session, TradeIntentDB
+                db_session = get_session()
+                
+                # Get today's executed intents
+                today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+                executed_today = (
+                    db_session.query(TradeIntentDB)
+                    .filter(TradeIntentDB.executed_at >= today_start)
+                    .filter(TradeIntentDB.status.in_(["EXECUTED", "EXECUTED_DRYRUN"]))
+                    .all()
+                )
+                trades_today = len(executed_today)
+                
+                # Calculate win rate from execution results
+                wins = sum(1 for t in executed_today if t.execution_result and t.execution_result.get("success"))
+                win_rate = wins / trades_today if trades_today > 0 else 0
+                
+                performance_stats = {
+                    "trades_today": trades_today,
+                    "win_rate": win_rate,
+                    "total_pnl_pct": 0,  # TODO: calculate from closed positions
+                    "markets_scanned": getattr(self, '_last_markets_scanned', 0),
+                    "markets_tradable": getattr(self, '_last_markets_tradable', 0),
+                }
+                db_session.close()
+            except Exception as e:
+                logger.debug(f"Could not get performance stats: {e}")
+            
+            # Add total experts to ai_status
+            if self.ai_orchestrator:
+                moe_stats = self.ai_orchestrator.get_training_stats().get("moe", {})
+                ai_status["total_experts"] = moe_stats.get("total_experts", 0)
+            
             await self.discord_notifier.send_hourly_summary(
                 portfolio_value=portfolio_value,
                 unrealized_pnl=0.0,
@@ -2232,6 +2275,7 @@ class TradingScheduler:
                 ai_status=ai_status,
                 training_info=training_info,
                 model_metrics=model_metrics if include_metrics_debrief else None,
+                performance_stats=performance_stats,
             )
             logger.info("Discord hourly summary sent")
         except Exception as e:
