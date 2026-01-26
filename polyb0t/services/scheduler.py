@@ -147,6 +147,10 @@ class TradingScheduler:
         # Track last hourly/daily report times
         self._last_hourly_report = datetime.utcnow()
         self._last_daily_report = datetime.utcnow()
+        
+        # Track last training time when we showed metrics debrief
+        # This ensures we only show the model performance debrief once per training cycle
+        self._last_metrics_debrief_training_time: Optional[datetime] = None
 
         logger.info(
             f"Trading scheduler initialized "
@@ -2127,7 +2131,7 @@ class TradingScheduler:
             self._last_daily_report = now
     
     async def _send_hourly_summary(self) -> None:
-        """Send hourly Discord summary."""
+        """Send hourly Discord summary with training progress and model metrics."""
         if not self.discord_notifier:
             return
         
@@ -2146,15 +2150,73 @@ class TradingScheduler:
             except Exception as e:
                 logger.debug(f"Could not fetch balance for hourly: {e}")
             
-            # Get AI stats
+            # Get AI stats and training info
             ai_status = {}
             active_positions = 0
+            training_info = {}
+            model_metrics = None
+            include_metrics_debrief = False
+            
             if self.ai_orchestrator:
                 stats = self.ai_orchestrator.get_training_stats()
+                
+                # Basic AI status
                 ai_status = {
                     "active_experts": stats.get("moe", {}).get("active_experts", 0),
                     "training_examples": stats.get("collector", {}).get("total_examples", 0),
                 }
+                
+                # Training timing info
+                last_training_str = stats.get("last_training")
+                last_training = None
+                if last_training_str:
+                    try:
+                        last_training = datetime.fromisoformat(last_training_str)
+                    except (ValueError, TypeError):
+                        pass
+                
+                # Calculate time until next training (2 hour interval)
+                training_interval_hours = 2
+                if last_training:
+                    next_training = last_training + timedelta(hours=training_interval_hours)
+                    time_until = next_training - datetime.utcnow()
+                    
+                    if time_until.total_seconds() > 0:
+                        hours = int(time_until.total_seconds() // 3600)
+                        minutes = int((time_until.total_seconds() % 3600) // 60)
+                        training_info["time_until_training"] = f"{hours}h {minutes}m"
+                    else:
+                        training_info["time_until_training"] = "Due soon"
+                    
+                    training_info["last_training"] = last_training.strftime("%Y-%m-%d %H:%M UTC")
+                else:
+                    training_info["time_until_training"] = "Not yet trained"
+                    training_info["last_training"] = "Never"
+                
+                # Check if we should include model metrics debrief
+                # Only show once per training cycle
+                if last_training and (
+                    self._last_metrics_debrief_training_time is None or
+                    last_training > self._last_metrics_debrief_training_time
+                ):
+                    include_metrics_debrief = True
+                    self._last_metrics_debrief_training_time = last_training
+                    
+                    # Collect model performance metrics for GPT summary
+                    moe_stats = stats.get("moe", {})
+                    model_metrics = {
+                        "total_experts": moe_stats.get("total_experts", 0),
+                        "active_experts": moe_stats.get("active_experts", 0),
+                        "suspended_experts": moe_stats.get("suspended_experts", 0),
+                        "deprecated_experts": moe_stats.get("deprecated_experts", 0),
+                        "probation_experts": moe_stats.get("probation_experts", 0),
+                        "total_profit_pct": moe_stats.get("total_profit", 0),
+                        "total_simulated_trades": moe_stats.get("total_trades", 0),
+                        "best_expert": moe_stats.get("best_expert_id", "N/A"),
+                        "best_expert_profit": moe_stats.get("best_profit", 0),
+                        "training_examples": stats.get("collector", {}).get("total_examples", 0),
+                        "labeled_examples": stats.get("collector", {}).get("labeled_examples", 0),
+                    }
             
             await self.discord_notifier.send_hourly_summary(
                 portfolio_value=portfolio_value,
@@ -2162,6 +2224,8 @@ class TradingScheduler:
                 trades_this_hour=0,
                 active_positions=active_positions,
                 ai_status=ai_status,
+                training_info=training_info,
+                model_metrics=model_metrics if include_metrics_debrief else None,
             )
             logger.info("Discord hourly summary sent")
         except Exception as e:

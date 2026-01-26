@@ -102,6 +102,8 @@ class NotificationSummarizer:
             return self._build_daily_prompt(data)
         elif event_type == "trade":
             return self._build_trade_prompt(data)
+        elif event_type == "model_debrief":
+            return self._build_model_debrief_prompt(data)
         else:
             return f"Summarize this trading bot event:\n{json.dumps(data, indent=2)}"
     
@@ -147,16 +149,14 @@ Is this a bullish or bearish signal? What might this whale know that others don'
     
     def _build_hourly_prompt(self, data: Dict[str, Any]) -> str:
         """Build prompt for hourly summary."""
-        return f"""Summarize the trading bot's hourly status:
+        return f"""Summarize the trading bot's hourly status in 2-3 sentences:
 
 Portfolio value: ${data.get('portfolio_value', 0):,.2f}
-Unrealized P&L: ${data.get('unrealized_pnl', 0):+,.2f}
-Active positions: {data.get('active_positions', 0)}
-Trades this hour: {data.get('trades_this_hour', 0)}
 Active AI experts: {data.get('ai_status', {}).get('active_experts', 0)}
 Training examples collected: {data.get('ai_status', {}).get('training_examples', 0):,}
+Time until next AI training: {data.get('time_until_training', 'Unknown')}
 
-Give a brief health check - is everything running smoothly?"""
+Give a brief, friendly status update. Mention how long until the next training cycle."""
     
     def _build_daily_prompt(self, data: Dict[str, Any]) -> str:
         """Build prompt for daily report."""
@@ -189,6 +189,40 @@ AI confidence: {data.get('prediction_confidence', 0):.1%}
 Top expert used: {data.get('top_expert', 'N/A')}
 
 Explain what happened and whether the AI made a good decision."""
+    
+    def _build_model_debrief_prompt(self, data: Dict[str, Any]) -> str:
+        """Build prompt for model performance debrief.
+        
+        This provides a detailed explanation of how the AI model is performing,
+        shown once per training cycle.
+        """
+        total_experts = data.get('total_experts', 0)
+        active = data.get('active_experts', 0)
+        suspended = data.get('suspended_experts', 0)
+        deprecated = data.get('deprecated_experts', 0)
+        probation = data.get('probation_experts', 0)
+        
+        return f"""Provide a detailed debrief on the AI trading model's current performance. 
+Explain what these metrics mean and whether the system is healthy. Be educational but concise (3-4 sentences).
+
+Model Performance Metrics:
+- Total experts in the pool: {total_experts}
+- Active experts (trusted, making predictions): {active}
+- Probation experts (new, being tested): {probation}
+- Suspended experts (temporarily paused due to poor performance): {suspended}
+- Deprecated experts (permanently removed): {deprecated}
+- Total simulated trades by active experts: {data.get('total_simulated_trades', 0)}
+- Best performing expert: {data.get('best_expert', 'N/A')} with {data.get('best_expert_profit', 0):+.1%} profit
+- Training examples collected: {data.get('training_examples', 0):,}
+- Labeled examples (with known outcomes): {data.get('labeled_examples', 0):,}
+
+Key questions to address:
+1. Is the ratio of active to suspended experts healthy? (More active = better)
+2. Are there enough training examples for reliable learning?
+3. Is the best expert showing positive profit?
+4. What does this mean for the system's ability to make good trading decisions?
+
+Keep the explanation accessible to someone who isn't a machine learning expert."""
     
     def _call_gpt(self, user_prompt: str) -> Optional[str]:
         """Call the OpenAI API to get a summary."""
