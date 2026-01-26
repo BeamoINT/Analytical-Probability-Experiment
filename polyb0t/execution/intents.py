@@ -1,5 +1,6 @@
 """Trade intent system for human-in-the-loop approval."""
 
+import json
 import logging
 import hashlib
 import uuid
@@ -14,6 +15,68 @@ from polyb0t.data.storage import TradeIntentDB
 from polyb0t.models.strategy_baseline import TradingSignal
 
 logger = logging.getLogger(__name__)
+
+
+def _sanitize_for_json(obj: Any, max_depth: int = 10) -> Any:
+    """Recursively convert objects to JSON-serializable types.
+    
+    Handles numpy types, datetime objects, and other non-serializable types.
+    Prevents infinite recursion with max_depth limit.
+    """
+    if max_depth <= 0:
+        return str(obj)
+    
+    if obj is None:
+        return None
+    
+    # Handle primitive types
+    if isinstance(obj, (bool, int, str)):
+        return obj
+    
+    if isinstance(obj, float):
+        # Handle NaN and Inf
+        if obj != obj or obj == float('inf') or obj == float('-inf'):
+            return None
+        return obj
+    
+    # Handle numpy types
+    try:
+        import numpy as np
+        if isinstance(obj, (np.integer, np.int64, np.int32)):
+            return int(obj)
+        if isinstance(obj, (np.floating, np.float64, np.float32)):
+            val = float(obj)
+            if val != val or val == float('inf') or val == float('-inf'):
+                return None
+            return val
+        if isinstance(obj, np.ndarray):
+            return [_sanitize_for_json(x, max_depth - 1) for x in obj.tolist()]
+        if isinstance(obj, np.bool_):
+            return bool(obj)
+    except ImportError:
+        pass
+    
+    # Handle datetime
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    
+    # Handle dict
+    if isinstance(obj, dict):
+        return {str(k): _sanitize_for_json(v, max_depth - 1) for k, v in obj.items()}
+    
+    # Handle list/tuple
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize_for_json(x, max_depth - 1) for x in obj]
+    
+    # Handle objects with __dict__
+    if hasattr(obj, '__dict__'):
+        return _sanitize_for_json(obj.__dict__, max_depth - 1)
+    
+    # Fallback: convert to string
+    try:
+        return str(obj)
+    except Exception:
+        return None
 
 
 class IntentType(str, Enum):
@@ -460,6 +523,10 @@ class IntentManager:
             intent: Trade intent to persist.
             cycle_id: Current cycle ID.
         """
+        # Sanitize JSON fields to prevent serialization errors
+        safe_risk_checks = _sanitize_for_json(intent.risk_checks)
+        safe_signal_data = _sanitize_for_json(intent.signal_data)
+        
         db_intent = TradeIntentDB(
             intent_uuid=intent.intent_id if len(intent.intent_id) <= 36 else None,
             intent_id=intent.intent_id,
@@ -476,8 +543,8 @@ class IntentManager:
             p_market=intent.p_market,
             p_model=intent.p_model,
             reason=intent.reason,
-            risk_checks=intent.risk_checks,
-            signal_data=intent.signal_data,
+            risk_checks=safe_risk_checks,
+            signal_data=safe_signal_data,
             status=intent.status.value,
             created_at=intent.created_at,
             expires_at=intent.expires_at,
@@ -613,7 +680,7 @@ class IntentManager:
 
         db_intent.status = IntentStatus.EXECUTED.value
         db_intent.executed_at = datetime.utcnow()
-        db_intent.execution_result = execution_result
+        db_intent.execution_result = _sanitize_for_json(execution_result)
         if isinstance(execution_result, dict):
             oid = execution_result.get("order_id") or execution_result.get("submitted_order_id")
             if oid:
