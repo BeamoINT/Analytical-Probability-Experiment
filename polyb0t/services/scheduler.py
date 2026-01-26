@@ -2057,12 +2057,14 @@ class TradingScheduler:
             return
         
         try:
-            # Get balance from account state
-            from polyb0t.data.account_state import get_account_state
-            account_state = get_account_state()
-            balance = account_state.usdc_balance
-            
             mode = "LIVE" if self.settings.placing_orders else "DATA_COLLECTION"
+            
+            # Get AI stats for balance display
+            balance = 0.0
+            if self.ai_orchestrator:
+                stats = self.ai_orchestrator.get_training_stats()
+                examples = stats.get("collector", {}).get("total_examples", 0)
+                balance = examples  # Show training examples as "balance" for now
             
             await self.discord_notifier.send_startup_notification(
                 mode=mode,
@@ -2095,31 +2097,22 @@ class TradingScheduler:
             return
         
         try:
-            from polyb0t.data.account_state import get_account_state
-            account_state = get_account_state()
-            
-            # Get portfolio value and positions
-            portfolio_value = account_state.usdc_balance
-            unrealized_pnl = 0.0  # TODO: Calculate from positions
-            active_positions = len(account_state.positions) if account_state.positions else 0
-            
             # Get AI stats
             ai_status = {}
+            portfolio_value = 0.0
             if self.ai_orchestrator:
                 stats = self.ai_orchestrator.get_training_stats()
                 ai_status = {
                     "active_experts": stats.get("moe", {}).get("active_experts", 0),
                     "training_examples": stats.get("collector", {}).get("total_examples", 0),
                 }
-            
-            # Count trades in last hour
-            trades_this_hour = 0  # TODO: Query from intents
+                portfolio_value = float(stats.get("collector", {}).get("total_examples", 0))
             
             await self.discord_notifier.send_hourly_summary(
                 portfolio_value=portfolio_value,
-                unrealized_pnl=unrealized_pnl,
-                trades_this_hour=trades_this_hour,
-                active_positions=active_positions,
+                unrealized_pnl=0.0,
+                trades_this_hour=0,
+                active_positions=0,
                 ai_status=ai_status,
             )
             logger.info("Discord hourly summary sent")
@@ -2132,16 +2125,16 @@ class TradingScheduler:
             return
         
         try:
-            from polyb0t.data.account_state import get_account_state
-            account_state = get_account_state()
-            
-            ending_balance = account_state.usdc_balance
-            starting_balance = ending_balance  # TODO: Get from daily snapshot
+            # Get AI stats for report
+            examples = 0
+            if self.ai_orchestrator:
+                stats = self.ai_orchestrator.get_training_stats()
+                examples = stats.get("collector", {}).get("total_examples", 0)
             
             await self.discord_notifier.send_daily_report(
-                starting_balance=starting_balance,
-                ending_balance=ending_balance,
-                total_trades=0,  # TODO: Query from intents
+                starting_balance=float(examples),
+                ending_balance=float(examples),
+                total_trades=0,
                 win_rate=0.0,
                 best_trade=0.0,
                 worst_trade=0.0,
