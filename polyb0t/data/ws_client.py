@@ -145,6 +145,9 @@ class PolymarketWebSocket:
         self._health_check_task: Optional[asyncio.Task] = None
         self._running = False
         
+        # Lock to prevent multiple concurrent recv() calls
+        self._recv_lock = asyncio.Lock()
+        
     @property
     def is_connected(self) -> bool:
         """Check if WebSocket is connected."""
@@ -167,6 +170,24 @@ class PolymarketWebSocket:
             
         if self._connected:
             return True
+        
+        # Cancel any existing background tasks before creating new ones
+        # This prevents multiple receive loops during reconnection
+        if self._receive_task and not self._receive_task.done():
+            self._receive_task.cancel()
+            try:
+                await self._receive_task
+            except asyncio.CancelledError:
+                pass
+            self._receive_task = None
+        
+        if self._health_check_task and not self._health_check_task.done():
+            self._health_check_task.cancel()
+            try:
+                await self._health_check_task
+            except asyncio.CancelledError:
+                pass
+            self._health_check_task = None
             
         try:
             logger.info(f"Connecting to Polymarket WebSocket: {WS_ENDPOINT}")
@@ -182,7 +203,7 @@ class PolymarketWebSocket:
             self._reconnect_attempts = 0
             self._last_message_time = datetime.utcnow()
             
-            # Start background tasks
+            # Start background tasks (only one of each)
             self._running = True
             self._receive_task = asyncio.create_task(self._receive_loop())
             self._health_check_task = asyncio.create_task(self._health_check_loop())
@@ -360,13 +381,20 @@ class PolymarketWebSocket:
         self._on_disconnect_callbacks.append(callback)
     
     async def _receive_loop(self) -> None:
-        """Background task to receive messages."""
+        """Background task to receive messages.
+        
+        Only one receive loop should run at a time.
+        """
         while self._running and self._ws:
             try:
-                message = await asyncio.wait_for(
-                    self._ws.recv(),
-                    timeout=HEALTH_CHECK_INTERVAL + 10,
-                )
+                # Use lock to prevent concurrent recv() calls
+                async with self._recv_lock:
+                    if not self._ws or not self._connected:
+                        break
+                    message = await asyncio.wait_for(
+                        self._ws.recv(),
+                        timeout=HEALTH_CHECK_INTERVAL + 10,
+                    )
                 
                 self._last_message_time = datetime.utcnow()
                 await self._handle_message(message)
@@ -377,13 +405,16 @@ class PolymarketWebSocket:
             except websockets.exceptions.ConnectionClosed as e:
                 logger.warning(f"WebSocket connection closed: {e}")
                 self._connected = False
-                await self._reconnect()
+                # Don't reconnect from here - let health check handle it
+                break
                 
             except asyncio.CancelledError:
                 break
                 
             except Exception as e:
-                logger.error(f"WebSocket receive error: {e}")
+                # Only log once, don't spam
+                if "another coroutine" not in str(e):
+                    logger.error(f"WebSocket receive error: {e}")
                 await asyncio.sleep(1)
     
     async def _handle_message(self, raw_message: str) -> None:
@@ -572,7 +603,16 @@ class PolymarketWebSocket:
             try:
                 await asyncio.sleep(HEALTH_CHECK_INTERVAL)
                 
+                # Check if receive task died and we need to reconnect
+                if self._receive_task and self._receive_task.done() and self._running:
+                    logger.warning("Receive task died, reconnecting...")
+                    await self._reconnect()
+                    continue
+                
                 if not self._connected:
+                    # Try to reconnect if not connected
+                    if self._running:
+                        await self._reconnect()
                     continue
                 
                 # Check last message time
