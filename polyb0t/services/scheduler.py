@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from polyb0t.config import get_settings
 from polyb0t.data import CLOBClient, GammaClient, init_db
-from polyb0t.data.models import OrderBook, Trade
+from polyb0t.data.models import OrderBook, OrderBookLevel, Trade
 from polyb0t.data.storage import (
     MarketDB,
     MarketOutcomeDB,
@@ -1564,12 +1564,12 @@ class TradingScheduler:
             for token_id, market_id in token_market_pairs:
                 ws_book = self.ws_client.get_orderbook(token_id)
                 if ws_book and ws_book.best_bid and ws_book.best_ask:
-                    # Convert WebSocket orderbook to our format
+                    # Convert WebSocket orderbook to our format (need OrderBookLevel objects)
                     ob = OrderBook(
                         token_id=token_id,
                         timestamp=ws_book.last_update,
-                        bids=[(level.price, level.size) for level in ws_book.bids],
-                        asks=[(level.price, level.size) for level in ws_book.asks],
+                        bids=[OrderBookLevel(price=level.price, size=level.size) for level in ws_book.bids],
+                        asks=[OrderBookLevel(price=level.price, size=level.size) for level in ws_book.asks],
                     )
                     orderbooks[token_id] = ob
                     self._save_orderbook(ob, market_id, db_session)
