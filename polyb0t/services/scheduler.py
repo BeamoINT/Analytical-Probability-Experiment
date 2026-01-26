@@ -131,6 +131,22 @@ class TradingScheduler:
             logger.info("Whale tracker initialized")
         except Exception as e:
             logger.warning(f"Whale tracker not available: {e}")
+        
+        # Discord notifier for alerts and status updates
+        self.discord_notifier = None
+        try:
+            from polyb0t.services.discord_notifier import get_discord_notifier
+            self.discord_notifier = get_discord_notifier()
+            if self.discord_notifier.enabled:
+                logger.info("Discord notifier initialized")
+            else:
+                logger.info("Discord notifier disabled (no webhook URL configured)")
+        except Exception as e:
+            logger.warning(f"Discord notifier not available: {e}")
+        
+        # Track last hourly/daily report times
+        self._last_hourly_report = datetime.utcnow()
+        self._last_daily_report = datetime.utcnow()
 
         logger.info(
             f"Trading scheduler initialized "
@@ -153,6 +169,9 @@ class TradingScheduler:
                     logger.warning("WebSocket connection failed - falling back to HTTP polling")
             except Exception as e:
                 logger.warning(f"WebSocket startup error: {e} - falling back to HTTP polling")
+        
+        # Send Discord startup notification
+        await self._send_discord_startup()
         
         # Backfill missing price data on startup (if enabled)
         if self.settings.ml_enable_backfill:
@@ -204,6 +223,9 @@ class TradingScheduler:
                     self.is_running = False
                     break
 
+            # Check for periodic Discord reports
+            await self._check_discord_reports()
+            
             # Wait before next cycle
             await asyncio.sleep(self.settings.loop_interval_seconds)
 
@@ -2028,3 +2050,103 @@ class TradingScheduler:
             except Exception as e:
                 logger.warning(f"WebSocket disconnect error: {e}")
             self._ws_connected = False
+    
+    async def _send_discord_startup(self) -> None:
+        """Send Discord startup notification."""
+        if not self.discord_notifier or not self.discord_notifier.enabled:
+            return
+        
+        try:
+            # Get balance
+            from polyb0t.services.balance import get_balance_manager
+            balance_mgr = get_balance_manager()
+            balance = balance_mgr.get_total_balance()
+            
+            mode = "LIVE" if self.settings.placing_orders else "DATA_COLLECTION"
+            
+            await self.discord_notifier.send_startup_notification(
+                mode=mode,
+                balance=balance,
+            )
+            logger.info("Discord startup notification sent")
+        except Exception as e:
+            logger.warning(f"Failed to send Discord startup notification: {e}")
+    
+    async def _check_discord_reports(self) -> None:
+        """Check if hourly or daily reports should be sent."""
+        if not self.discord_notifier or not self.discord_notifier.enabled:
+            return
+        
+        now = datetime.utcnow()
+        
+        # Hourly summary (every hour)
+        if (now - self._last_hourly_report).total_seconds() >= 3600:
+            await self._send_hourly_summary()
+            self._last_hourly_report = now
+        
+        # Daily report (every 24 hours, at midnight UTC)
+        if (now - self._last_daily_report).total_seconds() >= 86400:
+            await self._send_daily_report()
+            self._last_daily_report = now
+    
+    async def _send_hourly_summary(self) -> None:
+        """Send hourly Discord summary."""
+        if not self.discord_notifier:
+            return
+        
+        try:
+            from polyb0t.services.balance import get_balance_manager
+            balance_mgr = get_balance_manager()
+            
+            # Get portfolio value and positions
+            portfolio_value = balance_mgr.get_total_balance()
+            unrealized_pnl = 0.0  # TODO: Calculate from positions
+            active_positions = len(self.portfolio.positions) if hasattr(self.portfolio, 'positions') else 0
+            
+            # Get AI stats
+            ai_status = {}
+            if self.ai_orchestrator:
+                stats = self.ai_orchestrator.get_training_stats()
+                ai_status = {
+                    "active_experts": stats.get("moe", {}).get("active_experts", 0),
+                    "training_examples": stats.get("collector", {}).get("total_examples", 0),
+                }
+            
+            # Count trades in last hour
+            trades_this_hour = 0  # TODO: Query from intents
+            
+            await self.discord_notifier.send_hourly_summary(
+                portfolio_value=portfolio_value,
+                unrealized_pnl=unrealized_pnl,
+                trades_this_hour=trades_this_hour,
+                active_positions=active_positions,
+                ai_status=ai_status,
+            )
+            logger.info("Discord hourly summary sent")
+        except Exception as e:
+            logger.warning(f"Failed to send Discord hourly summary: {e}")
+    
+    async def _send_daily_report(self) -> None:
+        """Send daily Discord performance report."""
+        if not self.discord_notifier:
+            return
+        
+        try:
+            from polyb0t.services.balance import get_balance_manager
+            balance_mgr = get_balance_manager()
+            
+            ending_balance = balance_mgr.get_total_balance()
+            starting_balance = ending_balance  # TODO: Get from daily snapshot
+            
+            await self.discord_notifier.send_daily_report(
+                starting_balance=starting_balance,
+                ending_balance=ending_balance,
+                total_trades=0,  # TODO: Query from intents
+                win_rate=0.0,
+                best_trade=0.0,
+                worst_trade=0.0,
+                expert_summary={},
+            )
+            logger.info("Discord daily report sent")
+        except Exception as e:
+            logger.warning(f"Failed to send Discord daily report: {e}")
