@@ -2056,16 +2056,21 @@ class TradingScheduler:
         if not self.discord_notifier or not self.discord_notifier.enabled:
             return
         
+        # In-process flag to prevent duplicate calls
+        if getattr(self, '_startup_notification_sent', False):
+            return
+        
         try:
-            # Rate limit: don't send if one was sent in the last 5 minutes
+            # Rate limit: don't send if one was sent in the last hour
             # This prevents spam when the bot restarts frequently
             import os
             startup_marker = "/tmp/polybot_startup_sent"
             if os.path.exists(startup_marker):
                 try:
                     mtime = os.path.getmtime(startup_marker)
-                    if time.time() - mtime < 300:  # 5 minutes
-                        logger.info("Skipping startup notification (sent recently)")
+                    if time.time() - mtime < 3600:  # 1 hour
+                        logger.info("Skipping startup notification (sent within last hour)")
+                        self._startup_notification_sent = True
                         return
                 except Exception:
                     pass
@@ -2093,6 +2098,7 @@ class TradingScheduler:
             )
             
             # Mark that we sent a notification
+            self._startup_notification_sent = True
             try:
                 with open(startup_marker, "w") as f:
                     f.write(str(time.time()))
