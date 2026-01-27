@@ -703,16 +703,20 @@ class AIOrchestrator:
         if self._use_moe:
             # Try mixture prediction first (combines multiple experts)
             from polyb0t.ml.moe.meta_controller import get_meta_controller
-            
+
+            # In dry-run mode, include ALL trainable experts (not just active)
+            # to gather performance data for training feedback
+            include_inactive = getattr(self.settings, "dry_run", False)
+
             meta = get_meta_controller(self.expert_pool)
-            result = meta.predict_with_mixture(features)
-            
+            result = meta.predict_with_mixture(features, include_inactive=include_inactive)
+
             if result is not None:
                 prediction, confidence, metadata = result
-                
+
                 # Store metadata for later analysis
                 self._last_prediction_metadata = metadata
-                
+
                 # Convert binary prediction to edge-like value
                 # 1.0 = strongly profitable, 0.0 = not profitable
                 # Map to: positive = bullish, near-zero = neutral
@@ -725,15 +729,15 @@ class AIOrchestrator:
                         edge = -(prediction - 0.5) * 2 * confidence  # -1 to 0
                 else:
                     edge = 0  # Not profitable, no signal
-                
+
                 return (edge, confidence)
-            
+
             # Fallback to standard pool predict if mixture fails
-            result = self.expert_pool.predict(features)
+            result = self.expert_pool.predict(features, include_inactive=include_inactive)
             if result is not None:
                 prediction, confidence, best_expert = result
-                self._last_prediction_metadata = {"best_expert": best_expert}
-                
+                self._last_prediction_metadata = {"best_expert": best_expert, "include_inactive": include_inactive}
+
                 if prediction > 0.5:
                     momentum = features.get("momentum_24h", 0)
                     if momentum >= 0:
@@ -742,7 +746,7 @@ class AIOrchestrator:
                         edge = -(prediction - 0.5) * 2 * confidence
                 else:
                     edge = 0
-                
+
                 return (edge, confidence)
         
         # No MoE prediction available

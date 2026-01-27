@@ -239,96 +239,129 @@ class ExpertPool:
         return self.experts.get(expert_id)
     
     def get_active_experts(self) -> List[Expert]:
-        """Get all active (non-deprecated) experts."""
+        """Get all active (trading-enabled) experts."""
         return [e for e in self.experts.values() if e.is_active and not e.is_deprecated]
-    
+
+    def get_trainable_experts(self) -> List[Expert]:
+        """Get all non-deprecated experts that have trained models.
+
+        This includes ACTIVE, SUSPENDED, and PROBATION experts - any expert
+        that has been trained and could potentially make predictions.
+        Used in dry-run/evaluation mode to gather performance data from all experts.
+        """
+        return [
+            e for e in self.experts.values()
+            if not e.is_deprecated and e._model is not None
+        ]
+
     def get_deprecated_experts(self) -> List[Expert]:
         """Get all deprecated experts."""
         return [e for e in self.experts.values() if e.is_deprecated]
     
-    def get_experts_for_market(self, features: Dict[str, Any]) -> List[Tuple[Expert, float]]:
+    def get_experts_for_market(
+        self,
+        features: Dict[str, Any],
+        include_inactive: bool = False,
+    ) -> List[Tuple[Expert, float]]:
         """Get relevant experts for a market with their weights.
-        
+
         Args:
             features: Market feature dict
-        
+            include_inactive: If True, include SUSPENDED/PROBATION experts
+                (for dry-run/evaluation mode to gather performance data)
+
         Returns:
             List of (expert, weight) tuples sorted by weight descending
         """
+        # Select expert pool based on mode
+        experts = self.get_trainable_experts() if include_inactive else self.get_active_experts()
+
+        if not experts:
+            return []
+
         if self.gating is None:
-            return [(e, 1.0 / len(self.experts)) for e in self.get_active_experts()]
-        
+            return [(e, 1.0 / len(experts)) for e in experts]
+
         weights = self.gating.get_weights(features)
-        
+
         result = []
-        for expert in self.get_active_experts():
+        for expert in experts:
             weight = weights.get(expert.expert_id, 0.0)
             if weight > 0.01:  # Ignore very low weights
                 result.append((expert, weight))
-        
+
         result.sort(key=lambda x: x[1], reverse=True)
         return result
     
-    def predict(self, features: Dict[str, Any]) -> Optional[Tuple[float, float, str]]:
-        """Make a weighted prediction using all experts.
-        
+    def predict(
+        self,
+        features: Dict[str, Any],
+        include_inactive: bool = False,
+    ) -> Optional[Tuple[float, float, str]]:
+        """Make a weighted prediction using experts.
+
         Args:
             features: Market feature dict
-        
+            include_inactive: If True, include SUSPENDED/PROBATION experts
+                (for dry-run/evaluation mode)
+
         Returns:
             Tuple of (prediction, confidence, best_expert_id) or None
         """
-        expert_weights = self.get_experts_for_market(features)
-        
+        expert_weights = self.get_experts_for_market(features, include_inactive=include_inactive)
+
         if not expert_weights:
             return None
-        
+
         weighted_pred = 0.0
         weighted_conf = 0.0
         total_weight = 0.0
         best_expert_id = None
         best_weight = 0.0
-        
+
         for expert, weight in expert_weights:
             result = expert.predict(features)
             if result is None:
                 continue
-            
+
             pred, conf = result
             weighted_pred += pred * weight * conf
             weighted_conf += conf * weight
             total_weight += weight
-            
+
             if weight > best_weight:
                 best_weight = weight
                 best_expert_id = expert.expert_id
-        
+
         if total_weight == 0:
             return None
-        
+
         final_pred = weighted_pred / total_weight
         final_conf = weighted_conf / total_weight
-        
+
         return (final_pred, final_conf, best_expert_id)
     
     def predict_with_mixture(
         self,
         features: Dict[str, Any],
         mixture_config: Optional[Any] = None,
+        include_inactive: bool = False,
     ) -> Optional[Tuple[float, float, Dict[str, Any]]]:
         """Make a prediction using expert mixture from MetaController.
-        
+
         Args:
             features: Market features
             mixture_config: Optional MixtureConfig from MetaController
-        
+            include_inactive: If True, include SUSPENDED/PROBATION experts
+                (for dry-run/evaluation mode)
+
         Returns:
             Tuple of (prediction, confidence, metadata) or None
         """
         from polyb0t.ml.moe.meta_controller import get_meta_controller
-        
+
         meta = get_meta_controller(self)
-        return meta.predict_with_mixture(features, mixture_config)
+        return meta.predict_with_mixture(features, mixture_config, include_inactive=include_inactive)
     
     def add_expert(self, expert: Expert) -> bool:
         """Add a new expert to the pool.

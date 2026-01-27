@@ -418,27 +418,39 @@ class MetaController:
         config: Optional[MixtureConfig] = None,
         use_all_experts: bool = True,  # Always use ensemble by default
         use_two_stage: bool = True,  # Enable cross-expert awareness
+        include_inactive: bool = False,  # Include SUSPENDED/PROBATION experts (dry-run mode)
     ) -> Tuple[float, float, Dict[str, Any]]:
         """Make a prediction using two-stage cross-expert aware ensemble.
-        
+
         Two-Stage Prediction:
         1. Stage 1: Collect independent predictions from all experts
         2. Compute consensus features (mean, std, agreement, bullish ratio)
         3. Stage 2: Re-predict with cross-expert awareness features
-        
+
         Each expert's weight is based on:
         - Recent profit performance
         - Prediction confidence
         - Expert confidence multiplier
-        
+
+        Args:
+            features: Market features dict
+            config: Optional mixture configuration (for fallback routing)
+            use_all_experts: Use ensemble mode (default True)
+            use_two_stage: Enable two-stage cross-expert awareness (default True)
+            include_inactive: If True, include SUSPENDED/PROBATION experts
+                for evaluation/dry-run mode to gather performance data
+
         Returns:
             Tuple of (prediction, confidence, metadata)
         """
         if self.expert_pool is None:
             return 0.5, 0.0, {"error": "No expert pool"}
-        
-        # Get ALL active experts
-        active_experts = self.expert_pool.get_active_experts()
+
+        # Get experts based on mode - include inactive for dry-run/evaluation
+        if include_inactive:
+            active_experts = self.expert_pool.get_trainable_experts()
+        else:
+            active_experts = self.expert_pool.get_active_experts()
         
         if not active_experts:
             # Fallback to old routing-based approach
@@ -527,7 +539,8 @@ class MetaController:
         # For ensemble mode, enhance confidence with performance awareness
         if use_all_experts and self.expert_pool:
             expert_performances = {}
-            for expert in self.expert_pool.get_active_experts():
+            # Use same expert list that contributed to predictions
+            for expert in active_experts:
                 expert_performances[expert.expert_id] = expert.metrics.simulated_profit_pct
             
             enhanced_conf = self._calculate_ensemble_confidence(
@@ -574,6 +587,7 @@ class MetaController:
             "mixture_id": mixture_id,
             "ensemble_mode": use_all_experts,
             "two_stage": use_two_stage,
+            "include_inactive": include_inactive,
             "num_experts_used": len(predictions),
             "primary_expert": primary_expert,
             "supporting_experts": supporting,
