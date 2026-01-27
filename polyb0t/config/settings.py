@@ -89,6 +89,110 @@ class Settings(BaseSettings):
         description="Balance training examples across market categories for diverse training data"
     )
 
+    # === DEEP LEARNING CONFIGURATION ===
+    ai_use_deep_learning: bool = Field(
+        default=True,
+        description="Use deep neural networks for MoE experts (vs sklearn classifiers)"
+    )
+    ai_neural_hidden_dims: str = Field(
+        default="256,128,64",
+        description="Hidden layer dimensions for neural network (comma-separated)"
+    )
+    ai_neural_dropout: float = Field(
+        default=0.3,
+        description="Dropout rate for neural network regularization"
+    )
+    ai_neural_weight_decay: float = Field(
+        default=1e-4,
+        description="Weight decay (L2 regularization) for neural network"
+    )
+    ai_neural_learning_rate: float = Field(
+        default=1e-3,
+        description="Learning rate for neural network training"
+    )
+    ai_neural_batch_size: int = Field(
+        default=128,
+        description="Batch size for neural network training"
+    )
+    ai_neural_max_epochs: int = Field(
+        default=200,
+        description="Maximum training epochs for neural network"
+    )
+    ai_early_stopping_patience: int = Field(
+        default=15,
+        description="Early stopping patience (epochs without improvement)"
+    )
+    ai_label_smoothing: float = Field(
+        default=0.1,
+        description="Label smoothing for cross-entropy loss (anti-overfitting)"
+    )
+
+    # XGBoost/LightGBM Configuration
+    ai_xgb_n_estimators: int = Field(
+        default=500,
+        description="Number of XGBoost boosting rounds"
+    )
+    ai_xgb_max_depth: int = Field(
+        default=6,
+        description="Maximum depth of XGBoost trees"
+    )
+    ai_lgb_n_estimators: int = Field(
+        default=500,
+        description="Number of LightGBM boosting rounds"
+    )
+    ai_lgb_num_leaves: int = Field(
+        default=63,
+        description="Number of leaves in LightGBM trees"
+    )
+
+    # Ensemble Weights
+    ai_ensemble_nn_weight: float = Field(
+        default=0.4,
+        description="Weight for neural network in ensemble (0-1)"
+    )
+    ai_ensemble_xgb_weight: float = Field(
+        default=0.35,
+        description="Weight for XGBoost in ensemble (0-1)"
+    )
+    ai_ensemble_lgb_weight: float = Field(
+        default=0.25,
+        description="Weight for LightGBM in ensemble (0-1)"
+    )
+
+    # Hyperparameter Optimization
+    ai_enable_hpo: bool = Field(
+        default=False,
+        description="Enable Optuna hyperparameter optimization (slow but finds better params)"
+    )
+    ai_hpo_n_trials: int = Field(
+        default=50,
+        description="Number of Optuna HPO trials"
+    )
+    ai_hpo_timeout: int = Field(
+        default=3600,
+        description="HPO timeout in seconds (1 hour default)"
+    )
+
+    # Neural Gating
+    ai_use_neural_gating: bool = Field(
+        default=True,
+        description="Use attention-based neural gating (vs gradient boosting)"
+    )
+    ai_gating_hidden_dim: int = Field(
+        default=64,
+        description="Hidden dimension for neural gating network"
+    )
+    ai_gating_num_heads: int = Field(
+        default=4,
+        description="Number of attention heads in gating network"
+    )
+
+    # GPU Configuration
+    ai_use_gpu: bool = Field(
+        default=True,
+        description="Use GPU for training if available (auto-detects CUDA)"
+    )
+
     # === EXTERNAL API KEYS ===
     openai_api_key: str = Field(
         default="",

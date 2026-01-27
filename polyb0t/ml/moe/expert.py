@@ -4,6 +4,7 @@ Each expert is a self-contained classifier ensemble that specializes
 in a particular domain (category, risk level, time horizon).
 
 Includes versioning support for rollback and smart state management.
+Supports both sklearn classifiers (fast) and deep learning ensembles (more accurate).
 """
 
 import logging
@@ -11,7 +12,7 @@ import os
 import pickle
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 from sklearn.ensemble import (
@@ -29,6 +30,15 @@ from polyb0t.ml.moe.versioning import (
     ExpertVersion,
     ExpertVersionManager,
 )
+
+# Try to import deep learning components
+try:
+    from polyb0t.ml.moe.deep_ensemble import DeepExpertEnsemble, EnsembleMetrics
+    DEEP_LEARNING_AVAILABLE = True
+except ImportError:
+    DEEP_LEARNING_AVAILABLE = False
+    DeepExpertEnsemble = None
+    EnsembleMetrics = None
 
 logger = logging.getLogger(__name__)
 
@@ -133,17 +143,36 @@ class ExpertMetrics:
 
 
 class _ExpertEnsemble:
-    """Ensemble of classifiers for a single expert."""
-    
-    def __init__(self, classifiers: List[Any], scaler: StandardScaler):
+    """Ensemble of classifiers for a single expert.
+
+    Supports both sklearn classifiers (fast) and deep learning ensembles.
+    """
+
+    def __init__(
+        self,
+        classifiers: List[Any],
+        scaler: StandardScaler,
+        is_deep: bool = False,
+        deep_ensemble: Optional[Any] = None,
+    ):
         self.classifiers = classifiers
         self.scaler = scaler
         self.n_models_ = len(classifiers)
-    
+        self.is_deep = is_deep
+        self.deep_ensemble = deep_ensemble
+
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
         """Get probability predictions averaged across all classifiers."""
+        # Use deep ensemble if available
+        if self.is_deep and self.deep_ensemble is not None:
+            try:
+                return self.deep_ensemble.predict_proba(X)
+            except Exception as e:
+                logger.debug(f"Deep ensemble prediction failed, falling back: {e}")
+                # Fall through to sklearn
+
         X_scaled = self.scaler.transform(X)
-        
+
         all_probs = []
         for clf in self.classifiers:
             try:
@@ -151,14 +180,14 @@ class _ExpertEnsemble:
                 all_probs.append(probs)
             except Exception:
                 continue
-        
+
         if not all_probs:
             # Return 50/50 if no classifiers work
             return np.full((len(X), 2), 0.5)
-        
+
         # Average probabilities
         return np.mean(all_probs, axis=0)
-    
+
     def predict(self, X: np.ndarray) -> np.ndarray:
         """Get class predictions."""
         probs = self.predict_proba(X)
@@ -341,31 +370,56 @@ class Expert:
         y_binary: np.ndarray,
         y_reg: np.ndarray,
         sample_weights: Optional[np.ndarray] = None,
+        use_deep_learning: Optional[bool] = None,
     ) -> ExpertMetrics:
         """Train this expert on the provided data.
-        
+
         Args:
             X: Feature matrix
             y_binary: Binary target (1=profitable, 0=not profitable)
             y_reg: Regression target (actual price change) for simulation
             sample_weights: Optional sample weights
-        
+            use_deep_learning: Override deep learning setting (None = use config)
+
         Returns:
             ExpertMetrics with profitability results
         """
         if len(X) < 50:
             logger.warning(f"Expert {self.expert_id}: Not enough data ({len(X)} samples)")
             return self.metrics
-        
-        logger.info(f"Expert {self.expert_id} ({self.domain}): Training on {len(X)} samples...")
-        
+
+        # Check if we should use deep learning
+        if use_deep_learning is None:
+            try:
+                from polyb0t.config.settings import get_settings
+                settings = get_settings()
+                use_deep_learning = settings.ai_use_deep_learning
+            except Exception:
+                use_deep_learning = False
+
+        # Use deep learning if available and configured
+        if use_deep_learning and DEEP_LEARNING_AVAILABLE and len(X) >= 500:
+            return self._train_deep(X, y_binary, y_reg, sample_weights)
+        else:
+            return self._train_sklearn(X, y_binary, y_reg, sample_weights)
+
+    def _train_sklearn(
+        self,
+        X: np.ndarray,
+        y_binary: np.ndarray,
+        y_reg: np.ndarray,
+        sample_weights: Optional[np.ndarray] = None,
+    ) -> ExpertMetrics:
+        """Train using sklearn classifiers (fast, good baseline)."""
+        logger.info(f"Expert {self.expert_id} ({self.domain}): Training sklearn on {len(X)} samples...")
+
         # Add interaction features
         X_enhanced = self._add_interaction_features(X)
-        
+
         # Scale features
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(X_enhanced)
-        
+
         # Train multiple classifiers and select best
         classifiers = []
         classifier_configs = [
@@ -386,7 +440,7 @@ class Expert:
                 random_state=42
             )),
         ]
-        
+
         # Cross-validate and select top 3 classifiers
         cv_scores = []
         for name, clf in classifier_configs:
@@ -395,31 +449,31 @@ class Expert:
                     clf.fit(X_scaled, y_binary, sample_weight=sample_weights)
                 else:
                     clf.fit(X_scaled, y_binary)
-                
+
                 # Get CV score
                 scores = cross_val_score(clf, X_scaled, y_binary, cv=3, scoring='roc_auc')
                 cv_scores.append((name, clf, np.mean(scores)))
             except Exception as e:
                 logger.debug(f"Expert {self.expert_id}: Failed to train {name}: {e}")
                 continue
-        
+
         if not cv_scores:
             logger.error(f"Expert {self.expert_id}: All classifiers failed")
             return self.metrics
-        
+
         # Sort by CV score and take top 3
         cv_scores.sort(key=lambda x: x[2], reverse=True)
         classifiers = [clf for _, clf, _ in cv_scores[:3]]
-        
+
         # Create ensemble
-        self._model = _ExpertEnsemble(classifiers, scaler)
-        
+        self._model = _ExpertEnsemble(classifiers, scaler, is_deep=False)
+
         # Evaluate with profitability simulation
         self.metrics = self._evaluate_profitability(X_enhanced, y_binary, y_reg)
         self.metrics.n_training_examples = len(X)
         self.metrics.n_features_used = X_enhanced.shape[1]
         self.metrics.last_trained = datetime.utcnow()
-        
+
         # Log results
         logger.info(
             f"Expert {self.expert_id} ({self.domain}): "
@@ -428,7 +482,7 @@ class Expert:
             f"win_rate={self.metrics.simulated_win_rate:.1%}, "
             f"PF={self.metrics.simulated_profit_factor:.2f}"
         )
-        
+
         # Record training history
         self.training_history.append({
             "timestamp": datetime.utcnow().isoformat(),
@@ -436,8 +490,155 @@ class Expert:
             "profit_pct": self.metrics.simulated_profit_pct,
             "num_trades": self.metrics.simulated_num_trades,
             "win_rate": self.metrics.simulated_win_rate,
+            "model_type": "sklearn",
         })
-        
+
+        return self.metrics
+
+    def _train_deep(
+        self,
+        X: np.ndarray,
+        y_binary: np.ndarray,
+        y_reg: np.ndarray,
+        sample_weights: Optional[np.ndarray] = None,
+    ) -> ExpertMetrics:
+        """Train using deep learning ensemble (NN + XGBoost + LightGBM)."""
+        import time
+        start_time = time.time()
+
+        logger.info(
+            f"Expert {self.expert_id} ({self.domain}): "
+            f"Training DEEP LEARNING on {len(X)} samples..."
+        )
+
+        # Add interaction features
+        X_enhanced = self._add_interaction_features(X)
+
+        # Get settings for configuration
+        try:
+            from polyb0t.config.settings import get_settings
+            settings = get_settings()
+
+            hidden_dims = [int(x) for x in settings.ai_neural_hidden_dims.split(",")]
+            nn_config = {
+                "hidden_dims": hidden_dims,
+                "dropout": settings.ai_neural_dropout,
+                "learning_rate": settings.ai_neural_learning_rate,
+                "weight_decay": settings.ai_neural_weight_decay,
+                "batch_size": settings.ai_neural_batch_size,
+                "max_epochs": settings.ai_neural_max_epochs,
+                "early_stopping_patience": settings.ai_early_stopping_patience,
+                "label_smoothing": settings.ai_label_smoothing,
+            }
+            xgb_config = {
+                "n_estimators": settings.ai_xgb_n_estimators,
+                "max_depth": settings.ai_xgb_max_depth,
+            }
+            lgb_config = {
+                "n_estimators": settings.ai_lgb_n_estimators,
+                "num_leaves": settings.ai_lgb_num_leaves,
+            }
+            weights = (
+                settings.ai_ensemble_nn_weight,
+                settings.ai_ensemble_xgb_weight,
+                settings.ai_ensemble_lgb_weight,
+            )
+        except Exception as e:
+            logger.debug(f"Could not load settings, using defaults: {e}")
+            nn_config = {}
+            xgb_config = {}
+            lgb_config = {}
+            weights = (0.4, 0.35, 0.25)
+
+        # Create and train deep ensemble
+        deep_ensemble = DeepExpertEnsemble(
+            nn_config=nn_config,
+            xgb_config=xgb_config,
+            lgb_config=lgb_config,
+            weights=weights,
+        )
+
+        # Time-based split for validation (prevent look-ahead bias)
+        n_samples = len(X_enhanced)
+        val_fraction = 0.2
+        train_end = int(n_samples * (1 - val_fraction))
+
+        X_train = X_enhanced[:train_end]
+        y_train = y_binary[:train_end]
+        X_val = X_enhanced[train_end:]
+        y_val = y_binary[train_end:]
+        w_train = sample_weights[:train_end] if sample_weights is not None else None
+
+        try:
+            # Train ensemble
+            ensemble_metrics = deep_ensemble.train(
+                X_train, y_train, w_train, val_fraction=0.15
+            )
+
+            # Also create sklearn fallback for robustness
+            scaler = StandardScaler()
+            X_scaled = scaler.fit_transform(X_enhanced)
+
+            # Train a simple fallback classifier
+            fallback_clf = HistGradientBoostingClassifier(
+                max_iter=100, max_depth=4, learning_rate=0.05,
+                early_stopping=True, validation_fraction=0.1,
+                random_state=42
+            )
+            fallback_clf.fit(X_scaled, y_binary)
+
+            # Create hybrid ensemble with deep learning + sklearn fallback
+            self._model = _ExpertEnsemble(
+                classifiers=[fallback_clf],
+                scaler=scaler,
+                is_deep=True,
+                deep_ensemble=deep_ensemble,
+            )
+
+            # Log training metrics
+            training_time = time.time() - start_time
+            logger.info(
+                f"Expert {self.expert_id} deep training complete in {training_time:.1f}s: "
+                f"nn_val_acc={ensemble_metrics.nn_val_acc:.3f}, "
+                f"xgb_val_acc={ensemble_metrics.xgb_val_acc:.3f}, "
+                f"lgb_val_acc={ensemble_metrics.lgb_val_acc:.3f}, "
+                f"meta_val_acc={ensemble_metrics.meta_val_acc:.3f}"
+            )
+
+        except Exception as e:
+            logger.warning(
+                f"Expert {self.expert_id}: Deep learning failed ({e}), "
+                f"falling back to sklearn"
+            )
+            return self._train_sklearn(X, y_binary, y_reg, sample_weights)
+
+        # Evaluate with profitability simulation
+        self.metrics = self._evaluate_profitability(X_enhanced, y_binary, y_reg)
+        self.metrics.n_training_examples = len(X)
+        self.metrics.n_features_used = X_enhanced.shape[1]
+        self.metrics.last_trained = datetime.utcnow()
+
+        # Log results
+        training_time = time.time() - start_time
+        logger.info(
+            f"Expert {self.expert_id} ({self.domain}): DEEP LEARNING complete in {training_time:.1f}s - "
+            f"profit={self.metrics.simulated_profit_pct:+.1%}, "
+            f"trades={self.metrics.simulated_num_trades}, "
+            f"win_rate={self.metrics.simulated_win_rate:.1%}, "
+            f"PF={self.metrics.simulated_profit_factor:.2f}"
+        )
+
+        # Record training history
+        self.training_history.append({
+            "timestamp": datetime.utcnow().isoformat(),
+            "n_samples": len(X),
+            "profit_pct": self.metrics.simulated_profit_pct,
+            "num_trades": self.metrics.simulated_num_trades,
+            "win_rate": self.metrics.simulated_win_rate,
+            "model_type": "deep_learning",
+            "training_time_seconds": training_time,
+        })
+
         return self.metrics
     
     def _evaluate_profitability(

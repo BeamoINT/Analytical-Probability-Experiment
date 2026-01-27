@@ -2,11 +2,14 @@
 
 This module handles the complete training loop for the Mixture of Experts
 architecture, optimizing for profitability rather than accuracy.
+
+Supports both sklearn classifiers (fast) and deep learning ensembles (more accurate).
 """
 
 import logging
 import os
 import sqlite3
+import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -16,6 +19,16 @@ from polyb0t.ml.moe.expert import Expert, ExpertMetrics, SPREAD_COST, MIN_PROFIT
 from polyb0t.ml.moe.expert_pool import ExpertPool, get_expert_pool
 from polyb0t.ml.moe.auto_discovery import AutoDiscovery
 from polyb0t.ml.moe.versioning import ExpertState
+
+# Check for deep learning availability
+try:
+    from polyb0t.ml.moe.deep_ensemble import TORCH_AVAILABLE, XGBOOST_AVAILABLE, LIGHTGBM_AVAILABLE
+    DEEP_LEARNING_AVAILABLE = TORCH_AVAILABLE
+except ImportError:
+    DEEP_LEARNING_AVAILABLE = False
+    TORCH_AVAILABLE = False
+    XGBOOST_AVAILABLE = False
+    LIGHTGBM_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -76,8 +89,23 @@ class MoETrainer:
         start_time = datetime.utcnow()
         
         try:
+            # Check deep learning configuration
+            use_deep_learning = False
+            try:
+                from polyb0t.config.settings import get_settings
+                settings = get_settings()
+                use_deep_learning = settings.ai_use_deep_learning
+            except Exception:
+                pass
+
             logger.info("=" * 60)
-            logger.info("STARTING MOE TRAINING CYCLE")
+            if use_deep_learning and DEEP_LEARNING_AVAILABLE:
+                logger.info("STARTING MOE TRAINING CYCLE (DEEP LEARNING MODE)")
+                logger.info(f"  PyTorch: {TORCH_AVAILABLE}, XGBoost: {XGBOOST_AVAILABLE}, LightGBM: {LIGHTGBM_AVAILABLE}")
+            else:
+                logger.info("STARTING MOE TRAINING CYCLE (SKLEARN MODE)")
+                if use_deep_learning and not DEEP_LEARNING_AVAILABLE:
+                    logger.warning("  Deep learning requested but not available - using sklearn")
             logger.info("=" * 60)
             
             # 1. Load training data
@@ -203,9 +231,11 @@ class MoETrainer:
             n_active = sum(1 for e in self.pool.experts.values() if e.state == ExpertState.ACTIVE)
             
             # Build results summary
+            training_mode = "deep_learning" if (use_deep_learning and DEEP_LEARNING_AVAILABLE) else "sklearn"
             results = {
                 "success": True,
                 "training_time_seconds": training_time,
+                "training_mode": training_mode,
                 "n_samples": len(training_data),
                 "n_experts_trained": len(expert_results),
                 "n_active": n_active,
@@ -214,10 +244,11 @@ class MoETrainer:
                 "n_new_experts": len(new_experts),
                 "state_summary": state_summary,
                 "pool_stats": self.pool.get_stats(),
+                "deep_learning_available": DEEP_LEARNING_AVAILABLE,
             }
             
             logger.info("=" * 60)
-            logger.info(f"MOE TRAINING COMPLETE in {training_time:.1f}s")
+            logger.info(f"MOE TRAINING COMPLETE in {training_time:.1f}s ({training_mode.upper()})")
             logger.info(f"  Experts trained: {len(expert_results)}")
             logger.info(f"  Active: {n_active}, Suspended: {n_suspended}, Deprecated: {n_deprecated}")
             logger.info(f"  New experts created: {len(new_experts)}")
