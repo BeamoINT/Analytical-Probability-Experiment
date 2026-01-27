@@ -185,8 +185,9 @@ class MoETrainer:
             logger.info(f"Expert states: {state_summary}")
             
             # 7. Run auto-discovery for new experts
+            # Use 24h horizon for discovery (primary trading horizon)
             new_experts = self.auto_discovery.discover(
-                training_data, X, y_binary, y_reg, categories
+                training_data, X, y_binary['24h'], y_reg['24h'], categories
             )
             
             # 8. Update pool state
@@ -327,7 +328,8 @@ class MoETrainer:
             
             X_list.append(row)
             timestamps.append(sample.get("created_at", ""))
-            categories.append(features.get("category", sample.get("category", "other")))
+            # Handle None values explicitly - features may have category=None
+            categories.append(features.get("category") or sample.get("category") or "other")
             
             # Calculate binary labels (is trade profitable?) for each horizon
             for horizon, pc in [('1h', pc_1h), ('4h', pc_4h), ('24h', pc_24h)]:
