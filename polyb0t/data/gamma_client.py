@@ -217,10 +217,12 @@ class GammaClient:
             Tuple of (list of Market objects, diagnostics dict).
         """
         all_markets: list[Market] = []
+        seen_ids: set[str] = set()  # Track condition_ids to avoid duplicates
         offset = 0
         total_parsed = 0
         total_failed = 0
         pages_fetched = 0
+        duplicates_skipped = 0
 
         while True:
             markets, diag = await self.list_markets_debug(
@@ -234,8 +236,15 @@ class GammaClient:
             if not markets:
                 break
 
-            all_markets.extend(markets)
-            logger.debug(f"Pagination: fetched {len(all_markets)} markets so far (page {pages_fetched})")
+            # Deduplicate by condition_id
+            for market in markets:
+                if market.condition_id not in seen_ids:
+                    seen_ids.add(market.condition_id)
+                    all_markets.append(market)
+                else:
+                    duplicates_skipped += 1
+
+            logger.debug(f"Pagination: fetched {len(all_markets)} unique markets (page {pages_fetched})")
 
             if len(all_markets) >= max_markets:
                 all_markets = all_markets[:max_markets]
@@ -252,8 +261,9 @@ class GammaClient:
             "pages_fetched": pages_fetched,
             "total_parsed": total_parsed,
             "total_failed": total_failed,
+            "duplicates_skipped": duplicates_skipped,
         }
-        logger.info(f"Fetched {len(all_markets)} markets via pagination ({pages_fetched} pages)")
+        logger.info(f"Fetched {len(all_markets)} markets via pagination ({pages_fetched} pages, {duplicates_skipped} duplicates skipped)")
         return all_markets, diagnostics
 
     async def get_market(self, condition_id: str) -> Market | None:
