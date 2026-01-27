@@ -161,10 +161,14 @@ def universe() -> None:
         async with GammaClient() as gamma:
             markets = await gamma.list_markets(active=True, closed=False, limit=100)
             market_filter = MarketFilter()
-            tradable = market_filter.filter_markets(markets)
+            tradable, rejection_reasons = market_filter.filter_markets(markets)
 
             click.echo(f"\nTotal markets: {len(markets)}")
-            click.echo(f"Tradable markets: {len(tradable)}\n")
+            click.echo(f"Tradable markets: {len(tradable)}")
+            if rejection_reasons:
+                click.echo(f"Rejections: {rejection_reasons}\n")
+            else:
+                click.echo("")
 
             for market in tradable[:20]:  # Show first 20
                 if market.end_date:
@@ -1392,6 +1396,322 @@ def backtest(
     except Exception as e:
         logger.error(f"Backtest error: {e}", exc_info=True)
         click.echo(f"ERROR: {e}")
+
+
+@cli.command(name="diagnose-filters")
+@click.option("--limit", default=500, help="Number of markets to analyze")
+@click.option("--json-output", is_flag=True, help="Output as JSON")
+def diagnose_filters(limit: int, json_output: bool) -> None:
+    """Diagnose market filter issues.
+
+    Fetches markets from Gamma API and shows exactly which filters are
+    rejecting them, with recommendations for filter adjustments.
+
+    Use this to understand why 0/N markets are showing as tradable.
+    """
+    setup_logging()
+    settings = get_settings()
+
+    async def run_diagnostics() -> dict[str, Any]:
+        from polyb0t.data.gamma_client import GammaClient
+        from polyb0t.models.filters import MarketFilter
+        from datetime import datetime, timezone
+
+        async with GammaClient() as gamma:
+            markets = await gamma.list_markets(active=True, closed=False, limit=limit)
+
+            diagnostics: dict[str, Any] = {
+                "total_markets": len(markets),
+                "current_settings": {
+                    "resolve_min_days": settings.resolve_min_days,
+                    "resolve_max_days": settings.resolve_max_days,
+                    "min_liquidity": settings.min_liquidity,
+                    "max_spread": settings.max_spread,
+                },
+                "filters": {},
+            }
+
+            now = datetime.now(timezone.utc)
+
+            # Analyze resolution time filter
+            no_end_date = 0
+            too_soon = 0
+            in_range = 0
+            too_far = 0
+            days_values: list[float] = []
+
+            for m in markets:
+                if m.end_date is None:
+                    no_end_date += 1
+                else:
+                    end = m.end_date
+                    if end.tzinfo is None:
+                        end = end.replace(tzinfo=timezone.utc)
+                    days = (end - now).total_seconds() / 86400
+                    days_values.append(days)
+                    if days < settings.resolve_min_days:
+                        too_soon += 1
+                    elif days > settings.resolve_max_days:
+                        too_far += 1
+                    else:
+                        in_range += 1
+
+            diagnostics["filters"]["resolution_time"] = {
+                "no_end_date": no_end_date,
+                "too_soon": too_soon,
+                "in_range": in_range,
+                "too_far": too_far,
+                "would_pass": in_range,
+                "would_fail": no_end_date + too_soon + too_far,
+            }
+
+            if days_values:
+                sorted_days = sorted(days_values)
+                diagnostics["filters"]["resolution_time"]["distribution"] = {
+                    "min_days": round(min(days_values), 1),
+                    "max_days": round(max(days_values), 1),
+                    "median_days": round(sorted_days[len(sorted_days)//2], 1),
+                    "p10_days": round(sorted_days[int(len(sorted_days)*0.1)], 1),
+                    "p90_days": round(sorted_days[int(len(sorted_days)*0.9)], 1),
+                }
+                # Suggest optimal window
+                p10 = sorted_days[int(len(sorted_days)*0.1)]
+                p90 = sorted_days[int(len(sorted_days)*0.9)]
+                diagnostics["filters"]["resolution_time"]["recommendation"] = {
+                    "suggested_min_days": max(1, int(p10)),
+                    "suggested_max_days": int(p90),
+                    "expected_markets": int(len(days_values) * 0.8),
+                }
+
+            # Analyze liquidity filter
+            null_liquidity = 0
+            below_threshold = 0
+            above_threshold = 0
+            liquidity_values: list[float] = []
+
+            for m in markets:
+                liq = m.liquidity or m.volume or 0
+                liquidity_values.append(liq)
+                if liq == 0:
+                    null_liquidity += 1
+                elif liq < settings.min_liquidity:
+                    below_threshold += 1
+                else:
+                    above_threshold += 1
+
+            diagnostics["filters"]["liquidity"] = {
+                "null_or_zero": null_liquidity,
+                "below_threshold": below_threshold,
+                "above_threshold": above_threshold,
+                "would_pass": above_threshold,
+                "would_fail": null_liquidity + below_threshold,
+            }
+
+            if liquidity_values:
+                sorted_liq = sorted(liquidity_values)
+                non_zero_liq = [v for v in liquidity_values if v > 0]
+                diagnostics["filters"]["liquidity"]["distribution"] = {
+                    "min": round(min(liquidity_values), 2),
+                    "max": round(max(liquidity_values), 2),
+                    "median": round(sorted_liq[len(sorted_liq)//2], 2),
+                    "median_non_zero": round(sorted(non_zero_liq)[len(non_zero_liq)//2], 2) if non_zero_liq else 0,
+                }
+
+            # Analyze active/closed status
+            inactive_count = sum(1 for m in markets if not m.active)
+            closed_count = sum(1 for m in markets if m.closed)
+            active_count = len(markets) - inactive_count
+
+            diagnostics["filters"]["active_status"] = {
+                "active": active_count,
+                "inactive": inactive_count,
+                "closed": closed_count,
+                "would_pass": active_count - closed_count,
+                "would_fail": inactive_count + closed_count,
+            }
+
+            # Run actual filter to get combined result
+            market_filter = MarketFilter()
+            tradable, rejection_reasons = market_filter.filter_markets(markets)
+
+            diagnostics["combined_result"] = {
+                "passed_all_filters": len(tradable),
+                "failed_any_filter": len(markets) - len(tradable),
+                "rejection_breakdown": rejection_reasons,
+            }
+
+            return diagnostics
+
+    try:
+        result = asyncio.run(run_diagnostics())
+
+        if json_output:
+            click.echo(json.dumps(result, indent=2))
+        else:
+            _print_filter_diagnostics(result)
+
+    except Exception as e:
+        logger.error(f"Error running diagnostics: {e}", exc_info=True)
+        click.echo(f"ERROR: {e}")
+
+
+def _print_filter_diagnostics(diag: dict[str, Any]) -> None:
+    """Print filter diagnostics in human-readable format."""
+    settings = diag['current_settings']
+
+    click.echo("\n" + "=" * 70)
+    click.echo("MARKET FILTER DIAGNOSTICS")
+    click.echo("=" * 70)
+
+    click.echo(f"\nTotal markets analyzed: {diag['total_markets']}")
+
+    click.echo("\n--- Current Settings ---")
+    click.echo(f"  Resolution window: {settings['resolve_min_days']}-{settings['resolve_max_days']} days")
+    click.echo(f"  Min liquidity:     ${settings['min_liquidity']:.0f}")
+    click.echo(f"  Max spread:        {settings['max_spread']*100:.1f}%")
+
+    click.echo("\n--- Resolution Time Filter ---")
+    rt = diag['filters']['resolution_time']
+    click.echo(f"  No end date:   {rt['no_end_date']:>5} markets (FAIL)")
+    click.echo(f"  Too soon:      {rt['too_soon']:>5} markets (FAIL - resolves < {settings['resolve_min_days']} days)")
+    click.echo(f"  In range:      {rt['in_range']:>5} markets (PASS)")
+    click.echo(f"  Too far:       {rt['too_far']:>5} markets (FAIL - resolves > {settings['resolve_max_days']} days)")
+
+    if 'distribution' in rt:
+        dist = rt['distribution']
+        click.echo(f"\n  Days until resolution distribution:")
+        click.echo(f"    Min:    {dist['min_days']:.0f} days")
+        click.echo(f"    10th %: {dist['p10_days']:.0f} days")
+        click.echo(f"    Median: {dist['median_days']:.0f} days")
+        click.echo(f"    90th %: {dist['p90_days']:.0f} days")
+        click.echo(f"    Max:    {dist['max_days']:.0f} days")
+
+    if 'recommendation' in rt:
+        rec = rt['recommendation']
+        click.echo(f"\n  RECOMMENDATION: Set window to {rec['suggested_min_days']}-{rec['suggested_max_days']} days")
+        click.echo(f"                  (would capture ~{rec['expected_markets']} markets)")
+
+    click.echo("\n--- Liquidity Filter ---")
+    liq = diag['filters']['liquidity']
+    click.echo(f"  Null/zero:         {liq['null_or_zero']:>5} markets (FAIL)")
+    click.echo(f"  Below ${settings['min_liquidity']:.0f}:    {liq['below_threshold']:>5} markets (FAIL)")
+    click.echo(f"  Above ${settings['min_liquidity']:.0f}:    {liq['above_threshold']:>5} markets (PASS)")
+
+    if 'distribution' in liq:
+        dist = liq['distribution']
+        click.echo(f"\n  Liquidity distribution:")
+        click.echo(f"    Min:            ${dist['min']:.0f}")
+        click.echo(f"    Median:         ${dist['median']:.0f}")
+        click.echo(f"    Median (>0):    ${dist['median_non_zero']:.0f}")
+        click.echo(f"    Max:            ${dist['max']:.0f}")
+
+    click.echo("\n--- Active Status Filter ---")
+    ast = diag['filters']['active_status']
+    click.echo(f"  Active:   {ast['active']:>5} markets (PASS)")
+    click.echo(f"  Inactive: {ast['inactive']:>5} markets (FAIL)")
+    click.echo(f"  Closed:   {ast['closed']:>5} markets (FAIL)")
+
+    click.echo("\n--- Combined Result ---")
+    comb = diag['combined_result']
+    click.echo(f"  Passed ALL filters: {comb['passed_all_filters']}")
+    click.echo(f"  Failed ANY filter:  {comb['failed_any_filter']}")
+
+    if comb['rejection_breakdown']:
+        click.echo(f"\n  Rejection breakdown:")
+        for reason, count in sorted(comb['rejection_breakdown'].items(), key=lambda x: x[1], reverse=True):
+            click.echo(f"    {reason}: {count}")
+
+    click.echo("\n" + "=" * 70)
+    click.echo("To adjust settings, edit .env or use environment variables:")
+    click.echo("  POLYBOT_RESOLVE_MIN_DAYS=7")
+    click.echo("  POLYBOT_RESOLVE_MAX_DAYS=180")
+    click.echo("  POLYBOT_MIN_LIQUIDITY=100")
+    click.echo("=" * 70 + "\n")
+
+
+@cli.command(name="reset-experts")
+@click.option(
+    "--yes",
+    "-y",
+    is_flag=True,
+    default=False,
+    help="Skip confirmation prompt.",
+)
+def reset_experts(yes: bool) -> None:
+    """Reset all AI expert states to UNTRAINED.
+
+    This gives deprecated/suspended experts another chance by deleting
+    their version state files. After reset, experts will restart training
+    from scratch on the next training cycle.
+
+    Use this when experts are stuck in SUSPENDED/DEPRECATED states and
+    you want them to try again with fresh data.
+
+    Example:
+        polyb0t reset-experts --yes
+    """
+    import shutil
+    from pathlib import Path
+
+    setup_logging()
+
+    # Get data directory from settings
+    settings = get_settings()
+    data_dir = Path("data/moe_models")
+    versions_dir = data_dir / "versions"
+
+    click.echo("\n" + "=" * 60)
+    click.echo("AI EXPERT STATE RESET")
+    click.echo("=" * 60)
+
+    # Show current state before reset
+    expert_count = 0
+    if versions_dir.exists():
+        expert_count = sum(1 for d in versions_dir.iterdir() if d.is_dir())
+
+    version_files = list(data_dir.glob("*.versions.json")) if data_dir.exists() else []
+
+    click.echo(f"Expert version directories: {expert_count}")
+    click.echo(f"Version state files: {len(version_files)}")
+    click.echo("=" * 60 + "\n")
+
+    if expert_count == 0 and len(version_files) == 0:
+        click.echo("No expert state files found. Nothing to reset.")
+        return
+
+    if not yes:
+        if not click.confirm("This will reset ALL expert states to UNTRAINED. Continue?"):
+            click.echo("Aborted.")
+            return
+
+    # Delete version directories
+    deleted_dirs = 0
+    if versions_dir.exists():
+        for expert_dir in versions_dir.iterdir():
+            if expert_dir.is_dir():
+                try:
+                    shutil.rmtree(expert_dir)
+                    click.echo(f"  Deleted: {expert_dir.name}/")
+                    deleted_dirs += 1
+                except Exception as e:
+                    click.echo(f"  ERROR deleting {expert_dir.name}: {e}")
+
+    # Delete .versions.json files
+    deleted_files = 0
+    for versions_file in version_files:
+        try:
+            versions_file.unlink()
+            click.echo(f"  Deleted: {versions_file.name}")
+            deleted_files += 1
+        except Exception as e:
+            click.echo(f"  ERROR deleting {versions_file.name}: {e}")
+
+    click.echo("\n" + "=" * 60)
+    click.echo(f"Reset complete: {deleted_dirs} directories, {deleted_files} files deleted")
+    click.echo("All experts will restart as UNTRAINED on next training cycle.")
+    click.echo("Restart the service to apply changes immediately:")
+    click.echo("  sudo systemctl restart polybot")
+    click.echo("=" * 60 + "\n")
 
 
 @cli.command()

@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 SPREAD_COST = 0.02  # 2% spread
 MIN_PROFIT_THRESHOLD = 0.005  # 0.5% minimum profit to be considered profitable
 POSITION_SIZE = 0.05  # 5% of portfolio per trade
-CONFIDENCE_THRESHOLD = 0.60  # Only trade when 60%+ confident
+CONFIDENCE_THRESHOLD = 0.55  # Only trade when 55%+ confident (lowered from 60% for more simulated trades)
 
 
 @dataclass

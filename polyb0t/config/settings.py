@@ -125,8 +125,8 @@ class Settings(BaseSettings):
     )
 
     # Market Filtering
-    resolve_min_days: int = Field(default=30, description="Minimum days until resolution")
-    resolve_max_days: int = Field(default=60, description="Maximum days until resolution")
+    resolve_min_days: int = Field(default=7, description="Minimum days until resolution (avoid last-minute volatility)")
+    resolve_max_days: int = Field(default=180, description="Maximum days until resolution (6 months - captures most markets)")
     min_liquidity: float = Field(default=1000.0, description="Minimum market liquidity")
     max_spread: float = Field(default=0.05, description="Maximum bid-ask spread (5%)")
 

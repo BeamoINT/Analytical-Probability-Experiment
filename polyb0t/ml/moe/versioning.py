@@ -20,10 +20,10 @@ logger = logging.getLogger(__name__)
 
 # Constants
 MAX_VERSIONS = 3
-MIN_TRADES_FOR_VALIDATION = 50
-MIN_PROFIT_FOR_ACTIVATION = -0.05  # -5%
-MIN_WIN_RATE_FOR_ACTIVATION = 0.40  # 40%
-MIN_PROFIT_FACTOR_FOR_ACTIVATION = 0.8
+MIN_TRADES_FOR_VALIDATION = 20  # Lowered from 50 to allow activation during warmup
+MIN_PROFIT_FOR_ACTIVATION = -0.10  # -10% (was -5%) - more lenient for new experts
+MIN_WIN_RATE_FOR_ACTIVATION = 0.35  # 35% (was 40%) - easier activation threshold
+MIN_PROFIT_FACTOR_FOR_ACTIVATION = 0.6  # Was 0.8 - allow lower profit factor during warmup
 
 # Recovery thresholds
 RECOVERY_PROFIT_THRESHOLD = 0.0  # 0%

@@ -427,7 +427,26 @@ class TradingScheduler:
             )
 
             if not tradable_markets:
-                logger.warning("No tradable markets found")
+                # Log detailed diagnostics to help debug filter issues
+                logger.warning(
+                    "No tradable markets found - FILTER ANALYSIS",
+                    extra={
+                        "markets_fetched": len(markets),
+                        "rejection_breakdown": initial_rejections,
+                        "top_rejection_reasons": sorted(
+                            initial_rejections.items(),
+                            key=lambda x: x[1],
+                            reverse=True,
+                        )[:5] if initial_rejections else [],
+                        "settings": {
+                            "resolve_min_days": self.settings.resolve_min_days,
+                            "resolve_max_days": self.settings.resolve_max_days,
+                            "min_liquidity": self.settings.min_liquidity,
+                            "max_spread": self.settings.max_spread,
+                        },
+                        "hint": "Run 'polyb0t diagnose-filters' for detailed analysis",
+                    },
+                )
                 return
 
             # Live mode: limit universe size to keep 10s cadence and avoid rate limits.
