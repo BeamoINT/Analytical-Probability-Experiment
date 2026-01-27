@@ -132,26 +132,6 @@ class TradingScheduler:
         except Exception as e:
             logger.warning(f"Whale tracker not available: {e}")
         
-        # Discord notifier for alerts and status updates
-        self.discord_notifier = None
-        try:
-            from polyb0t.services.discord_notifier import get_discord_notifier
-            self.discord_notifier = get_discord_notifier()
-            if self.discord_notifier.enabled:
-                logger.info("Discord notifier initialized")
-            else:
-                logger.info("Discord notifier disabled (no webhook URL configured)")
-        except Exception as e:
-            logger.warning(f"Discord notifier not available: {e}")
-        
-        # Track last hourly/daily report times
-        self._last_hourly_report = datetime.utcnow()
-        self._last_daily_report = datetime.utcnow()
-        
-        # Track last training time when we showed metrics debrief
-        # This ensures we only show the model performance debrief once per training cycle
-        self._last_metrics_debrief_training_time: datetime | None = None
-
         logger.info(
             f"Trading scheduler initialized "
             f"(mode={self.settings.strategy_mode}, placing_orders={self.settings.placing_orders})"
@@ -173,9 +153,6 @@ class TradingScheduler:
                     logger.warning("WebSocket connection failed - falling back to HTTP polling")
             except Exception as e:
                 logger.warning(f"WebSocket startup error: {e} - falling back to HTTP polling")
-        
-        # Send Discord startup notification
-        await self._send_discord_startup()
         
         # Backfill missing price data on startup (if enabled)
         if self.settings.ml_enable_backfill:
@@ -227,9 +204,6 @@ class TradingScheduler:
                     self.is_running = False
                     break
 
-            # Check for periodic Discord reports
-            await self._check_discord_reports()
-            
             # Wait before next cycle
             await asyncio.sleep(self.settings.loop_interval_seconds)
 
@@ -1382,11 +1356,7 @@ class TradingScheduler:
                 # Comprehensive cycle summary (single structured log)
                 markets_scanned_count = len(markets) if 'markets' in locals() else 0
                 markets_tradable_count = len(tradable_markets)
-                
-                # Store for hourly Discord summary
-                self._last_markets_scanned = markets_scanned_count
-                self._last_markets_tradable = markets_tradable_count
-                
+
                 logger.info(
                     "Cycle summary",
                     extra={
@@ -2202,239 +2172,3 @@ class TradingScheduler:
             except Exception as e:
                 logger.warning(f"WebSocket disconnect error: {e}")
             self._ws_connected = False
-    
-    async def _send_discord_startup(self) -> None:
-        """Send Discord startup notification."""
-        if not self.discord_notifier or not self.discord_notifier.enabled:
-            return
-        
-        # In-process flag to prevent duplicate calls
-        if getattr(self, '_startup_notification_sent', False):
-            return
-        
-        try:
-            # Rate limit: don't send if one was sent in the last hour
-            # This prevents spam when the bot restarts frequently
-            import os
-            startup_marker = "/tmp/polybot_startup_sent"
-            if os.path.exists(startup_marker):
-                try:
-                    mtime = os.path.getmtime(startup_marker)
-                    if time.time() - mtime < 3600:  # 1 hour
-                        logger.info("Skipping startup notification (sent within last hour)")
-                        self._startup_notification_sent = True
-                        return
-                except Exception as e:
-                    logger.debug(f"Could not read startup marker: {e}")
-            
-            mode = "LIVE" if self.settings.placing_orders else "DATA_COLLECTION"
-            
-            # Get actual USDC balance
-            balance = 0.0
-            try:
-                from polyb0t.services.balance import BalanceService
-                from polyb0t.data.storage import get_session
-                db_session = get_session()
-                balance_svc = BalanceService(db_session)
-                snap = balance_svc.fetch_usdc_balance()
-                balance = snap.total_usdc
-                balance_svc.close()
-                db_session.close()
-            except Exception as e:
-                logger.debug(f"Could not fetch balance: {e}")
-                # Fallback to 0
-            
-            await self.discord_notifier.send_startup_notification(
-                mode=mode,
-                balance=balance,
-            )
-            
-            # Mark that we sent a notification
-            self._startup_notification_sent = True
-            try:
-                with open(startup_marker, "w") as f:
-                    f.write(str(time.time()))
-            except Exception as e:
-                logger.debug(f"Could not write startup marker: {e}")
-            
-            logger.info("Discord startup notification sent")
-        except Exception as e:
-            logger.warning(f"Failed to send Discord startup notification: {e}")
-    
-    async def _check_discord_reports(self) -> None:
-        """Check if hourly or daily reports should be sent."""
-        if not self.discord_notifier or not self.discord_notifier.enabled:
-            return
-        
-        now = datetime.utcnow()
-        
-        # Hourly summary (every hour)
-        if (now - self._last_hourly_report).total_seconds() >= 3600:
-            await self._send_hourly_summary()
-            self._last_hourly_report = now
-        
-        # Daily report (every 24 hours, at midnight UTC)
-        if (now - self._last_daily_report).total_seconds() >= 86400:
-            await self._send_daily_report()
-            self._last_daily_report = now
-    
-    async def _send_hourly_summary(self) -> None:
-        """Send hourly Discord summary with training progress and model metrics."""
-        if not self.discord_notifier:
-            return
-        
-        try:
-            # Get actual USDC balance
-            portfolio_value = 0.0
-            try:
-                from polyb0t.services.balance import BalanceService
-                from polyb0t.data.storage import get_session
-                db_session = get_session()
-                balance_svc = BalanceService(db_session)
-                snap = balance_svc.fetch_usdc_balance()
-                portfolio_value = snap.total_usdc
-                balance_svc.close()
-                db_session.close()
-            except Exception as e:
-                logger.debug(f"Could not fetch balance for hourly: {e}")
-            
-            # Get AI stats and training info
-            ai_status = {}
-            active_positions = 0
-            training_info = {}
-            model_metrics = None
-            include_metrics_debrief = False
-            
-            if self.ai_orchestrator:
-                stats = self.ai_orchestrator.get_training_stats()
-                
-                # Basic AI status
-                ai_status = {
-                    "active_experts": stats.get("moe", {}).get("active_experts", 0),
-                    "training_examples": stats.get("collector", {}).get("total_examples", 0),
-                }
-                
-                # Training timing info
-                last_training_str = stats.get("last_training")
-                last_training = None
-                if last_training_str:
-                    try:
-                        last_training = datetime.fromisoformat(last_training_str)
-                    except (ValueError, TypeError):
-                        pass
-                
-                # Calculate time until next training (2 hour interval)
-                training_interval_hours = 2
-                if last_training:
-                    next_training = last_training + timedelta(hours=training_interval_hours)
-                    time_until = next_training - datetime.utcnow()
-                    
-                    if time_until.total_seconds() > 0:
-                        hours = int(time_until.total_seconds() // 3600)
-                        minutes = int((time_until.total_seconds() % 3600) // 60)
-                        training_info["time_until_training"] = f"{hours}h {minutes}m"
-                    else:
-                        training_info["time_until_training"] = "Due soon"
-                    
-                    training_info["last_training"] = last_training.strftime("%Y-%m-%d %H:%M UTC")
-                else:
-                    training_info["time_until_training"] = "Not yet trained"
-                    training_info["last_training"] = "Never"
-                
-                # Check if we should include model metrics debrief
-                # Only show once per training cycle
-                if last_training and (
-                    self._last_metrics_debrief_training_time is None or
-                    last_training > self._last_metrics_debrief_training_time
-                ):
-                    include_metrics_debrief = True
-                    self._last_metrics_debrief_training_time = last_training
-                    
-                    # Collect model performance metrics for GPT summary
-                    moe_stats = stats.get("moe", {})
-                    model_metrics = {
-                        "total_experts": moe_stats.get("total_experts", 0),
-                        "active_experts": moe_stats.get("active_experts", 0),
-                        "suspended_experts": moe_stats.get("suspended_experts", 0),
-                        "deprecated_experts": moe_stats.get("deprecated_experts", 0),
-                        "probation_experts": moe_stats.get("probation_experts", 0),
-                        "total_profit_pct": moe_stats.get("total_profit", 0),
-                        "total_simulated_trades": moe_stats.get("total_trades", 0),
-                        "best_expert": moe_stats.get("best_expert_id", "N/A"),
-                        "best_expert_profit": moe_stats.get("best_profit", 0),
-                        "training_examples": stats.get("collector", {}).get("total_examples", 0),
-                        "labeled_examples": stats.get("collector", {}).get("labeled_examples", 0),
-                    }
-            
-            # Collect performance stats from CLOSED TRADES (actual P&L, not execution success)
-            performance_stats = {}
-            try:
-                from polyb0t.services.trade_lifecycle import get_trade_lifecycle_service
-
-                today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-                service = get_trade_lifecycle_service()
-                stats = service.get_performance_stats(since=today_start)
-                service.close()
-
-                performance_stats = {
-                    "trades_today": stats.get("closed_trades", 0),
-                    "win_rate": stats.get("win_rate", 0),
-                    "total_pnl_pct": stats.get("total_pnl_pct", 0),
-                    "total_pnl_usd": stats.get("total_pnl_usd", 0),
-                    "markets_scanned": getattr(self, '_last_markets_scanned', 0),
-                    "markets_tradable": getattr(self, '_last_markets_tradable', 0),
-                }
-            except Exception as e:
-                logger.debug(f"Could not get performance stats: {e}")
-            
-            # Add total experts to ai_status
-            if self.ai_orchestrator:
-                moe_stats = self.ai_orchestrator.get_training_stats().get("moe", {})
-                ai_status["total_experts"] = moe_stats.get("total_experts", 0)
-            
-            await self.discord_notifier.send_hourly_summary(
-                portfolio_value=portfolio_value,
-                unrealized_pnl=0.0,
-                trades_this_hour=0,
-                active_positions=active_positions,
-                ai_status=ai_status,
-                training_info=training_info,
-                model_metrics=model_metrics if include_metrics_debrief else None,
-                performance_stats=performance_stats,
-            )
-            logger.info("Discord hourly summary sent")
-        except Exception as e:
-            logger.warning(f"Failed to send Discord hourly summary: {e}")
-    
-    async def _send_daily_report(self) -> None:
-        """Send daily Discord performance report."""
-        if not self.discord_notifier:
-            return
-        
-        try:
-            # Get actual USDC balance
-            balance = 0.0
-            try:
-                from polyb0t.services.balance import BalanceService
-                from polyb0t.data.storage import get_session
-                db_session = get_session()
-                balance_svc = BalanceService(db_session)
-                snap = balance_svc.fetch_usdc_balance()
-                balance = snap.total_usdc
-                balance_svc.close()
-                db_session.close()
-            except Exception as e:
-                logger.debug(f"Could not fetch balance for daily: {e}")
-            
-            await self.discord_notifier.send_daily_report(
-                starting_balance=balance,
-                ending_balance=balance,
-                total_trades=0,
-                win_rate=0.0,
-                best_trade=0.0,
-                worst_trade=0.0,
-                expert_summary={},
-            )
-            logger.info("Discord daily report sent")
-        except Exception as e:
-            logger.warning(f"Failed to send Discord daily report: {e}")

@@ -9,7 +9,6 @@ When a position closes, this recorder notifies:
 3. MarketEdge - for edge calculation
 4. ExpertPool - for confidence multiplier updates
 5. TradePostmortem - for detailed analysis
-6. DiscordNotifier - for user notifications
 """
 
 import logging
@@ -74,12 +73,11 @@ class TradeOutcomeRecorder:
         self._meta_controller = None
         self._market_edge = None
         self._expert_pool = None
-        self._discord_notifier = None
-        
+
         # Track recorded outcomes for debugging
         self._recent_outcomes: List[TradeOutcome] = []
         self._max_recent = 100
-        
+
         logger.info("TradeOutcomeRecorder initialized")
     
     def _get_data_collector(self):
@@ -123,17 +121,7 @@ class TradeOutcomeRecorder:
             except Exception as e:
                 logger.warning(f"Could not load expert pool: {e}")
         return self._expert_pool
-    
-    def _get_discord_notifier(self):
-        """Lazy load discord notifier."""
-        if self._discord_notifier is None:
-            try:
-                from polyb0t.services.discord_notifier import get_discord_notifier
-                self._discord_notifier = get_discord_notifier()
-            except Exception as e:
-                logger.debug(f"Discord notifier not available: {e}")
-        return self._discord_notifier
-    
+
     async def record_outcome(self, outcome: TradeOutcome) -> Dict[str, bool]:
         """Record a trade outcome to all learning systems.
         
@@ -207,28 +195,18 @@ class TradeOutcomeRecorder:
                         # - Predicted unprofitable (<0.5) and actually unprofitable
                         predicted_profitable = prediction > 0.5
                         was_correct = predicted_profitable == outcome.is_profitable
-                        
+
                         # Adjust confidence multiplier
                         adjustment = 0.02 if was_correct else -0.02
-                        expert.confidence_multiplier = max(0.3, min(1.0, 
+                        expert.confidence_multiplier = max(0.3, min(1.0,
                             expert.confidence_multiplier + adjustment
                         ))
-                
+
                 results["expert_pool"] = True
         except Exception as e:
             logger.error(f"Failed to update expert pool: {e}")
             results["expert_pool"] = False
-        
-        # 5. Send Discord notification
-        try:
-            discord = self._get_discord_notifier()
-            if discord:
-                await discord.notify_trade(outcome)
-                results["discord"] = True
-        except Exception as e:
-            logger.debug(f"Discord notification failed: {e}")
-            results["discord"] = False
-        
+
         # Store for debugging
         self._recent_outcomes.append(outcome)
         if len(self._recent_outcomes) > self._max_recent:

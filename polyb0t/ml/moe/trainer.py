@@ -253,10 +253,7 @@ class MoETrainer:
             logger.info(f"  Active: {n_active}, Suspended: {n_suspended}, Deprecated: {n_deprecated}")
             logger.info(f"  New experts created: {len(new_experts)}")
             logger.info("=" * 60)
-            
-            # Send Discord notification
-            self._send_training_discord_notification(results)
-            
+
             return results
             
         except Exception as e:
@@ -748,60 +745,8 @@ class MoETrainer:
             f"Computed cross-expert features: {cross_features.shape[1]} features "
             f"from {len(all_predictions)} experts"
         )
-        
+
         return cross_features
-    
-    def _send_training_discord_notification(self, results: Dict[str, Any]) -> None:
-        """Send Discord notification with training results and GPT summary."""
-        try:
-            import asyncio
-            from polyb0t.services.discord_notifier import get_discord_notifier
-            
-            notifier = get_discord_notifier()
-            if not notifier.enabled:
-                return
-            
-            # Get expert performance summary for context
-            expert_perfs = []
-            for expert in self.pool.experts.values():
-                if expert.is_active:
-                    profit = expert.metrics.simulated_profit_pct if expert.metrics else 0
-                    expert_perfs.append((expert.expert_id, profit))
-            
-            # Sort by profit
-            expert_perfs.sort(key=lambda x: x[1], reverse=True)
-            
-            # Add top experts to results for GPT context
-            if expert_perfs:
-                top_3 = expert_perfs[:3]
-                results["top_experts"] = ", ".join([f"{e[0]} ({e[1]:+.1%})" for e in top_3])
-            
-            # Use the notify_training_complete method which includes GPT summarization
-            async def send_notification():
-                await notifier.notify_training_complete(
-                    num_experts=results.get("n_experts_trained", 0),
-                    training_time=results.get("training_time_seconds", 0),
-                    active_count=results.get("n_active", 0),
-                    training_data=results,  # Pass full data for GPT summary
-                )
-            
-            # Send async
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    asyncio.create_task(send_notification())
-                else:
-                    loop.run_until_complete(send_notification())
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(send_notification())
-                loop.close()
-                
-            logger.info("Discord training notification sent")
-            
-        except Exception as e:
-            logger.debug(f"Failed to send Discord training notification: {e}")
 
 
 # Singleton instance
