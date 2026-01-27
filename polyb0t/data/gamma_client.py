@@ -311,8 +311,9 @@ class GammaClient:
         }
         if active is not None:
             params["active"] = str(active).lower()
-        if closed is not None:
-            params["closed"] = str(closed).lower()
+        # NOTE: Don't pass closed=false - Gamma API returns 0 results with that filter
+        if closed is True:
+            params["closed"] = "true"
 
         status, data = await self._get_with_status("/markets", params=params)
         diag: dict[str, Any] = {
