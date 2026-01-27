@@ -23,7 +23,7 @@ from polyb0t.ml.moe.versioning import (
 from polyb0t.ml.moe.expert import Expert, ExpertMetrics
 from polyb0t.ml.moe.gating import GatingNetwork
 from polyb0t.ml.moe.expert_pool import ExpertPool
-from polyb0t.ml.moe.trainer import MoETrainer
+from polyb0t.ml.moe.trainer import MoETrainer, get_moe_trainer
 from polyb0t.ml.moe.auto_discovery import AutoDiscovery
 from polyb0t.ml.moe.meta_controller import (
     MetaController,
@@ -80,6 +80,7 @@ __all__ = [
     "GatingNetwork",
     "ExpertPool",
     "MoETrainer",
+    "get_moe_trainer",
     "AutoDiscovery",
     "MetaController",
     "MixtureConfig",

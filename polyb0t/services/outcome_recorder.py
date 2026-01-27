@@ -84,7 +84,7 @@ class TradeOutcomeRecorder:
         """Lazy load data collector."""
         if self._data_collector is None:
             try:
-                from polyb0t.ml.data import get_data_collector
+                from polyb0t.ml.continuous_collector import get_data_collector
                 self._data_collector = get_data_collector()
             except Exception as e:
                 logger.warning(f"Could not load data collector: {e}")
