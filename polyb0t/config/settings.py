@@ -77,8 +77,8 @@ class Settings(BaseSettings):
         description="SQLite database for AI training data"
     )
     ai_max_storage_gb: float = Field(
-        default=200.0,
-        description="Maximum storage for AI training data in GB (increased for aggressive collection)"
+        default=120.0,
+        description="Maximum storage for AI training data in GB (orderbook and market snapshots)"
     )
     ai_max_markets_per_fetch: int = Field(
         default=5000,

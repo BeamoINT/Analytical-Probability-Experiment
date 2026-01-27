@@ -1,231 +1,406 @@
 # GCP VM Reference - PolyB0T Production Server
 
-## SSH Connection Details
+> **IMPORTANT**: The bot runs as a systemd service. Always use `systemctl` commands to manage it, NOT manual process management (pkill/nohup).
+
+---
+
+## Quick Reference Card
+
+| Item | Value |
+|------|-------|
+| **SSH Command** | `ssh -i /Users/HP/.ssh/gcp_vm beamo_beamosupport_com@34.2.57.194` |
+| **Host IP** | `34.2.57.194` |
+| **Username** | `beamo_beamosupport_com` |
+| **SSH Key** | `/Users/HP/.ssh/gcp_vm` |
+| **Project Path** | `~/Analytical-Probability-Experiment` |
+| **Service Name** | `polybot.service` |
+| **OS** | Ubuntu 24.04.3 LTS (Noble Numbat) |
+| **Kernel** | 6.14.0-1021-gcp |
+| **Python** | 3.12.3 |
+| **Poetry** | 2.2.1 |
+| **Hostname** | `analyticalprobabilityexperiment` |
+
+---
+
+## System Hardware
+
+| Resource | Value |
+|----------|-------|
+| **CPU** | AMD EPYC 7B12 (2 cores) |
+| **Memory** | 7.8 GB total (~1.3 GB used typical) |
+| **Swap** | None configured |
+| **Disk** | 145 GB total, ~19 GB used (13%) |
+| **Virtualenv** | `~/.cache/pypoetry/virtualenvs/polyb0t-adUcXa5t-py3.12` |
+
+---
+
+## Running System Services
+
+Key services on the VM:
+- `polybot.service` - Our trading bot + API
+- `ssh.service` - OpenBSD Secure Shell
+- `google-guest-agent.service` - GCP Guest Agent
+- `google-osconfig-agent.service` - GCP OSConfig Agent
+- `chrony.service` - NTP time sync
+- `unattended-upgrades.service` - Auto security updates
+
+### Listening Ports
+
+| Port | Service |
+|------|---------|
+| 22 | SSH |
+| 8000 | PolyB0T API (Python/uvicorn) |
+| 53 | systemd-resolved (localhost only) |
+
+---
+
+## SYSTEMD SERVICE MANAGEMENT (USE THIS!)
+
+The bot runs as a systemd service that manages BOTH the trading bot and API server together.
+
+### Essential Commands
 
 ```bash
-# Quick connect command
-ssh -i /Users/HP/.ssh/gcp_vm beamo_beamosupport_com@34.2.57.194
+# RESTART THE SERVICE (after code changes)
+sudo systemctl restart polybot.service
 
-# With specific options
-ssh -i /Users/HP/.ssh/gcp_vm -o StrictHostKeyChecking=accept-new beamo_beamosupport_com@34.2.57.194
+# Check service status
+sudo systemctl status polybot.service
+
+# Stop the service
+sudo systemctl stop polybot.service
+
+# Start the service
+sudo systemctl start polybot.service
+
+# View service logs (systemd journal)
+sudo journalctl -u polybot.service -f              # Follow live
+sudo journalctl -u polybot.service --no-pager -n 50  # Last 50 lines
+sudo journalctl -u polybot.service --since "1 hour ago"
+
+# Enable service to start on boot (already enabled)
+sudo systemctl enable polybot.service
 ```
 
-| Field | Value |
-|-------|-------|
-| Host IP | `34.2.57.194` |
-| Username | `beamo_beamosupport_com` |
-| SSH Key | `/Users/HP/.ssh/gcp_vm` |
-| Project Path | `~/Analytical-Probability-Experiment` |
-| Python Venv | `~/.cache/pypoetry/virtualenvs/polyb0t-adUcXa5t-py3.12` |
+### Service Configuration
+
+**Location**: `/etc/systemd/system/polybot.service`
+
+```ini
+[Unit]
+Description=PolyB0T Trading Bot with Web Dashboard
+After=network.target
+
+[Service]
+Type=simple
+User=beamo_beamosupport_com
+WorkingDirectory=/home/beamo_beamosupport_com/Analytical-Probability-Experiment
+ExecStart=/bin/bash /home/beamo_beamosupport_com/Analytical-Probability-Experiment/scripts/start_all.sh
+Restart=always
+RestartSec=10
+Environment="PATH=/home/beamo_beamosupport_com/.local/bin:/usr/local/bin:/usr/bin:/bin"
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=polybot
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### What the Service Runs
+
+The service executes `scripts/start_all.sh` which:
+1. Changes to project directory
+2. Starts **Trading Bot**: `poetry run polyb0t run --live` (background)
+3. Waits 5 seconds for bot initialization
+4. Starts **API Server**: `poetry run polyb0t api --host 0.0.0.0 --port 8000` (background)
+5. Waits for either process to exit, then stops both
+
+Both processes run together - if one exits, the script stops both and systemd restarts everything (after 10 seconds).
 
 ---
 
-## Running Processes
+## SSH Connection
 
-The bot runs two main processes:
+```bash
+# Quick connect
+ssh -i /Users/HP/.ssh/gcp_vm beamo_beamosupport_com@34.2.57.194
 
-1. **Trading Bot**: `polyb0t run --live`
-   - PID stored in `live_run.pid`
-   - Logs to `live_run.log` (can be very large, ~4GB+)
-   - Uses ~90% CPU when active
+# With host key acceptance
+ssh -i /Users/HP/.ssh/gcp_vm -o StrictHostKeyChecking=accept-new beamo_beamosupport_com@34.2.57.194
 
-2. **API Server**: `polyb0t api --host 0.0.0.0 --port 8000`
-   - FastAPI REST server
-   - WebSocket support for real-time updates
+# Execute single command
+ssh -i /Users/HP/.ssh/gcp_vm beamo_beamosupport_com@34.2.57.194 "command here"
+```
 
 ---
 
-## Key Directories & Files
+## Deploying Code Changes
+
+**Standard deployment workflow:**
+
+```bash
+# 1. On local machine: commit and push changes
+git add . && git commit -m "Your changes" && git push
+
+# 2. SSH to server and pull
+ssh -i /Users/HP/.ssh/gcp_vm beamo_beamosupport_com@34.2.57.194 \
+  "cd ~/Analytical-Probability-Experiment && git pull"
+
+# 3. Restart the service to apply changes
+ssh -i /Users/HP/.ssh/gcp_vm beamo_beamosupport_com@34.2.57.194 \
+  "sudo systemctl restart polybot.service"
+
+# 4. Verify it's running
+ssh -i /Users/HP/.ssh/gcp_vm beamo_beamosupport_com@34.2.57.194 \
+  "sudo systemctl status polybot.service"
+```
+
+**One-liner for deploy:**
+```bash
+ssh -i /Users/HP/.ssh/gcp_vm beamo_beamosupport_com@34.2.57.194 \
+  "cd ~/Analytical-Probability-Experiment && git pull && sudo systemctl restart polybot.service && sleep 3 && sudo systemctl status polybot.service"
+```
+
+---
+
+## Directory Structure & File Sizes
 
 ```
 ~/Analytical-Probability-Experiment/
-├── .env                      # Active configuration (SENSITIVE - has API keys)
-├── .env.example              # Template for configuration
-├── polybot.db                # Main SQLite database (~10GB)
-├── live_run.log              # Bot logs (can be huge)
-├── polyb0t/                  # Main Python package
-│   ├── api/                  # FastAPI REST endpoints
-│   ├── cli/                  # CLI commands (click-based)
-│   ├── config/               # Pydantic settings (POLYBOT_ prefix)
-│   ├── data/                 # API clients (Gamma, CLOB), storage
-│   ├── execution/            # Portfolio, orders, intents, live executor
-│   ├── ml/                   # AI orchestrator, trainer, MoE
-│   │   └── moe/              # Mixture of Experts system
-│   ├── models/               # Strategy, features, filters, risk
-│   ├── services/             # Scheduler, reporter, Discord, health
-│   └── utils/                # Logging, rate limiter
+├── .env                          # Configuration (SENSITIVE - has API keys)
+├── polybot.db                    # Main SQLite database (~12GB)
+├── live_run.log                  # Bot logs (~52MB, grows continuously)
+├── poetry.lock                   # ~488KB
+├── README.md                     # ~18KB
+├── scripts/
+│   ├── start_all.sh              # Startup script (called by systemd)
+│   ├── check_ai_status.py        # ~58KB - AI diagnostics script
+│   └── polybot.service           # Service file template
 ├── data/
-│   ├── ai_models/            # Trained AI models (~327MB)
-│   │   └── current_model.pkl # Current deployed model
-│   ├── ai_training.db        # Training examples (~972MB)
-│   ├── moe_models/           # MoE expert models (~20MB)
-│   │   ├── experts/          # Individual expert models
-│   │   ├── gating.model.pkl  # Gating network
-│   │   └── pool_state.json   # Expert pool state
-│   └── category_stats.db     # Category performance tracking
-└── tests/                    # Test suite
+│   ├── ai_training.db            # Training examples (~762MB + 100MB WAL)
+│   ├── training_data.db          # Price history (~62MB)
+│   ├── category_stats.db         # Category performance (~56KB)
+│   ├── market_memory.db          # Market memory (~28KB)
+│   ├── rule_weights.db           # Rule weights (~20KB)
+│   ├── ai_orchestrator_state.json # ~4KB
+│   ├── system_stats.json         # ~4KB
+│   ├── ai_models/                # ~327MB total
+│   │   ├── current_model.pkl     # ~12MB - deployed model
+│   │   ├── orchestrator_state.json
+│   │   ├── trainer_state.json
+│   │   └── versions/             # Model version history
+│   └── moe_models/               # ~36MB total
+│       ├── experts/              # Individual expert models
+│       ├── gating.model.pkl      # ~39KB - gating network
+│       ├── gating.meta.pkl       # ~1.2KB
+│       ├── pool_state.json       # ~825B - expert pool state
+│       └── versions/             # Expert version history
+├── docs/                         # Documentation (~9KB index)
+├── tests/                        # Test files
+└── polyb0t/                      # Main Python package
+    ├── api/                      # FastAPI REST endpoints
+    ├── cli/                      # CLI commands
+    ├── config/                   # Settings (POLYBOT_ env prefix)
+    ├── data/                     # API clients, storage
+    ├── execution/                # Portfolio, orders, intents
+    ├── ml/                       # AI orchestrator, MoE
+    ├── models/                   # Strategy, filters, risk
+    └── services/                 # Scheduler, Discord, health
 ```
 
 ---
 
-## CLI Commands Reference
+## Database Reference
 
+### Main Database (`polybot.db`) - ~12GB
+
+| Table | Rows | Purpose |
+|-------|------|---------|
+| `orderbook_snapshots` | 3,950,136 | Historical orderbook data (LARGEST) |
+| `signals` | 145,102 | Generated trading signals |
+| `balance_snapshots` | 47,605 | Historical balance tracking |
+| `account_states` | 45,939 | Account state history |
+| `trade_intents` | 18,589 | Live mode approval queue |
+| `markets` | 5,350 | Market metadata |
+| `market_outcomes` | 822 | Outcome tokens |
+| `pnl_snapshots` | 32,747 | P&L history |
+| `closed_trades` | 0 | Trade P&L tracking (NEW) |
+| `kill_switch_events` | 0 | Kill switch triggers |
+| `portfolio_positions` | 0 | Position tracking |
+| `simulated_orders` | 0 | Paper trading orders |
+| `simulated_fills` | 0 | Paper trading fills |
+| `trades` | 0 | Executed trades |
+
+#### Key Table Schemas
+
+**trade_intents** - Live mode approval queue
+```
+intent_uuid, intent_id, cycle_id, intent_type, fingerprint
+token_id, market_id, side, price, size, size_usd, edge
+p_market, p_model, reason, risk_checks (JSON), signal_data (JSON)
+status, created_at, expires_at, approved_at, approved_by
+executed_at, execution_result (JSON), submitted_order_id
+error_message, superseded_by_intent_id, superseded_at
+```
+
+**signals** - Generated trading signals
+```
+cycle_id, token_id, market_id, timestamp
+p_market, p_model, edge, features (JSON)
+signal_type, confidence, created_at
+```
+
+**closed_trades** - Trade P&L tracking (NEW)
+```
+trade_id, open_intent_id, close_intent_id
+token_id, market_id, side
+entry_price, entry_size_usd, entry_time
+exit_price, exit_size_usd, exit_time, exit_reason
+realized_pnl_usd, realized_pnl_pct, is_winner
+hold_time_hours, status, created_at, updated_at
+```
+
+### AI Training Database (`data/ai_training.db`) - ~762MB
+
+| Table | Rows | Purpose |
+|-------|------|---------|
+| `market_snapshots` | 131,248 | Point-in-time market data |
+| `price_history` | 125,118 | Price tracking for labeling |
+| `training_examples` | 42,941 | Labeled ML training data |
+| `tracked_markets` | 784 | Markets being tracked |
+| `collector_state` | 1 | Data collector state |
+| `storage_stats` | 1 | Storage statistics |
+
+#### Training Examples Schema
+```
+example_id, token_id, market_id, created_at
+features (JSON), category, market_title
+price_change_15m, price_change_1h, price_change_4h
+price_change_24h, price_change_7d, price_change_to_resolution
+direction_1h, direction_24h, predicted_change
+resolved_outcome, labeled_at, is_fully_labeled
+schema_version, available_features, prediction_evaluated
+```
+
+### Training Data Database (`data/training_data.db`) - ~62MB
+
+| Table | Rows | Purpose |
+|-------|------|---------|
+| `price_history` | 295,564 | Extended price history |
+| `training_data` | 0 | (unused) |
+| `model_performance` | 0 | (unused) |
+
+### Database Access (sqlite3 not installed)
+
+Use Python to query databases:
 ```bash
-# Activate virtualenv first
-source ~/.cache/pypoetry/virtualenvs/polyb0t-adUcXa5t-py3.12/bin/activate
-
-# Core Commands
-polyb0t run --paper           # Paper trading mode
-polyb0t run --live            # Live mode (human-in-the-loop)
-polyb0t status                # Portfolio status, balance, positions
-polyb0t doctor                # Connectivity diagnostics
-
-# Intent Management (Live Mode)
-polyb0t intents list          # View pending trade intents
-polyb0t intents approve <id>  # Approve a trade
-polyb0t intents reject <id>   # Reject a trade
-
-# Analysis
-polyb0t universe              # Show tradable markets
-polyb0t report --today        # Daily trading report
-polyb0t diagnose-filters      # Debug market filtering
-
-# Database
-polyb0t db init               # Initialize schema
-polyb0t db reset              # Reset database (DESTRUCTIVE)
-
-# AI/ML
-polyb0t reset-experts         # Reset all expert states
-
-# API Server
-polyb0t api                   # Start REST API on port 8000
+ssh -i /Users/HP/.ssh/gcp_vm beamo_beamosupport_com@34.2.57.194 "cd ~/Analytical-Probability-Experiment && python3 -c \"
+import sqlite3
+conn = sqlite3.connect('polybot.db')
+cursor = conn.cursor()
+cursor.execute('SELECT COUNT(*) FROM trade_intents')
+print('Trade intents:', cursor.fetchone()[0])
+\""
 ```
 
 ---
 
-## Configuration (.env key variables)
+## AI/ML System
+
+### Mixture of Experts (MoE) Architecture
+
+The system uses a gating network to route predictions to specialized expert models.
+
+**Pool State** (`data/moe_models/pool_state.json`):
+- Total training cycles: 10
+- Total trades tracked: 62
+- Best expert: `high_volatility`
+- Total profit: ~0.39%
+
+**26 Expert Models** (in `data/moe_models/experts/`):
+
+| Category | Experts |
+|----------|---------|
+| **Topic-based** | sports, politics_us, politics_intl, crypto, economics, entertainment, tech, weather, science, legal |
+| **Risk-based** | low_risk, medium_risk, high_risk |
+| **Time-based** | short_term, medium_term, long_term |
+| **Volume-based** | high_volume, low_volume |
+| **Market-based** | high_liquidity, high_volatility, low_volatility |
+| **Behavioral** | momentum_strong, weekend_trader, market_close |
+| **Dynamic** | dynamic_combo_* (auto-created based on patterns) |
+
+Expert files include:
+- `{expert}.model.pkl` - Trained model (~200KB-3MB)
+- `{expert}.meta.pkl` - Model metadata (~1-2KB)
+- `{expert}.versions.json` - Version history
+
+### AI Orchestrator State (`data/ai_models/orchestrator_state.json`)
+
+```json
+{
+  "last_training_time": "2026-01-27T20:28:40.825925",
+  "last_example_time": "2026-01-27T20:39:08.863928"
+}
+```
+
+Training examples are created every 5 minutes during operation.
+
+### Model Training Flow
+
+1. **Data Collection**: Scheduler collects market snapshots every cycle
+2. **Example Creation**: AIOrchestrator creates training examples every 5 minutes
+3. **Labeling**: Price changes are tracked and examples labeled when prices move
+4. **Training**: MoE experts retrain periodically with new labeled data
+5. **Prediction**: Gating network routes inference to best expert(s)
+
+---
+
+## Configuration Reference
+
+### .env File (Key Non-Sensitive Settings)
 
 ```bash
 # Mode
-POLYBOT_MODE=live             # paper or live
-POLYBOT_DRY_RUN=true          # true = no real orders (SAFE)
-POLYBOT_PLACING_ORDERS=true   # Master trading switch
+POLYBOT_MODE=live
+POLYBOT_DRY_RUN=true              # Safety: prevents real orders
+POLYBOT_LOOP_INTERVAL_SECONDS=10  # Trading cycle interval
 
 # Wallet
 POLYBOT_USER_ADDRESS=0x5cbB1a163F426097578EB4de9e3ECD987Fc1c0d4
 
-# CLOB API (for order execution)
-POLYBOT_CLOB_API_KEY=...
-POLYBOT_CLOB_API_SECRET=...
-POLYBOT_CLOB_PASSPHRASE=...
-
-# Trading Parameters
-POLYBOT_EDGE_THRESHOLD=0.01   # Minimum edge to trade (1%)
-POLYBOT_MIN_NET_EDGE=0.005    # Min edge after fees (0.5%)
-POLYBOT_MAX_POSITION_PCT=2.0  # Max 2% per position
-POLYBOT_MAX_TOTAL_EXPOSURE_PCT=20.0
+# Database
+POLYBOT_DB_URL=sqlite:///./polybot.db
 
 # Market Filtering
-POLYBOT_RESOLVE_MIN_DAYS=7    # Min days until resolution
-POLYBOT_RESOLVE_MAX_DAYS=180  # Max days until resolution
-POLYBOT_MIN_LIQUIDITY=100
-POLYBOT_MAX_SPREAD=0.10       # 10% max spread
+POLYBOT_RESOLVE_MIN_DAYS=7        # Min days until resolution
+POLYBOT_RESOLVE_MAX_DAYS=180      # Max days until resolution
+POLYBOT_MIN_LIQUIDITY=100         # Min market liquidity USD
+POLYBOT_MAX_SPREAD=0.10           # Max bid-ask spread (10%)
+
+# Strategy
+POLYBOT_EDGE_THRESHOLD=0.01       # Min edge to trade (1%)
+POLYBOT_MIN_NET_EDGE=0.005        # Min net edge after costs
+POLYBOT_MIN_ORDER_USD=1.0         # Min order size
 
 # Risk Management
-POLYBOT_DRAWDOWN_LIMIT_PCT=25.0
-POLYBOT_MAX_DAILY_LOSS_PCT=15.0
-POLYBOT_GLOBAL_STOP_LOSS_PCT=15
+POLYBOT_DRAWDOWN_LIMIT_PCT=25.0   # Max drawdown before kill switch
+POLYBOT_MAX_DAILY_LOSS_PCT=15.0   # Max daily loss
 
-# Intent System
+# Execution
+POLYBOT_ORDER_TIMEOUT_SECONDS=300
+POLYBOT_SLIPPAGE_BPS=10
 POLYBOT_INTENT_EXPIRY_SECONDS=90
+POLYBOT_INTENT_COOLDOWN_SECONDS=60
+POLYBOT_MAX_OPEN_ORDERS=5
+
+# Behavior
 POLYBOT_AUTO_APPROVE_INTENTS=false
+POLYBOT_LIVE_ALLOW_OPEN_SELL_INTENTS=false
 
-# External APIs
-POLYBOT_OPENAI_API_KEY=...    # For GPT-5.2 news analysis
-POLYBOT_DISCORD_WEBHOOK_URL=... # Discord notifications
+# Logging
+POLYBOT_LOG_LEVEL=INFO
 ```
-
----
-
-## Database Schema (Key Tables)
-
-| Table | Purpose |
-|-------|---------|
-| `markets` | Market metadata (554 records) |
-| `market_outcomes` | Outcome tokens for each market |
-| `signals` | Generated trading signals (36,086 records) |
-| `trade_intents` | Live mode approval queue (10,778 records) |
-| `simulated_orders` | Paper trading orders |
-| `simulated_fills` | Paper trading fills |
-| `balance_snapshots` | Historical balance tracking (46,515 records) |
-| `kill_switch_events` | Risk management triggers |
-| `account_states` | Account state snapshots |
-
-Query example:
-```bash
-python3 -c "
-import sqlite3
-conn = sqlite3.connect('polybot.db')
-cursor = conn.cursor()
-cursor.execute('SELECT COUNT(*) FROM signals')
-print(cursor.fetchone()[0])
-"
-```
-
----
-
-## MoE Expert System
-
-**24 Experts by Category:**
-
-| Type | Experts |
-|------|---------|
-| Market Category | sports, politics_us, politics_intl, crypto, economics, entertainment, tech, weather, science, legal |
-| Risk Level | low_risk, medium_risk, high_risk |
-| Time Horizon | short_term, medium_term, long_term |
-| Market Dynamics | high_volume, low_volume, high_liquidity, high_volatility, low_volatility, momentum_strong, weekend_trader, market_close |
-
-**Trained Experts (have .model.pkl):**
-- high_risk, high_volume, long_term, low_risk, low_volatility, medium_risk, momentum_strong
-
-**Best Performer:** `momentum_strong` (+3.67% simulated profit)
-
----
-
-## Useful SSH Commands
-
-```bash
-# Check running processes
-ssh -i /Users/HP/.ssh/gcp_vm beamo_beamosupport_com@34.2.57.194 "ps aux | grep polyb0t"
-
-# View recent logs (last 50 lines)
-ssh -i /Users/HP/.ssh/gcp_vm beamo_beamosupport_com@34.2.57.194 "tail -50 ~/Analytical-Probability-Experiment/live_run.log"
-
-# Check bot status
-ssh -i /Users/HP/.ssh/gcp_vm beamo_beamosupport_com@34.2.57.194 "cd ~/Analytical-Probability-Experiment && source ~/.cache/pypoetry/virtualenvs/polyb0t-adUcXa5t-py3.12/bin/activate && polyb0t status"
-
-# Run diagnostics
-ssh -i /Users/HP/.ssh/gcp_vm beamo_beamosupport_com@34.2.57.194 "cd ~/Analytical-Probability-Experiment && source ~/.cache/pypoetry/virtualenvs/polyb0t-adUcXa5t-py3.12/bin/activate && polyb0t doctor"
-
-# Check disk space
-ssh -i /Users/HP/.ssh/gcp_vm beamo_beamosupport_com@34.2.57.194 "df -h"
-
-# Check memory usage
-ssh -i /Users/HP/.ssh/gcp_vm beamo_beamosupport_com@34.2.57.194 "free -h"
-```
-
----
-
-## System Resources (as of last check)
-
-| Resource | Value |
-|----------|-------|
-| CPU Cores | 2 |
-| CPU Freq | 2250 MHz |
-| Memory | 7.75 GB total |
-| Disk | 144.26 GB total, ~14.4% used |
-| Bot Memory | ~346 MB |
-| Uptime | 357+ hours |
 
 ---
 
@@ -233,49 +408,158 @@ ssh -i /Users/HP/.ssh/gcp_vm beamo_beamosupport_com@34.2.57.194 "free -h"
 
 Base URL: `http://34.2.57.194:8000`
 
-Key endpoints (see `polyb0t/api/` for full list):
-- `GET /health` - Health check
-- `GET /status` - Bot status
-- `GET /markets` - Tradable markets
-- `GET /positions` - Current positions
-- `GET /intents` - Pending intents
-- `WebSocket /ws` - Real-time updates
+| Endpoint | Description |
+|----------|-------------|
+| `GET /health` | Health check |
+| `GET /status` | Bot status |
+| `GET /markets` | Tradable markets |
+| `GET /positions` | Current positions |
+| `GET /intents` | Pending intents |
+| `GET /report` | Trading report |
+| `GET /metrics` | Performance metrics |
+| `WebSocket /ws` | Real-time updates |
 
 ---
 
-## Important Notes
+## Useful SSH One-Liners
 
-1. **DRY_RUN=true** means the bot computes everything but doesn't submit real orders - this is the SAFE default
+```bash
+# Check service status
+ssh -i /Users/HP/.ssh/gcp_vm beamo_beamosupport_com@34.2.57.194 "sudo systemctl status polybot.service"
 
-2. **Human-in-the-loop**: In live mode, trades require manual approval via `polyb0t intents approve <id>`
+# View recent application logs
+ssh -i /Users/HP/.ssh/gcp_vm beamo_beamosupport_com@34.2.57.194 "tail -50 ~/Analytical-Probability-Experiment/live_run.log"
 
-3. **AUTO_APPROVE_INTENTS=false**: Currently disabled, meaning all trades need manual approval
+# View systemd journal logs
+ssh -i /Users/HP/.ssh/gcp_vm beamo_beamosupport_com@34.2.57.194 "sudo journalctl -u polybot.service --no-pager -n 30"
 
-4. **The log file (`live_run.log`) can grow very large** - consider rotating or truncating periodically
+# Check disk space
+ssh -i /Users/HP/.ssh/gcp_vm beamo_beamosupport_com@34.2.57.194 "df -h"
 
-5. **sqlite3 is NOT installed** on the VM - use Python to query databases
+# Check memory
+ssh -i /Users/HP/.ssh/gcp_vm beamo_beamosupport_com@34.2.57.194 "free -h"
 
-6. **The main database is ~10GB** - be careful with queries that scan full tables
+# Check running processes
+ssh -i /Users/HP/.ssh/gcp_vm beamo_beamosupport_com@34.2.57.194 "ps aux | grep polyb0t | grep -v grep"
+
+# Run polyb0t CLI commands
+ssh -i /Users/HP/.ssh/gcp_vm beamo_beamosupport_com@34.2.57.194 \
+  "cd ~/Analytical-Probability-Experiment && source ~/.cache/pypoetry/virtualenvs/polyb0t-adUcXa5t-py3.12/bin/activate && polyb0t status"
+
+# Git pull latest changes
+ssh -i /Users/HP/.ssh/gcp_vm beamo_beamosupport_com@34.2.57.194 \
+  "cd ~/Analytical-Probability-Experiment && git pull"
+
+# Check database row counts
+ssh -i /Users/HP/.ssh/gcp_vm beamo_beamosupport_com@34.2.57.194 "cd ~/Analytical-Probability-Experiment && python3 -c \"
+import sqlite3
+conn = sqlite3.connect('polybot.db')
+cursor = conn.cursor()
+for table in ['trade_intents', 'signals', 'markets']:
+    cursor.execute(f'SELECT COUNT(*) FROM {table}')
+    print(f'{table}: {cursor.fetchone()[0]}')
+\""
+
+# Check AI training stats
+ssh -i /Users/HP/.ssh/gcp_vm beamo_beamosupport_com@34.2.57.194 "cd ~/Analytical-Probability-Experiment && python3 -c \"
+import sqlite3
+conn = sqlite3.connect('data/ai_training.db')
+cursor = conn.cursor()
+cursor.execute('SELECT COUNT(*) FROM training_examples')
+print(f'Training examples: {cursor.fetchone()[0]}')
+\""
+
+# View MoE pool state
+ssh -i /Users/HP/.ssh/gcp_vm beamo_beamosupport_com@34.2.57.194 "cat ~/Analytical-Probability-Experiment/data/moe_models/pool_state.json"
+```
 
 ---
 
 ## Troubleshooting
 
-**Bot not running?**
+### Service won't start?
+```bash
+# Check detailed error
+sudo journalctl -u polybot.service --no-pager -n 100
+
+# Check if port 8000 is in use
+sudo ss -tlnp | grep 8000
+
+# Check for Python syntax errors
+cd ~/Analytical-Probability-Experiment
+source ~/.cache/pypoetry/virtualenvs/polyb0t-adUcXa5t-py3.12/bin/activate
+python -m py_compile polyb0t/cli/main.py
+```
+
+### Database locked errors?
+This can happen when multiple processes access SQLite concurrently.
+```bash
+# Check for multiple bot processes
+ps aux | grep polyb0t | grep -v grep
+
+# If duplicates exist, restart cleanly
+sudo systemctl stop polybot.service
+sleep 5
+sudo systemctl start polybot.service
+```
+
+### WebSocket reconnection loops?
+Normal behavior - the WebSocket client reconnects automatically after timeouts (340s default).
+
+### Need to manually test?
+```bash
+# Only for testing - normally use systemd!
+cd ~/Analytical-Probability-Experiment
+source ~/.cache/pypoetry/virtualenvs/polyb0t-adUcXa5t-py3.12/bin/activate
+polyb0t run --live  # Run in foreground to see output
+```
+
+### Large log file?
+```bash
+# Check log size
+ls -lh live_run.log
+
+# Truncate log file (keeps last 1000 lines)
+tail -1000 live_run.log > live_run.log.tmp && mv live_run.log.tmp live_run.log
+```
+
+### Check for Python errors:
+```bash
+grep -i "error\|exception\|traceback" live_run.log | tail -30
+```
+
+### Check AI system health:
 ```bash
 cd ~/Analytical-Probability-Experiment
 source ~/.cache/pypoetry/virtualenvs/polyb0t-adUcXa5t-py3.12/bin/activate
-nohup polyb0t run --live > live_run.log 2>&1 &
+python scripts/check_ai_status.py
 ```
 
-**Check for errors:**
-```bash
-grep -i error live_run.log | tail -20
-```
+---
 
-**Restart the bot:**
-```bash
-pkill -f "polyb0t run"
-# Wait a moment, then start again
-nohup polyb0t run --live > live_run.log 2>&1 &
-```
+## Typical Runtime Behavior
+
+During normal operation, each trading cycle (~10 seconds):
+1. Fetches balance snapshot (~$289 USDC currently)
+2. Fetches account positions (1 active: Super Bowl)
+3. Fetches 5000+ markets from Polymarket API
+4. Filters to ~2900 tradable (by liquidity, resolution date)
+5. Enriches top 250 markets with orderbook data
+6. Filters to ~67 after spread/depth checks
+7. Generates AI signals (confidence ~67-69%, edge ~55-63%)
+8. Creates training examples every 5 minutes
+9. Expires old intents (90s expiry)
+10. In DRY_RUN mode: logs signals but doesn't execute
+
+---
+
+## Important Reminders
+
+1. **ALWAYS use systemctl** to manage the bot, not pkill/nohup
+2. **DRY_RUN=true** is the safe default - bot doesn't submit real orders
+3. **Restart service after code changes** - `sudo systemctl restart polybot.service`
+4. **Check both logs**: `live_run.log` AND `journalctl -u polybot.service`
+5. **The main database is ~12GB** - be careful with full table scans
+6. **No crontab** - all scheduling handled by the bot itself
+7. **Poetry not in PATH** - use `~/.local/bin/poetry` or activate virtualenv first
+8. **sqlite3 CLI not installed** - use Python for database queries

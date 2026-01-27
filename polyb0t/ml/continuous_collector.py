@@ -25,8 +25,8 @@ logger = logging.getLogger(__name__)
 # Schema version - increment when adding new features
 SCHEMA_VERSION = 2
 
-# Maximum storage size (140GB)
-MAX_STORAGE_BYTES = 140 * 1024 * 1024 * 1024
+# Maximum storage size (120GB)
+MAX_STORAGE_BYTES = 120 * 1024 * 1024 * 1024
 
 
 @dataclass
