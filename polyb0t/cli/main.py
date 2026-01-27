@@ -1837,10 +1837,50 @@ def backtest_compare(
             )
         
         click.echo(f"\n{'='*80}\n")
-        
+
     except Exception as e:
         logger.error(f"Comparison error: {e}", exc_info=True)
         click.echo(f"ERROR: {e}")
+
+
+@cli.command(name="backfill-categories")
+@click.option(
+    "--max",
+    "max_examples",
+    type=int,
+    default=None,
+    help="Maximum examples to process (default: all).",
+)
+@click.option(
+    "--batch-size",
+    type=int,
+    default=1000,
+    help="Commit every N examples (default: 1000).",
+)
+def backfill_categories_cmd(max_examples: int, batch_size: int) -> None:
+    """Backfill NULL categories in training data.
+
+    Looks up market titles and categorizes training examples that were
+    created before category tracking was implemented.
+
+    Example:
+        polyb0t backfill-categories
+        polyb0t backfill-categories --max 5000
+    """
+    setup_logging()
+
+    from polyb0t.ml.backfill_categories import backfill_categories
+
+    click.echo("Starting category backfill...")
+    stats = backfill_categories(batch_size=batch_size, max_examples=max_examples)
+
+    click.echo(f"\nBackfill complete:")
+    click.echo(f"  Total: {stats['total']}")
+    click.echo(f"  Categorized: {stats['categorized']}")
+    click.echo(f"  Failed: {stats['failed']}")
+    click.echo(f"\nCategory distribution:")
+    for cat, count in sorted(stats.get('by_category', {}).items(), key=lambda x: -x[1]):
+        click.echo(f"  {cat}: {count}")
 
 
 if __name__ == "__main__":
