@@ -266,6 +266,183 @@ class GammaClient:
         logger.info(f"Fetched {len(all_markets)} markets via pagination ({pages_fetched} pages, {duplicates_skipped} duplicates skipped)")
         return all_markets, diagnostics
 
+    async def list_tags(self, limit: int = 200) -> list[dict[str, Any]]:
+        """Fetch available market tags from Gamma API.
+
+        Args:
+            limit: Maximum tags to fetch.
+
+        Returns:
+            List of tag dictionaries with id, label, slug.
+        """
+        try:
+            data = await self._get("/tags", params={"limit": limit})
+            if isinstance(data, list):
+                return data
+            return data.get("tags", []) if data else []
+        except Exception as e:
+            logger.warning(f"Failed to fetch tags: {e}")
+            return []
+
+    async def list_markets_by_tag(
+        self,
+        tag_id: int,
+        active: bool | None = True,
+        closed: bool | None = False,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[list[Market], dict[str, Any]]:
+        """Fetch markets filtered by tag ID.
+
+        Args:
+            tag_id: Tag ID to filter by.
+            active: Filter by active status.
+            closed: Filter by closed status.
+            limit: Max markets per request.
+            offset: Pagination offset.
+
+        Returns:
+            Tuple of (markets, diagnostics).
+        """
+        params: dict[str, Any] = {
+            "limit": limit,
+            "offset": offset,
+            "tag_id": tag_id,
+        }
+        if active is not None:
+            params["active"] = str(active).lower()
+        if closed is not None:
+            params["closed"] = str(closed).lower()
+
+        status, data = await self._get_with_status("/markets", params=params)
+        diag: dict[str, Any] = {
+            "endpoint": "/markets",
+            "tag_id": tag_id,
+            "status": status,
+            "parsed": 0,
+            "failed_parse": 0,
+        }
+        if data is None:
+            return [], diag
+
+        markets: list[Market] = []
+        market_list = data if isinstance(data, list) else data.get("markets", [])
+        for item in market_list:
+            try:
+                market = self._parse_market(item)
+                markets.append(market)
+                diag["parsed"] += 1
+            except Exception as e:
+                logger.debug(f"Failed to parse market: {e}")
+                diag["failed_parse"] += 1
+        return markets, diag
+
+    async def list_diverse_markets(
+        self,
+        target_per_category: int = 200,
+        max_total: int = 2000,
+        active: bool | None = True,
+        closed: bool | None = False,
+    ) -> tuple[list[Market], dict[str, Any]]:
+        """Fetch markets from diverse categories/tags.
+
+        Queries multiple tags to ensure category diversity beyond just
+        politics and sports.
+
+        Args:
+            target_per_category: Target markets per category.
+            max_total: Maximum total markets to return.
+            active: Filter by active status.
+            closed: Filter by closed status.
+
+        Returns:
+            Tuple of (diverse markets, diagnostics).
+        """
+        # Priority tags for diversification (tag_id: category_name)
+        # These map to underrepresented categories in training data
+        priority_tags = {
+            # Crypto/Finance
+            1389: "crypto",       # digital currency
+            149: "bankruptcy",    # finance
+            918: "funding",       # finance
+            # Tech
+            354: "tech",          # entrepreneurship/tech
+            # Science/Weather
+            # Sports (already well represented but include for balance)
+            # Entertainment
+            503: "entertainment", # gaming/entertainment
+            # Economics
+            777: "economics",     # maritime transport (trade indicator)
+            # International
+            101438: "politics_intl",  # Romania (international)
+        }
+
+        all_markets: list[Market] = []
+        seen_ids: set[str] = set()
+        diagnostics: dict[str, Any] = {
+            "tags_queried": 0,
+            "markets_by_tag": {},
+            "total_unique": 0,
+            "duplicates_skipped": 0,
+        }
+
+        # First, get markets from priority tags
+        for tag_id, category_name in priority_tags.items():
+            if len(all_markets) >= max_total:
+                break
+
+            try:
+                markets, diag = await self.list_markets_by_tag(
+                    tag_id=tag_id,
+                    active=active,
+                    closed=closed,
+                    limit=target_per_category,
+                )
+                diagnostics["tags_queried"] += 1
+
+                added = 0
+                for market in markets:
+                    if market.condition_id not in seen_ids:
+                        seen_ids.add(market.condition_id)
+                        all_markets.append(market)
+                        added += 1
+                    else:
+                        diagnostics["duplicates_skipped"] += 1
+
+                diagnostics["markets_by_tag"][category_name] = added
+                logger.debug(f"Tag {tag_id} ({category_name}): added {added} markets")
+
+            except Exception as e:
+                logger.warning(f"Failed to fetch tag {tag_id}: {e}")
+                continue
+
+        # Then fill remaining with general market fetch
+        remaining = max_total - len(all_markets)
+        if remaining > 0:
+            general_markets, gen_diag = await self.list_all_markets(
+                active=active,
+                closed=closed,
+                max_markets=remaining * 2,  # Fetch more to account for duplicates
+            )
+            added = 0
+            for market in general_markets:
+                if len(all_markets) >= max_total:
+                    break
+                if market.condition_id not in seen_ids:
+                    seen_ids.add(market.condition_id)
+                    all_markets.append(market)
+                    added += 1
+                else:
+                    diagnostics["duplicates_skipped"] += 1
+            diagnostics["markets_by_tag"]["general"] = added
+
+        diagnostics["total_unique"] = len(all_markets)
+        logger.info(
+            f"Fetched {len(all_markets)} diverse markets from {diagnostics['tags_queried']} tags: "
+            f"{diagnostics['markets_by_tag']}"
+        )
+        return all_markets, diagnostics
+
     async def get_market(self, condition_id: str) -> Market | None:
         """Get single market by condition ID.
 

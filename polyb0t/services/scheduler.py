@@ -1460,13 +1460,19 @@ class TradingScheduler:
                 # Paper mode: limited fetch for testing
                 markets, diag = await gamma.list_markets_debug(active=True, closed=False, limit=100)
             else:
-                # Live mode: use pagination to fetch ALL available markets
+                # Live mode: use diverse market fetching for better category coverage
+                # This queries multiple tags (crypto, tech, finance, etc.) to avoid
+                # over-representation of politics and sports in training data
                 max_markets = int(getattr(self.settings, "ai_max_markets_per_fetch", 5000))
+                target_per_category = max(100, max_markets // 20)  # ~5% per category
+
                 # NOTE: Polymarket API doesn't return category for open markets (closed=false filter)
                 # Categories will be inferred by the category_tracker using title keywords
-                markets, diag = await gamma.list_all_markets(
-                    active=True, closed=False,
-                    batch_size=500, max_markets=max_markets
+                markets, diag = await gamma.list_diverse_markets(
+                    target_per_category=target_per_category,
+                    max_total=max_markets,
+                    active=True,
+                    closed=False,
                 )
 
             # Save to database

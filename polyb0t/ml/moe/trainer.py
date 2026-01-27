@@ -235,44 +235,117 @@ class MoETrainer:
         finally:
             self._is_training = False
     
-    def _load_training_data(self) -> List[Dict[str, Any]]:
-        """Load training data from database."""
+    def _load_training_data(self, category_balanced: bool = True, max_per_category: int = 10000) -> List[Dict[str, Any]]:
+        """Load training data from database with optional category balancing.
+
+        Args:
+            category_balanced: If True, limit samples per category to avoid
+                              over-representation of dominant categories.
+            max_per_category: Maximum samples per category when balancing.
+
+        Returns:
+            List of training examples.
+        """
         if not os.path.exists(self.db_path):
             logger.error(f"Training database not found: {self.db_path}")
             return []
-        
+
         try:
             conn = sqlite3.connect(self.db_path, timeout=30.0)
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            
-            # Load labeled examples (those with 24h price change)
-            cursor.execute("""
-                SELECT * FROM training_examples
-                WHERE price_change_24h IS NOT NULL
-                ORDER BY created_at DESC
-                LIMIT 100000
-            """)
-            
-            rows = cursor.fetchall()
-            conn.close()
-            
-            # Convert to dicts
-            data = []
-            for row in rows:
-                d = dict(row)
-                # Parse features JSON if stored as string
-                if "features" in d and isinstance(d["features"], str):
-                    import json
-                    try:
-                        d["features"] = json.loads(d["features"])
-                    except (json.JSONDecodeError, TypeError) as e:
-                        logger.debug(f"Could not parse features JSON: {e}")
-                        d["features"] = {}
-                data.append(d)
-            
-            return data
-            
+
+            if category_balanced:
+                # Category-balanced sampling to avoid over-representation
+                # of politics and sports in training
+                cursor.execute("""
+                    SELECT category, COUNT(*) as cnt
+                    FROM training_examples
+                    WHERE price_change_24h IS NOT NULL
+                    GROUP BY category
+                """)
+                category_counts = {row[0]: row[1] for row in cursor.fetchall()}
+
+                logger.info(f"Category distribution before balancing: {category_counts}")
+
+                # Sample up to max_per_category from each category
+                data = []
+                for category in category_counts.keys():
+                    cursor.execute("""
+                        SELECT * FROM training_examples
+                        WHERE price_change_24h IS NOT NULL
+                          AND category = ?
+                        ORDER BY created_at DESC
+                        LIMIT ?
+                    """, (category, max_per_category))
+
+                    rows = cursor.fetchall()
+                    for row in rows:
+                        d = dict(row)
+                        if "features" in d and isinstance(d["features"], str):
+                            import json
+                            try:
+                                d["features"] = json.loads(d["features"])
+                            except (json.JSONDecodeError, TypeError) as e:
+                                logger.debug(f"Could not parse features JSON: {e}")
+                                d["features"] = {}
+                        data.append(d)
+
+                # Also include examples with NULL category (legacy data)
+                cursor.execute("""
+                    SELECT * FROM training_examples
+                    WHERE price_change_24h IS NOT NULL
+                      AND (category IS NULL OR category = '')
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                """, (max_per_category,))
+
+                for row in cursor.fetchall():
+                    d = dict(row)
+                    if "features" in d and isinstance(d["features"], str):
+                        import json
+                        try:
+                            d["features"] = json.loads(d["features"])
+                        except (json.JSONDecodeError, TypeError):
+                            d["features"] = {}
+                    data.append(d)
+
+                conn.close()
+
+                # Log balanced distribution
+                balanced_cats = {}
+                for d in data:
+                    cat = d.get("category") or "unknown"
+                    balanced_cats[cat] = balanced_cats.get(cat, 0) + 1
+                logger.info(f"Category distribution after balancing: {balanced_cats}")
+
+                return data
+            else:
+                # Original behavior: no balancing
+                cursor.execute("""
+                    SELECT * FROM training_examples
+                    WHERE price_change_24h IS NOT NULL
+                    ORDER BY created_at DESC
+                    LIMIT 100000
+                """)
+
+                rows = cursor.fetchall()
+                conn.close()
+
+                data = []
+                for row in rows:
+                    d = dict(row)
+                    if "features" in d and isinstance(d["features"], str):
+                        import json
+                        try:
+                            d["features"] = json.loads(d["features"])
+                        except (json.JSONDecodeError, TypeError) as e:
+                            logger.debug(f"Could not parse features JSON: {e}")
+                            d["features"] = {}
+                    data.append(d)
+
+                return data
+
         except Exception as e:
             logger.error(f"Failed to load training data: {e}")
             return []
