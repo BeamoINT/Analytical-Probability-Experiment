@@ -224,7 +224,7 @@ class IntentManager:
 
     def _safe_commit(self) -> bool:
         """Safely commit database changes with rollback on error.
-        
+
         Returns:
             True if commit succeeded, False if rollback occurred.
         """
@@ -238,6 +238,54 @@ class IntentManager:
             except Exception as re:
                 logger.error(f"Rollback also failed: {re}")
             return False
+
+    def _record_trade_lifecycle(self, db_intent: TradeIntentDB) -> None:
+        """Record trade lifecycle event for accurate P&L tracking.
+
+        This is called when an intent is executed (or executed in dry-run mode)
+        to track the trade from entry to exit for accurate win rate and P&L metrics.
+
+        Args:
+            db_intent: The executed intent database record.
+        """
+        try:
+            from polyb0t.services.trade_lifecycle import get_trade_lifecycle_service
+
+            service = get_trade_lifecycle_service()
+
+            if db_intent.intent_type == IntentType.OPEN_POSITION.value:
+                # Record trade opened
+                service.record_trade_opened(
+                    intent_id=db_intent.intent_id,
+                    token_id=db_intent.token_id,
+                    market_id=db_intent.market_id,
+                    entry_price=db_intent.price or 0.0,
+                    entry_size_usd=db_intent.size_usd or db_intent.size or 0.0,
+                    side=db_intent.side or "BUY",
+                )
+
+            elif db_intent.intent_type == IntentType.CLOSE_POSITION.value:
+                # Record trade closed with P&L calculation
+                # Try to get entry price from signal_data if available
+                exit_price = db_intent.price or 0.0
+                exit_reason = "MANUAL"
+
+                if db_intent.signal_data:
+                    exit_reason = db_intent.signal_data.get("exit_type", "SIGNAL")
+
+                service.record_trade_closed(
+                    token_id=db_intent.token_id,
+                    exit_price=exit_price,
+                    exit_size_usd=db_intent.size_usd or db_intent.size,
+                    exit_reason=exit_reason,
+                    close_intent_id=db_intent.intent_id,
+                )
+
+            service.close()
+
+        except Exception as e:
+            # Don't fail the intent execution if trade lifecycle recording fails
+            logger.warning(f"Failed to record trade lifecycle: {e}")
 
     def create_intent_from_signal(
         self,
@@ -614,6 +662,9 @@ class IntentManager:
             intent.execution_result = db_intent.execution_result
             intent.submitted_order_id = db_intent.submitted_order_id
 
+            # Record trade lifecycle for accurate P&L tracking (even in dry-run)
+            self._record_trade_lifecycle(db_intent)
+
         logger.info(
             f"Approved intent: {intent_id[:8]}",
             extra={"intent_id": intent_id, "approved_by": approved_by},
@@ -687,6 +738,9 @@ class IntentManager:
                 db_intent.submitted_order_id = str(oid)
         self._safe_commit()
 
+        # Record trade lifecycle for accurate P&L tracking
+        self._record_trade_lifecycle(db_intent)
+
         logger.info(
             f"Marked intent as executed: {intent_id[:8]}",
             extra={"intent_id": intent_id, "result": execution_result},
@@ -717,6 +771,10 @@ class IntentManager:
         db_intent.execution_result = {"dry_run": True, "success": True, "message": note}
         db_intent.submitted_order_id = f"dryrun:{intent_id[:8]}"
         self._safe_commit()
+
+        # Record trade lifecycle for accurate P&L tracking (even in dry-run)
+        self._record_trade_lifecycle(db_intent)
+
         return True
 
     def mark_failed(self, intent_id: str, error: str) -> bool:

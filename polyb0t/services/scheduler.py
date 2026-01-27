@@ -2366,34 +2366,24 @@ class TradingScheduler:
                         "labeled_examples": stats.get("collector", {}).get("labeled_examples", 0),
                     }
             
-            # Collect performance stats
+            # Collect performance stats from CLOSED TRADES (actual P&L, not execution success)
             performance_stats = {}
             try:
-                from polyb0t.data.storage import get_session, TradeIntentDB
-                db_session = get_session()
-                
-                # Get today's executed intents
+                from polyb0t.services.trade_lifecycle import get_trade_lifecycle_service
+
                 today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-                executed_today = (
-                    db_session.query(TradeIntentDB)
-                    .filter(TradeIntentDB.executed_at >= today_start)
-                    .filter(TradeIntentDB.status.in_(["EXECUTED", "EXECUTED_DRYRUN"]))
-                    .all()
-                )
-                trades_today = len(executed_today)
-                
-                # Calculate win rate from execution results
-                wins = sum(1 for t in executed_today if t.execution_result and t.execution_result.get("success"))
-                win_rate = wins / trades_today if trades_today > 0 else 0
-                
+                service = get_trade_lifecycle_service()
+                stats = service.get_performance_stats(since=today_start)
+                service.close()
+
                 performance_stats = {
-                    "trades_today": trades_today,
-                    "win_rate": win_rate,
-                    "total_pnl_pct": 0,  # TODO: calculate from closed positions
+                    "trades_today": stats.get("closed_trades", 0),
+                    "win_rate": stats.get("win_rate", 0),
+                    "total_pnl_pct": stats.get("total_pnl_pct", 0),
+                    "total_pnl_usd": stats.get("total_pnl_usd", 0),
                     "markets_scanned": getattr(self, '_last_markets_scanned', 0),
                     "markets_tradable": getattr(self, '_last_markets_tradable', 0),
                 }
-                db_session.close()
             except Exception as e:
                 logger.debug(f"Could not get performance stats: {e}")
             

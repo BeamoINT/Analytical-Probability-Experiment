@@ -291,6 +291,49 @@ class KillSwitchEventDB(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class ClosedTradeDB(Base):
+    """Closed trades with realized P&L for accurate metrics tracking."""
+
+    __tablename__ = "closed_trades"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    trade_id = Column(String(255), unique=True, nullable=False, index=True)
+
+    # Link to intents
+    open_intent_id = Column(String(255), nullable=False, index=True)
+    close_intent_id = Column(String(255), nullable=True, index=True)
+
+    # Trade identification
+    token_id = Column(String(255), nullable=False, index=True)
+    market_id = Column(String(255), nullable=True, index=True)
+    side = Column(String(10), nullable=True)  # BUY or SELL (entry side)
+
+    # Entry details
+    entry_price = Column(Float, nullable=False)
+    entry_size_usd = Column(Float, nullable=False)
+    entry_time = Column(DateTime, nullable=False)
+
+    # Exit details
+    exit_price = Column(Float, nullable=True)
+    exit_size_usd = Column(Float, nullable=True)
+    exit_time = Column(DateTime, nullable=True, index=True)
+    exit_reason = Column(String(100), nullable=True)  # TAKE_PROFIT, STOP_LOSS, TIME_EXIT, MANUAL
+
+    # Realized P&L
+    realized_pnl_usd = Column(Float, nullable=True)
+    realized_pnl_pct = Column(Float, nullable=True)
+    is_winner = Column(Boolean, nullable=True)
+
+    # Hold time
+    hold_time_hours = Column(Float, nullable=True)
+
+    # Status: OPEN (entry recorded, awaiting exit) or CLOSED (exit recorded, P&L calculated)
+    status = Column(String(20), default="OPEN", index=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 # Database engine and session management
 _engine = None
 _SessionLocal = None
@@ -320,6 +363,7 @@ def init_db(db_url: str | None = None) -> None:
         try:
             _ensure_sqlite_trade_intents_columns(_engine)
             _ensure_sqlite_balance_snapshots_table(_engine)
+            _ensure_sqlite_closed_trades_table(_engine)
         except Exception:
             # Never prevent startup due to a best-effort schema upgrade.
             pass
@@ -399,6 +443,58 @@ def _ensure_sqlite_balance_snapshots_table(engine: Any) -> None:
         )
         cur.execute("CREATE INDEX IF NOT EXISTS ix_balance_snapshots_cycle_id ON balance_snapshots (cycle_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS ix_balance_snapshots_timestamp ON balance_snapshots (timestamp)")
+        con.commit()
+    finally:
+        con.close()
+
+
+def _ensure_sqlite_closed_trades_table(engine: Any) -> None:
+    """Ensure closed_trades table exists on SQLite (best-effort)."""
+    import sqlite3
+
+    url = str(engine.url)
+    if not url.startswith("sqlite:///"):
+        return
+    path = url.replace("sqlite:///", "", 1)
+
+    con = sqlite3.connect(path)
+    try:
+        cur = con.cursor()
+        cur.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='closed_trades'"
+        )
+        if cur.fetchone():
+            return
+        cur.execute(
+            """CREATE TABLE closed_trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_id VARCHAR(255) NOT NULL UNIQUE,
+                open_intent_id VARCHAR(255) NOT NULL,
+                close_intent_id VARCHAR(255),
+                token_id VARCHAR(255) NOT NULL,
+                market_id VARCHAR(255),
+                side VARCHAR(10),
+                entry_price REAL NOT NULL,
+                entry_size_usd REAL NOT NULL,
+                entry_time DATETIME NOT NULL,
+                exit_price REAL,
+                exit_size_usd REAL,
+                exit_time DATETIME,
+                exit_reason VARCHAR(100),
+                realized_pnl_usd REAL,
+                realized_pnl_pct REAL,
+                is_winner BOOLEAN,
+                hold_time_hours REAL,
+                status VARCHAR(20) DEFAULT 'OPEN',
+                created_at DATETIME,
+                updated_at DATETIME
+            )"""
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS ix_closed_trades_trade_id ON closed_trades (trade_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS ix_closed_trades_token_id ON closed_trades (token_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS ix_closed_trades_status ON closed_trades (status)")
+        cur.execute("CREATE INDEX IF NOT EXISTS ix_closed_trades_exit_time ON closed_trades (exit_time)")
+        cur.execute("CREATE INDEX IF NOT EXISTS ix_closed_trades_open_intent_id ON closed_trades (open_intent_id)")
         con.commit()
     finally:
         con.close()

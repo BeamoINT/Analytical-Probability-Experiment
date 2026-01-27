@@ -449,15 +449,29 @@ class DiscordNotifier:
             {"name": "🤖 Active Experts", "value": f"{ai_status.get('active_experts', 0)}/{ai_status.get('total_experts', 0)}", "inline": True},
         ]
         
-        # Add performance stats if available
+        # Add performance stats if available (based on actual trade P&L, not execution success)
         if performance_stats:
             win_rate = performance_stats.get("win_rate", 0)
-            total_pnl = performance_stats.get("total_pnl_pct", 0)
-            trades_today = performance_stats.get("trades_today", 0)
+            total_pnl_pct = performance_stats.get("total_pnl_pct", 0)
+            total_pnl_usd = performance_stats.get("total_pnl_usd", 0)
+            trades_closed = performance_stats.get("trades_today", 0)
+
+            # Win rate: show percentage if trades closed, otherwise "No closes"
+            if trades_closed > 0:
+                win_rate_display = f"{win_rate:.0%}"
+            else:
+                win_rate_display = "No closes"
+
+            # P&L: show percentage and USD if available
+            if trades_closed > 0:
+                pnl_display = f"{total_pnl_pct:+.1f}% (${total_pnl_usd:+.2f})"
+            else:
+                pnl_display = "N/A"
+
             fields.extend([
-                {"name": "🎯 Win Rate", "value": f"{win_rate:.0%}" if win_rate else "N/A", "inline": True},
-                {"name": "📊 Today's P&L", "value": f"{total_pnl:+.1%}" if total_pnl else "N/A", "inline": True},
-                {"name": "🔄 Trades Today", "value": str(trades_today), "inline": True},
+                {"name": "🎯 Win Rate", "value": win_rate_display, "inline": True},
+                {"name": "📊 Today's P&L", "value": pnl_display, "inline": True},
+                {"name": "🔄 Trades Closed", "value": str(trades_closed), "inline": True},
             ])
         
         # Training info
