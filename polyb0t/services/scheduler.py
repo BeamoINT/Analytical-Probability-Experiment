@@ -638,124 +638,121 @@ class TradingScheduler:
                     new_tracked = self.ai_orchestrator.track_markets(market_dicts)
                     
                     # Collect comprehensive snapshots from orderbooks
+                    # Use category balancing for diverse training data
                     snapshots_collected = 0
                     examples_created_this_cycle = False
                     now = datetime.utcnow()
-                    
-                    for m in tradable_markets:
-                        for o in m.outcomes:
-                            if not o.token_id:
-                                continue
-                            ob = orderbooks.get(o.token_id)
-                            if not ob or not ob.bids or not ob.asks:
-                                continue
-                            
-                            # === CORE PRICE DATA ===
-                            best_bid = ob.bids[0].price
-                            best_ask = ob.asks[0].price
-                            mid = (best_bid + best_ask) / 2
-                            spread = best_ask - best_bid
-                            spread_pct = spread / mid if mid > 0 else 0
-                            
-                            # === ORDERBOOK DEPTH ===
-                            bid_depth_5 = sum(l.size for l in ob.bids[:5])
-                            ask_depth_5 = sum(l.size for l in ob.asks[:5])
-                            bid_depth_10 = sum(l.size for l in ob.bids[:10])
-                            ask_depth_10 = sum(l.size for l in ob.asks[:10])
-                            total_bid_depth = bid_depth_5 + bid_depth_10
-                            total_ask_depth = ask_depth_5 + ask_depth_10
-                            imbalance = (total_bid_depth - total_ask_depth) / (total_bid_depth + total_ask_depth) if (total_bid_depth + total_ask_depth) > 0 else 0
-                            
-                            best_bid_size = ob.bids[0].size if ob.bids else 0
-                            best_ask_size = ob.asks[0].size if ob.asks else 0
-                            bid_ask_size_ratio = best_bid_size / best_ask_size if best_ask_size > 0 else 1
-                            
-                            # === VOLUME & LIQUIDITY ===
-                            volume_24h = float(m.volume or 0)
-                            liquidity = float(m.liquidity or 0)
-                            liquidity_bid = sum(l.size * l.price for l in ob.bids[:10])
-                            liquidity_ask = sum(l.size * l.price for l in ob.asks[:10])
-                            
-                            # === MOMENTUM (from collector's price history) ===
-                            momentum_1h = self.ai_orchestrator.collector.compute_momentum(o.token_id, 1)
-                            momentum_4h = self.ai_orchestrator.collector.compute_momentum(o.token_id, 4)
-                            momentum_24h = self.ai_orchestrator.collector.compute_momentum(o.token_id, 24)
-                            momentum_7d = self.ai_orchestrator.collector.compute_momentum(o.token_id, 168)
-                            
-                            # === VOLATILITY ===
-                            volatility_1h = self.ai_orchestrator.collector.compute_volatility(o.token_id, 1)
-                            volatility_24h = self.ai_orchestrator.collector.compute_volatility(o.token_id, 24)
-                            volatility_7d = self.ai_orchestrator.collector.compute_volatility(o.token_id, 168)
-                            
-                            # === TIMING FEATURES ===
-                            days_to_res = self._days_to_resolution(m.end_date)
-                            hours_to_res = days_to_res * 24
-                            hour_of_day = now.hour
-                            day_of_week = now.weekday()
-                            is_weekend = day_of_week >= 5
-                            
-                            # === MARKET METADATA ===
-                            # Use 'or' to handle None values - getattr returns None if attr exists but is None
-                            category = getattr(m, 'category', '') or ''
-                            question = getattr(m, 'question', '') or ''
-                            # Use question for market_slug since API doesn't return slug
-                            # This allows category_tracker to infer categories from question text
-                            market_slug = question
-                            description = getattr(m, 'description', '')
-                            
-                            # === DERIVED FEATURES ===
-                            price_vs_volume = mid / volume_24h if volume_24h > 0 else 0
-                            liq_per_vol = liquidity / volume_24h if volume_24h > 0 else 0
-                            spread_adj_edge = max(0, abs(mid - 0.5) - spread_pct)
-                            
-                            created = self.ai_orchestrator.collect_snapshot(
-                                token_id=o.token_id,
-                                market_id=m.condition_id,
-                                price=mid,
-                                bid=best_bid,
-                                ask=best_ask,
-                                spread=spread,
-                                spread_pct=spread_pct,
-                                mid_price=mid,
-                                orderbook_imbalance=imbalance,
-                                volume_24h=volume_24h,
-                                liquidity=liquidity,
-                                liquidity_bid=liquidity_bid,
-                                liquidity_ask=liquidity_ask,
-                                bid_depth=total_bid_depth,
-                                ask_depth=total_ask_depth,
-                                bid_depth_5=bid_depth_5,
-                                ask_depth_5=ask_depth_5,
-                                bid_depth_10=bid_depth_10,
-                                ask_depth_10=ask_depth_10,
-                                bid_levels=len(ob.bids),
-                                ask_levels=len(ob.asks),
-                                best_bid_size=best_bid_size,
-                                best_ask_size=best_ask_size,
-                                bid_ask_size_ratio=bid_ask_size_ratio,
-                                momentum_1h=momentum_1h,
-                                momentum_4h=momentum_4h,
-                                momentum_24h=momentum_24h,
-                                momentum_7d=momentum_7d,
-                                volatility_1h=volatility_1h,
-                                volatility_24h=volatility_24h,
-                                volatility_7d=volatility_7d,
-                                days_to_resolution=days_to_res,
-                                hours_to_resolution=hours_to_res,
-                                hour_of_day=hour_of_day,
-                                day_of_week=day_of_week,
-                                category=category,
-                                market_slug=market_slug,
-                                question_length=len(question),
-                                description_length=len(description),
-                                price_vs_volume_ratio=price_vs_volume,
-                                liquidity_per_dollar_volume=liq_per_vol,
-                                spread_adjusted_edge=spread_adj_edge,
-                            )
-                            snapshots_collected += 1
-                            if created:
-                                examples_created_this_cycle = True
-                    
+
+                    # Balance markets by category to ensure diverse training examples
+                    balanced_items = self._select_balanced_markets(tradable_markets, orderbooks)
+
+                    for m, o, ob in balanced_items:
+                        # === CORE PRICE DATA ===
+                        best_bid = ob.bids[0].price
+                        best_ask = ob.asks[0].price
+                        mid = (best_bid + best_ask) / 2
+                        spread = best_ask - best_bid
+                        spread_pct = spread / mid if mid > 0 else 0
+
+                        # === ORDERBOOK DEPTH ===
+                        bid_depth_5 = sum(l.size for l in ob.bids[:5])
+                        ask_depth_5 = sum(l.size for l in ob.asks[:5])
+                        bid_depth_10 = sum(l.size for l in ob.bids[:10])
+                        ask_depth_10 = sum(l.size for l in ob.asks[:10])
+                        total_bid_depth = bid_depth_5 + bid_depth_10
+                        total_ask_depth = ask_depth_5 + ask_depth_10
+                        imbalance = (total_bid_depth - total_ask_depth) / (total_bid_depth + total_ask_depth) if (total_bid_depth + total_ask_depth) > 0 else 0
+
+                        best_bid_size = ob.bids[0].size if ob.bids else 0
+                        best_ask_size = ob.asks[0].size if ob.asks else 0
+                        bid_ask_size_ratio = best_bid_size / best_ask_size if best_ask_size > 0 else 1
+
+                        # === VOLUME & LIQUIDITY ===
+                        volume_24h = float(m.volume or 0)
+                        liquidity = float(m.liquidity or 0)
+                        liquidity_bid = sum(l.size * l.price for l in ob.bids[:10])
+                        liquidity_ask = sum(l.size * l.price for l in ob.asks[:10])
+
+                        # === MOMENTUM (from collector's price history) ===
+                        momentum_1h = self.ai_orchestrator.collector.compute_momentum(o.token_id, 1)
+                        momentum_4h = self.ai_orchestrator.collector.compute_momentum(o.token_id, 4)
+                        momentum_24h = self.ai_orchestrator.collector.compute_momentum(o.token_id, 24)
+                        momentum_7d = self.ai_orchestrator.collector.compute_momentum(o.token_id, 168)
+
+                        # === VOLATILITY ===
+                        volatility_1h = self.ai_orchestrator.collector.compute_volatility(o.token_id, 1)
+                        volatility_24h = self.ai_orchestrator.collector.compute_volatility(o.token_id, 24)
+                        volatility_7d = self.ai_orchestrator.collector.compute_volatility(o.token_id, 168)
+
+                        # === TIMING FEATURES ===
+                        days_to_res = self._days_to_resolution(m.end_date)
+                        hours_to_res = days_to_res * 24
+                        hour_of_day = now.hour
+                        day_of_week = now.weekday()
+                        is_weekend = day_of_week >= 5
+
+                        # === MARKET METADATA ===
+                        # Use 'or' to handle None values - getattr returns None if attr exists but is None
+                        category = getattr(m, 'category', '') or ''
+                        question = getattr(m, 'question', '') or ''
+                        # Use question for market_slug since API doesn't return slug
+                        # This allows category_tracker to infer categories from question text
+                        market_slug = question
+                        description = getattr(m, 'description', '')
+
+                        # === DERIVED FEATURES ===
+                        price_vs_volume = mid / volume_24h if volume_24h > 0 else 0
+                        liq_per_vol = liquidity / volume_24h if volume_24h > 0 else 0
+                        spread_adj_edge = max(0, abs(mid - 0.5) - spread_pct)
+
+                        created = self.ai_orchestrator.collect_snapshot(
+                            token_id=o.token_id,
+                            market_id=m.condition_id,
+                            price=mid,
+                            bid=best_bid,
+                            ask=best_ask,
+                            spread=spread,
+                            spread_pct=spread_pct,
+                            mid_price=mid,
+                            orderbook_imbalance=imbalance,
+                            volume_24h=volume_24h,
+                            liquidity=liquidity,
+                            liquidity_bid=liquidity_bid,
+                            liquidity_ask=liquidity_ask,
+                            bid_depth=total_bid_depth,
+                            ask_depth=total_ask_depth,
+                            bid_depth_5=bid_depth_5,
+                            ask_depth_5=ask_depth_5,
+                            bid_depth_10=bid_depth_10,
+                            ask_depth_10=ask_depth_10,
+                            bid_levels=len(ob.bids),
+                            ask_levels=len(ob.asks),
+                            best_bid_size=best_bid_size,
+                            best_ask_size=best_ask_size,
+                            bid_ask_size_ratio=bid_ask_size_ratio,
+                            momentum_1h=momentum_1h,
+                            momentum_4h=momentum_4h,
+                            momentum_24h=momentum_24h,
+                            momentum_7d=momentum_7d,
+                            volatility_1h=volatility_1h,
+                            volatility_24h=volatility_24h,
+                            volatility_7d=volatility_7d,
+                            days_to_resolution=days_to_res,
+                            hours_to_resolution=hours_to_res,
+                            hour_of_day=hour_of_day,
+                            day_of_week=day_of_week,
+                            category=category,
+                            market_slug=market_slug,
+                            question_length=len(question),
+                            description_length=len(description),
+                            price_vs_volume_ratio=price_vs_volume,
+                            liquidity_per_dollar_volume=liq_per_vol,
+                            spread_adjusted_edge=spread_adj_edge,
+                        )
+                        snapshots_collected += 1
+                        if created:
+                            examples_created_this_cycle = True
+
                     self.ai_orchestrator.finish_example_cycle(examples_created=examples_created_this_cycle)
                     
                     # Log AI training progress
@@ -1450,7 +1447,7 @@ class TradingScheduler:
             db_session.close()
 
     async def _fetch_markets(self, db_session: Session) -> tuple[list[Any], dict[str, Any]]:
-        """Fetch markets from Gamma API.
+        """Fetch markets from Gamma API using pagination for maximum coverage.
 
         Args:
             db_session: Database session.
@@ -1460,13 +1457,17 @@ class TradingScheduler:
         """
         async with GammaClient() as gamma:
             if self.settings.mode == "paper":
-                limit = 100
+                # Paper mode: limited fetch for testing
+                markets, diag = await gamma.list_markets_debug(active=True, closed=False, limit=100)
             else:
-                # Broad scan in live mode; downstream we cap enrichment/orderbook fetches.
-                limit = int(getattr(self.settings, "live_scan_markets_limit", 500))
-            # NOTE: Polymarket API doesn't return category for open markets (closed=false filter)
-            # Categories will be inferred by the category_tracker using title keywords
-            markets, diag = await gamma.list_markets_debug(active=True, closed=False, limit=limit)
+                # Live mode: use pagination to fetch ALL available markets
+                max_markets = int(getattr(self.settings, "ai_max_markets_per_fetch", 5000))
+                # NOTE: Polymarket API doesn't return category for open markets (closed=false filter)
+                # Categories will be inferred by the category_tracker using title keywords
+                markets, diag = await gamma.list_all_markets(
+                    active=True, closed=False,
+                    batch_size=500, max_markets=max_markets
+                )
 
             # Save to database
             for market in markets:
@@ -1956,30 +1957,134 @@ class TradingScheduler:
 
     def _days_to_resolution(self, end_date: datetime | None) -> float:
         """Calculate days until market resolution, handling timezone-aware dates.
-        
+
         Args:
             end_date: Market end date (may be timezone-aware or naive).
-            
+
         Returns:
             Days until resolution, or 30 if unknown.
         """
         if not end_date:
             return 30.0
-        
+
         try:
             now = datetime.utcnow()
-            
+
             # Make both timezone-naive for comparison
             if end_date.tzinfo is not None:
                 end_naive = end_date.replace(tzinfo=None)
             else:
                 end_naive = end_date
-                
+
             delta = end_naive - now
             return max(0.0, delta.days + delta.seconds / 86400)
         except Exception as e:
             logger.debug(f"Could not calculate days to resolution: {e}")
             return 30.0
+
+    def _select_balanced_markets(
+        self,
+        markets: list[Any],
+        orderbooks: dict[str, Any],
+    ) -> list[tuple[Any, Any, Any]]:
+        """Select balanced subset of markets across categories for training.
+
+        Groups markets by category (inferred from title if needed) and selects
+        equal samples from each category to ensure balanced training data.
+
+        Args:
+            markets: List of market objects.
+            orderbooks: Dict of token_id -> orderbook.
+
+        Returns:
+            List of (market, outcome, orderbook) tuples balanced by category.
+        """
+        from collections import defaultdict
+
+        # Category keywords for inference (subset of full category_tracker keywords)
+        CATEGORY_KEYWORDS = {
+            "politics_us": ["trump", "biden", "congress", "senate", "republican", "democrat", "election", "vote", "president"],
+            "politics_intl": ["ukraine", "russia", "putin", "china", "brexit", "eu", "nato", "un"],
+            "crypto": ["bitcoin", "ethereum", "btc", "eth", "crypto", "coin", "token", "defi", "nft"],
+            "sports": ["nba", "nfl", "mlb", "nhl", "soccer", "football", "basketball", "baseball", "hockey", "super bowl", "world cup", "championship", "playoff"],
+            "entertainment": ["movie", "oscar", "emmy", "grammy", "netflix", "disney", "album", "box office"],
+            "economics": ["fed", "inflation", "gdp", "unemployment", "interest rate", "recession", "stock"],
+            "tech": ["apple", "google", "microsoft", "meta", "ai", "openai", "tesla", "spacex"],
+            "weather": ["hurricane", "tornado", "earthquake", "storm", "flood"],
+            "science": ["nasa", "space", "mars", "moon", "rocket", "launch"],
+        }
+
+        def infer_category(question: str) -> str:
+            """Infer category from market question text."""
+            text = question.lower()
+            category_scores: dict[str, int] = defaultdict(int)
+
+            for category, keywords in CATEGORY_KEYWORDS.items():
+                for keyword in keywords:
+                    if keyword in text:
+                        category_scores[category] += 1
+
+            if category_scores:
+                return max(category_scores.items(), key=lambda x: x[1])[0]
+            return "other"
+
+        # Group market-outcome pairs by category
+        by_category: dict[str, list[tuple[Any, Any, Any]]] = defaultdict(list)
+
+        for m in markets:
+            for o in m.outcomes:
+                if not o.token_id:
+                    continue
+                ob = orderbooks.get(o.token_id)
+                if not ob or not ob.bids or not ob.asks:
+                    continue
+
+                # Get or infer category
+                category = getattr(m, 'category', '') or ''
+                if not category:
+                    question = getattr(m, 'question', '') or ''
+                    category = infer_category(question)
+
+                by_category[category].append((m, o, ob))
+
+        categories = list(by_category.keys())
+        if not categories:
+            logger.warning("No categories found for balancing, returning all markets")
+            return [(m, o, orderbooks.get(o.token_id)) for m in markets for o in m.outcomes if o.token_id and orderbooks.get(o.token_id)]
+
+        # Calculate balanced target per category
+        # Take max available from each category, but ensure we get some from each
+        total_items = sum(len(items) for items in by_category.values())
+        num_categories = len(categories)
+
+        # Target: distribute evenly but allow larger categories to contribute more
+        # Use the minimum of (available in category, max_per_category)
+        min_samples_any_cat = min(len(items) for items in by_category.values())
+        target_per_cat = max(5, min_samples_any_cat)  # At least 5 per category
+
+        # If we have fewer total than target, just use what we have
+        if total_items <= num_categories * target_per_cat:
+            # Not enough to balance, use all
+            balanced = []
+            for items in by_category.values():
+                balanced.extend(items)
+            logger.info(f"Category balancing: {total_items} total items across {num_categories} categories (not enough to balance)")
+            return balanced
+
+        # Select balanced samples
+        balanced = []
+        category_counts = {}
+        for cat, items in by_category.items():
+            selected = items[:target_per_cat]
+            balanced.extend(selected)
+            category_counts[cat] = len(selected)
+
+        logger.info(
+            f"Category balancing: selected {len(balanced)} items from {num_categories} categories",
+            extra={"category_distribution": category_counts}
+        )
+
+        return balanced
 
     def _save_signals(
         self,

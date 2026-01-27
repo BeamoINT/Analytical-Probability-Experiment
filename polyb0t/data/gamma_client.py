@@ -198,6 +198,64 @@ class GammaClient:
             logger.error(f"Error fetching markets: {e}")
             raise
 
+    async def list_all_markets(
+        self,
+        active: bool | None = None,
+        closed: bool | None = None,
+        batch_size: int = 500,
+        max_markets: int = 5000,
+    ) -> tuple[list[Market], dict[str, Any]]:
+        """Fetch all available markets using pagination.
+
+        Args:
+            active: Filter by active status.
+            closed: Filter by closed status.
+            batch_size: Number of markets to fetch per request.
+            max_markets: Maximum total markets to fetch.
+
+        Returns:
+            Tuple of (list of Market objects, diagnostics dict).
+        """
+        all_markets: list[Market] = []
+        offset = 0
+        total_parsed = 0
+        total_failed = 0
+        pages_fetched = 0
+
+        while True:
+            markets, diag = await self.list_markets_debug(
+                active=active, closed=closed,
+                limit=batch_size, offset=offset
+            )
+            pages_fetched += 1
+            total_parsed += diag.get("parsed", 0)
+            total_failed += diag.get("failed_parse", 0)
+
+            if not markets:
+                break
+
+            all_markets.extend(markets)
+            logger.debug(f"Pagination: fetched {len(all_markets)} markets so far (page {pages_fetched})")
+
+            if len(all_markets) >= max_markets:
+                all_markets = all_markets[:max_markets]
+                break
+
+            if len(markets) < batch_size:
+                # Last page reached
+                break
+
+            offset += batch_size
+
+        diagnostics = {
+            "total_markets": len(all_markets),
+            "pages_fetched": pages_fetched,
+            "total_parsed": total_parsed,
+            "total_failed": total_failed,
+        }
+        logger.info(f"Fetched {len(all_markets)} markets via pagination ({pages_fetched} pages)")
+        return all_markets, diagnostics
+
     async def get_market(self, condition_id: str) -> Market | None:
         """Get single market by condition ID.
 

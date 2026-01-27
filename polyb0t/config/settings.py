@@ -80,7 +80,15 @@ class Settings(BaseSettings):
         default=200.0,
         description="Maximum storage for AI training data in GB (increased for aggressive collection)"
     )
-    
+    ai_max_markets_per_fetch: int = Field(
+        default=5000,
+        description="Maximum markets to fetch via pagination from Polymarket API"
+    )
+    ai_balance_categories: bool = Field(
+        default=True,
+        description="Balance training examples across market categories for diverse training data"
+    )
+
     # === EXTERNAL API KEYS ===
     openai_api_key: str = Field(
         default="",
