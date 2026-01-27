@@ -124,11 +124,20 @@ def _get_title_from_tracked_markets(cursor, token_id: str, market_id: str) -> Op
 def _get_title_from_main_db(market_id: str) -> Optional[str]:
     """Get market title from main polybot database."""
     try:
-        from polyb0t.data.storage import get_db_session, MarketDB
-        with get_db_session() as session:
-            market = session.query(MarketDB).filter_by(condition_id=market_id).first()
-            if market:
-                return market.question
+        # Use direct SQLite query - simpler and more reliable
+        import os
+        db_path = "polybot.db"  # Main database in project root
+        if not os.path.exists(db_path):
+            return None
+
+        conn = sqlite3.connect(db_path, timeout=30)
+        cursor = conn.cursor()
+        cursor.execute("SELECT question FROM markets WHERE condition_id = ?", (market_id,))
+        row = cursor.fetchone()
+        conn.close()
+
+        if row and row[0]:
+            return row[0]
     except Exception:
         pass
     return None
