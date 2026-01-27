@@ -483,11 +483,14 @@ class AIOrchestrator:
             # This allows us to learn which categories we're good/bad at
             # even before we start trading
             predicted_change = None
-            market_category = None
-            market_title = market_slug  # Use slug as title if available
-            
-            # ALWAYS categorize markets (don't wait for AI ready)
-            if market_title:
+
+            # Use category from snapshot if available (passed from market data)
+            # Fall back to re-categorizing from title/slug
+            market_category = category if category else None
+            market_title = market_slug if market_slug else None
+
+            # If no category yet, try to categorize from title
+            if not market_category and market_title:
                 try:
                     market_category, _ = self.category_tracker.categorize_market(
                         market_id=market_id,

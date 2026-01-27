@@ -904,7 +904,8 @@ class BaselineStrategy:
             features_dict = {}
             prices = {}
             market_ids = {}
-            
+            market_categories = {}
+
             # Process ALL markets for comprehensive learning
             for market in markets:
                 for idx, outcome in enumerate(market.outcomes):
@@ -989,7 +990,10 @@ class BaselineStrategy:
                         features_dict[token_id] = ml_features
                         prices[token_id] = current_price
                         market_ids[token_id] = market.condition_id
-                        
+                        # Store category for ML learning (from market data)
+                        if hasattr(market, 'category') and market.category:
+                            market_categories[token_id] = market.category
+
                     except Exception as e:
                         # Log but continue - don't let one bad market stop collection
                         logger.debug(f"Failed to compute features for {token_id}: {e}")
@@ -1005,6 +1009,7 @@ class BaselineStrategy:
                 prices=prices,
                 cycle_id=cycle_id,
                 market_ids=market_ids,
+                market_categories=market_categories,
             )
             
             return collected

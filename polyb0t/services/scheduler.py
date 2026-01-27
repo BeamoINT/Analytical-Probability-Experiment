@@ -695,9 +695,12 @@ class TradingScheduler:
                             is_weekend = day_of_week >= 5
                             
                             # === MARKET METADATA ===
-                            category = getattr(m, 'category', '')
-                            market_slug = getattr(m, 'slug', '')
-                            question = getattr(m, 'question', '')
+                            # Use 'or' to handle None values - getattr returns None if attr exists but is None
+                            category = getattr(m, 'category', '') or ''
+                            question = getattr(m, 'question', '') or ''
+                            # Use question for market_slug since API doesn't return slug
+                            # This allows category_tracker to infer categories from question text
+                            market_slug = question
                             description = getattr(m, 'description', '')
                             
                             # === DERIVED FEATURES ===
@@ -1461,6 +1464,8 @@ class TradingScheduler:
             else:
                 # Broad scan in live mode; downstream we cap enrichment/orderbook fetches.
                 limit = int(getattr(self.settings, "live_scan_markets_limit", 500))
+            # NOTE: Polymarket API doesn't return category for open markets (closed=false filter)
+            # Categories will be inferred by the category_tracker using title keywords
             markets, diag = await gamma.list_markets_debug(active=True, closed=False, limit=limit)
 
             # Save to database
