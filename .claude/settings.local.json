@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m py_compile:*)",
+      "Bash(python3 -m py_compile:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(npm install:*)",
+      "Bash(npm search:*)",
+      "Bash(npm cache clean:*)",
+      "Bash(sudo chown:*)",
+      "Bash(ssh:*)",
+      "Bash(mcp-ssh-tool:*)",
+      "Bash(npx mcp-ssh-tool:*)",
+      "Bash(npm info:*)"
+    ]
+  }
+}
