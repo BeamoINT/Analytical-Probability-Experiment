@@ -1,6 +1,7 @@
 """CLOB API client for Polymarket order books and trades (read-only MVP)."""
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -16,6 +17,23 @@ from polyb0t.config import get_settings
 from polyb0t.data.models import OrderBook, OrderBookLevel, Trade
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class PricePoint:
+    """A single price point from historical timeseries data."""
+    timestamp: datetime
+    price: float
+
+
+@dataclass
+class PriceHistory:
+    """Historical price data for a token."""
+    token_id: str
+    interval: str  # e.g., "1m", "1h", "1d"
+    points: list[PricePoint]
+    points_count: int
+    fetched_at: datetime
 
 
 class CLOBClient:
@@ -342,4 +360,129 @@ class CLOBClient:
             side=data.get("side", "UNKNOWN").upper(),
             trade_id=data.get("id") or data.get("trade_id"),
         )
+
+    async def get_price_history(
+        self,
+        token_id: str,
+        interval: str | None = None,
+        start_ts: int | None = None,
+        end_ts: int | None = None,
+        fidelity: int | None = None,
+    ) -> PriceHistory | None:
+        """Get historical price timeseries data for a token.
+
+        This endpoint provides detailed historical price data for ML training.
+
+        Args:
+            token_id: Token identifier (CLOB token ID).
+            interval: Time interval string - one of "1m", "1h", "6h", "1d", "1w", "max".
+                     Mutually exclusive with start_ts/end_ts.
+            start_ts: Start Unix timestamp (UTC). Mutually exclusive with interval.
+            end_ts: End Unix timestamp (UTC). Mutually exclusive with interval.
+            fidelity: Data resolution in minutes (optional).
+
+        Returns:
+            PriceHistory object with list of (timestamp, price) points, or None on error.
+
+        Note:
+            - Use interval OR (start_ts + end_ts), not both.
+            - fidelity controls data granularity (e.g., 1 = 1 min resolution, 60 = hourly).
+            - Rate limit: 1500 req/10s for this endpoint.
+        """
+        params: dict[str, Any] = {"market": token_id}
+
+        # Set time range parameters
+        if interval:
+            params["interval"] = interval
+        elif start_ts is not None and end_ts is not None:
+            params["startTs"] = start_ts
+            params["endTs"] = end_ts
+
+        if fidelity is not None:
+            params["fidelity"] = fidelity
+
+        try:
+            data = await self._get("/prices-history", params=params)
+            return self._parse_price_history(token_id, interval or "custom", data)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                logger.debug(f"Price history not found for token: {token_id}")
+                return None
+            logger.warning(
+                f"HTTP error fetching price history for {token_id}: {e.response.status_code}"
+            )
+            return None
+        except Exception as e:
+            logger.warning(f"Error fetching price history for {token_id}: {e}")
+            return None
+
+    def _parse_price_history(
+        self,
+        token_id: str,
+        interval: str,
+        data: dict[str, Any],
+    ) -> PriceHistory:
+        """Parse price history response from CLOB API.
+
+        Args:
+            token_id: Token identifier.
+            interval: Interval used for the request.
+            data: Raw API response.
+
+        Returns:
+            PriceHistory object.
+        """
+        points = []
+        history_data = data.get("history", [])
+
+        for point in history_data:
+            try:
+                # API returns {"t": timestamp, "p": price}
+                ts = point.get("t")
+                price = point.get("p")
+
+                if ts is None or price is None:
+                    continue
+
+                # Convert timestamp (Unix seconds) to datetime
+                if isinstance(ts, (int, float)):
+                    timestamp = datetime.utcfromtimestamp(ts)
+                elif isinstance(ts, str):
+                    # Try parsing ISO format
+                    timestamp = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                else:
+                    continue
+
+                points.append(PricePoint(
+                    timestamp=timestamp,
+                    price=float(price),
+                ))
+            except Exception as e:
+                logger.debug(f"Failed to parse price point: {point}, error: {e}")
+                continue
+
+        # Sort by timestamp ascending
+        points.sort(key=lambda p: p.timestamp)
+
+        return PriceHistory(
+            token_id=token_id,
+            interval=interval,
+            points=points,
+            points_count=len(points),
+            fetched_at=datetime.utcnow(),
+        )
+
+    async def get_price_history_max(self, token_id: str, fidelity: int = 60) -> PriceHistory | None:
+        """Get maximum available historical price data for a token.
+
+        Convenience method to fetch all available price history.
+
+        Args:
+            token_id: Token identifier.
+            fidelity: Data resolution in minutes (default: 60 = hourly).
+
+        Returns:
+            PriceHistory with all available data points.
+        """
+        return await self.get_price_history(token_id, interval="max", fidelity=fidelity)
 

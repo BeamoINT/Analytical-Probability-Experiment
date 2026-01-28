@@ -42,27 +42,34 @@ MIN_EXPERT_SAMPLES = 30  # Minimum samples for an expert to train
 
 class MoETrainer:
     """Trainer for the Mixture of Experts system.
-    
+
     Handles:
-    1. Loading and preparing training data
+    1. Loading and preparing training data (both historical and continuous)
     2. Training each expert on its relevant data subset
     3. Training the gating network
     4. Running profitability simulation
     5. Auto-deprecating failing experts
     6. Discovering new expert opportunities
+
+    V2: Enhanced to use historical price timeseries data for better features.
     """
-    
+
     def __init__(
         self,
         pool: Optional[ExpertPool] = None,
         db_path: str = "data/ai_training.db",
+        historical_db_path: str = "data/historical_training.db",
+        price_db_path: str = "data/historical_prices.db",
     ):
         self.pool = pool or get_expert_pool()
         self.db_path = db_path
+        self.historical_db_path = historical_db_path
+        self.price_db_path = price_db_path
         self.auto_discovery = AutoDiscovery(self.pool)
-        
+
         self._last_training: Optional[datetime] = None
         self._is_training = False
+        self._price_features_cache: Dict[str, Dict[str, Any]] = {}
     
     def should_train(self) -> bool:
         """Check if training should run now."""
@@ -272,6 +279,8 @@ class MoETrainer:
     def _load_training_data(self, category_balanced: bool = True, max_per_category: int = 10000) -> List[Dict[str, Any]]:
         """Load training data from database with optional category balancing.
 
+        V2: Also loads historical training data and enhances with cached price features.
+
         Args:
             category_balanced: If True, limit samples per category to avoid
                               over-representation of dominant categories.
@@ -280,18 +289,117 @@ class MoETrainer:
         Returns:
             List of training examples.
         """
+        data = []
+
+        # Load cached price features first (for enriching continuous data)
+        self._load_price_features_cache()
+
+        # 1. Load continuous training data
+        continuous_data = self._load_continuous_data(category_balanced, max_per_category)
+        data.extend(continuous_data)
+        logger.info(f"Loaded {len(continuous_data)} continuous training examples")
+
+        # 2. Load historical training data (resolved markets)
+        historical_data = self._load_historical_data(max_per_category)
+        data.extend(historical_data)
+        logger.info(f"Loaded {len(historical_data)} historical training examples")
+
+        logger.info(f"Total combined training data: {len(data)} examples")
+        return data
+
+    def _load_price_features_cache(self) -> None:
+        """Load cached price features from the price history database."""
+        if not os.path.exists(self.price_db_path):
+            return
+
+        try:
+            import json
+            conn = sqlite3.connect(self.price_db_path, timeout=30.0)
+            cursor = conn.cursor()
+            cursor.execute("SELECT token_id, features FROM computed_features")
+            rows = cursor.fetchall()
+            conn.close()
+
+            for token_id, features_json in rows:
+                try:
+                    self._price_features_cache[token_id] = json.loads(features_json)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            logger.info(f"Loaded {len(self._price_features_cache)} cached price feature sets")
+        except Exception as e:
+            logger.warning(f"Failed to load price features cache: {e}")
+
+    def _enrich_with_price_features(self, example: Dict[str, Any]) -> Dict[str, Any]:
+        """Enrich a training example with cached price features.
+
+        Args:
+            example: Training example dictionary.
+
+        Returns:
+            Enriched example with historical price features added.
+        """
+        token_id = example.get("token_id")
+        features = example.get("features", example)
+
+        if isinstance(features, str):
+            import json
+            try:
+                features = json.loads(features)
+            except (json.JSONDecodeError, TypeError):
+                features = {}
+
+        # Add cached price features if available
+        if token_id and token_id in self._price_features_cache:
+            price_features = self._price_features_cache[token_id]
+            for key, value in price_features.items():
+                if key not in features:
+                    features[key] = value
+
+        # Add defaults for any missing historical features
+        default_historical = {
+            "historical_price": features.get("price", 0.5),
+            "historical_price_1h_ago": features.get("price", 0.5),
+            "historical_price_4h_ago": features.get("price", 0.5),
+            "historical_price_24h_ago": features.get("price", 0.5),
+            "historical_price_7d_ago": features.get("price", 0.5),
+            "historical_momentum_1h": features.get("momentum_1h", 0.0),
+            "historical_momentum_4h": features.get("momentum_4h", 0.0),
+            "historical_momentum_24h": features.get("momentum_24h", 0.0),
+            "historical_momentum_7d": features.get("momentum_7d", 0.0),
+            "historical_volatility_1h": features.get("volatility_1h", 0.0),
+            "historical_volatility_4h": 0.0,
+            "historical_volatility_24h": features.get("volatility_24h", 0.0),
+            "historical_volatility_7d": features.get("volatility_7d", 0.0),
+            "historical_high_24h": features.get("price_high_24h", 0.5),
+            "historical_low_24h": features.get("price_low_24h", 0.5),
+            "historical_range_24h": features.get("price_range_24h", 0.0),
+            "historical_sma_1h": features.get("price", 0.5),
+            "historical_sma_24h": features.get("price", 0.5),
+            "historical_price_vs_sma_24h": 0.0,
+            "historical_data_points": 0,
+        }
+
+        for key, default in default_historical.items():
+            if key not in features:
+                features[key] = default
+
+        example["features"] = features
+        return example
+
+    def _load_continuous_data(self, category_balanced: bool, max_per_category: int) -> List[Dict[str, Any]]:
+        """Load continuous training data from ai_training.db."""
         if not os.path.exists(self.db_path):
-            logger.error(f"Training database not found: {self.db_path}")
+            logger.warning(f"Continuous training database not found: {self.db_path}")
             return []
 
         try:
+            import json
             conn = sqlite3.connect(self.db_path, timeout=30.0)
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
 
             if category_balanced:
-                # Category-balanced sampling to avoid over-representation
-                # of politics and sports in training
                 cursor.execute("""
                     SELECT category, COUNT(*) as cnt
                     FROM training_examples
@@ -300,9 +408,6 @@ class MoETrainer:
                 """)
                 category_counts = {row[0]: row[1] for row in cursor.fetchall()}
 
-                logger.info(f"Category distribution before balancing: {category_counts}")
-
-                # Sample up to max_per_category from each category
                 data = []
                 for category in category_counts.keys():
                     cursor.execute("""
@@ -313,19 +418,17 @@ class MoETrainer:
                         LIMIT ?
                     """, (category, max_per_category))
 
-                    rows = cursor.fetchall()
-                    for row in rows:
+                    for row in cursor.fetchall():
                         d = dict(row)
                         if "features" in d and isinstance(d["features"], str):
-                            import json
                             try:
                                 d["features"] = json.loads(d["features"])
-                            except (json.JSONDecodeError, TypeError) as e:
-                                logger.debug(f"Could not parse features JSON: {e}")
+                            except (json.JSONDecodeError, TypeError):
                                 d["features"] = {}
+                        d = self._enrich_with_price_features(d)
                         data.append(d)
 
-                # Also include examples with NULL category (legacy data)
+                # Include NULL category examples
                 cursor.execute("""
                     SELECT * FROM training_examples
                     WHERE price_change_24h IS NOT NULL
@@ -337,25 +440,16 @@ class MoETrainer:
                 for row in cursor.fetchall():
                     d = dict(row)
                     if "features" in d and isinstance(d["features"], str):
-                        import json
                         try:
                             d["features"] = json.loads(d["features"])
                         except (json.JSONDecodeError, TypeError):
                             d["features"] = {}
+                    d = self._enrich_with_price_features(d)
                     data.append(d)
 
                 conn.close()
-
-                # Log balanced distribution
-                balanced_cats = {}
-                for d in data:
-                    cat = d.get("category") or "unknown"
-                    balanced_cats[cat] = balanced_cats.get(cat, 0) + 1
-                logger.info(f"Category distribution after balancing: {balanced_cats}")
-
                 return data
             else:
-                # Original behavior: no balancing
                 cursor.execute("""
                     SELECT * FROM training_examples
                     WHERE price_change_24h IS NOT NULL
@@ -363,22 +457,100 @@ class MoETrainer:
                     LIMIT 100000
                 """)
 
-                rows = cursor.fetchall()
-                conn.close()
-
                 data = []
-                for row in rows:
+                for row in cursor.fetchall():
                     d = dict(row)
                     if "features" in d and isinstance(d["features"], str):
-                        import json
                         try:
                             d["features"] = json.loads(d["features"])
-                        except (json.JSONDecodeError, TypeError) as e:
-                            logger.debug(f"Could not parse features JSON: {e}")
+                        except (json.JSONDecodeError, TypeError):
                             d["features"] = {}
+                    d = self._enrich_with_price_features(d)
                     data.append(d)
 
+                conn.close()
                 return data
+
+        except Exception as e:
+            logger.error(f"Error loading continuous data: {e}")
+            return []
+
+    def _load_historical_data(self, max_per_category: int) -> List[Dict[str, Any]]:
+        """Load historical training data from historical_training.db.
+
+        Historical data provides examples from resolved markets with known outcomes.
+        """
+        if not os.path.exists(self.historical_db_path):
+            logger.info(f"Historical training database not found: {self.historical_db_path}")
+            return []
+
+        try:
+            import json
+            conn = sqlite3.connect(self.historical_db_path, timeout=30.0)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+
+            # Check if table exists
+            cursor.execute("""
+                SELECT name FROM sqlite_master
+                WHERE type='table' AND name='historical_examples'
+            """)
+            if not cursor.fetchone():
+                conn.close()
+                return []
+
+            # Get category counts for balancing
+            cursor.execute("""
+                SELECT category, COUNT(*) as cnt
+                FROM historical_examples
+                GROUP BY category
+            """)
+            category_counts = {row[0]: row[1] for row in cursor.fetchall()}
+
+            data = []
+            for category in category_counts.keys():
+                cursor.execute("""
+                    SELECT token_id, market_id, category, features, label
+                    FROM historical_examples
+                    WHERE category = ?
+                    ORDER BY RANDOM()
+                    LIMIT ?
+                """, (category, max_per_category))
+
+                for row in cursor.fetchall():
+                    try:
+                        features = json.loads(row["features"]) if row["features"] else {}
+                    except (json.JSONDecodeError, TypeError):
+                        features = {}
+
+                    # Convert historical example to training format
+                    # Use label as a proxy for price direction (winners went up)
+                    label = row["label"]
+                    # Simulate price change: winners = +10%, losers = -10%
+                    # This gives the model a signal about outcome correlation
+                    simulated_price_change = 0.10 if label == 1 else -0.10
+
+                    example = {
+                        "token_id": row["token_id"],
+                        "market_id": row["market_id"],
+                        "category": row["category"],
+                        "features": features,
+                        "price_change_24h": simulated_price_change,
+                        "price_change_1h": simulated_price_change * 0.3,
+                        "price_change_4h": simulated_price_change * 0.6,
+                        "created_at": None,  # Unknown for historical
+                        "_source": "historical",
+                    }
+
+                    example = self._enrich_with_price_features(example)
+                    data.append(example)
+
+            conn.close()
+            return data
+
+        except Exception as e:
+            logger.error(f"Error loading historical data: {e}")
+            return []
 
         except Exception as e:
             logger.error(f"Failed to load training data: {e}")
@@ -456,8 +628,13 @@ class MoETrainer:
         )
     
     def _get_feature_cols(self) -> List[str]:
-        """Get feature column names."""
+        """Get feature column names.
+
+        V2: Now includes historical price-derived features from CLOB API
+        for real momentum, volatility, and trend signals.
+        """
         return [
+            # === REAL-TIME FEATURES (from continuous collector) ===
             "price", "bid", "ask", "spread", "spread_pct", "mid_price",
             "volume_24h", "volume_1h", "volume_6h",
             "liquidity", "liquidity_bid", "liquidity_ask",
@@ -472,6 +649,29 @@ class MoETrainer:
             "days_to_resolution", "hours_to_resolution", "market_age_days",
             "hour_of_day", "day_of_week", "is_weekend",
             "open_interest", "unique_traders",
+
+            # === V2: HISTORICAL PRICE FEATURES (from CLOB /prices-history) ===
+            # These provide crucial predictive signals for the model
+            "historical_price",
+            "historical_price_1h_ago",
+            "historical_price_4h_ago",
+            "historical_price_24h_ago",
+            "historical_price_7d_ago",
+            "historical_momentum_1h",
+            "historical_momentum_4h",
+            "historical_momentum_24h",
+            "historical_momentum_7d",
+            "historical_volatility_1h",
+            "historical_volatility_4h",
+            "historical_volatility_24h",
+            "historical_volatility_7d",
+            "historical_high_24h",
+            "historical_low_24h",
+            "historical_range_24h",
+            "historical_sma_1h",
+            "historical_sma_24h",
+            "historical_price_vs_sma_24h",
+            "historical_data_points",
         ]
     
     def _calculate_sample_weights(self, timestamps: List[str]) -> np.ndarray:

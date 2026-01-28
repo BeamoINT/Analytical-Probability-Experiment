@@ -1,7 +1,8 @@
 """Historical Data Fetcher for Polymarket markets.
 
 Fetches resolved markets from Polymarket's Gamma API and processes them
-into training examples for the MoE system.
+into training examples for the MoE system. Now enhanced with historical
+price data collection for real momentum/volatility features.
 """
 
 import asyncio
@@ -12,9 +13,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from polyb0t.data.clob_client import CLOBClient
 from polyb0t.data.gamma_client import GammaClient
 from polyb0t.data.models import Market, MarketOutcome
 from polyb0t.ml.category_tracker import MarketCategoryTracker
+from polyb0t.ml.historical_price_collector import HistoricalPriceCollector, MarketPriceData
 
 logger = logging.getLogger(__name__)
 
@@ -25,11 +28,12 @@ class HistoricalDataFetcher:
     This class fetches resolved markets from the Gamma API and converts them
     into training examples with labels based on actual market outcomes.
 
-    Features extracted are limited to those actually available from historical
-    data - no orderbook features since those aren't available for resolved markets.
+    Enhanced in v2 to also fetch historical price timeseries data from the
+    CLOB API, enabling real momentum, volatility, and trend features.
     """
 
-    # Features available from historical resolved markets (~20 features)
+    # Features available from historical resolved markets
+    # V2: Now includes historical price-derived features (~35+ features)
     HISTORICAL_FEATURES = [
         # Price features
         "outcome_price",           # Final price of this outcome (0.0 or 1.0 for resolved)
@@ -54,17 +58,50 @@ class HistoricalDataFetcher:
 
         # Category (one-hot encoded during training)
         "category",                # Market category string
+
+        # === NEW V2: Historical price-derived features ===
+        # These are computed from CLOB /prices-history endpoint
+        "historical_price",        # Current/last known price
+        "historical_price_1h_ago",
+        "historical_price_4h_ago",
+        "historical_price_24h_ago",
+        "historical_price_7d_ago",
+        "historical_momentum_1h",
+        "historical_momentum_4h",
+        "historical_momentum_24h",
+        "historical_momentum_7d",
+        "historical_volatility_1h",
+        "historical_volatility_4h",
+        "historical_volatility_24h",
+        "historical_volatility_7d",
+        "historical_high_24h",
+        "historical_low_24h",
+        "historical_range_24h",
+        "historical_sma_1h",
+        "historical_sma_24h",
+        "historical_price_vs_sma_24h",
+        "historical_data_points",
     ]
 
-    def __init__(self, output_path: str = "data/historical_training.db"):
+    def __init__(
+        self,
+        output_path: str = "data/historical_training.db",
+        price_db_path: str = "data/historical_prices.db",
+        fetch_price_history: bool = True,
+    ):
         """Initialize the historical data fetcher.
 
         Args:
             output_path: Path to save the training database.
+            price_db_path: Path for historical price data database.
+            fetch_price_history: Whether to fetch historical price timeseries.
         """
         self.output_path = Path(output_path)
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
         self.category_tracker = MarketCategoryTracker()
+        self.fetch_price_history = fetch_price_history
+        self.price_collector = HistoricalPriceCollector(db_path=price_db_path)
+        self._price_features_cache: dict[str, dict[str, Any]] = {}
 
     async def fetch_resolved_markets(
         self,
@@ -164,7 +201,7 @@ class HistoricalDataFetcher:
     ) -> dict[str, Any]:
         """Compute feature vector for a market outcome.
 
-        Only uses features actually available from historical data.
+        V2: Now includes historical price-derived features when available.
 
         Args:
             market: The market.
@@ -246,7 +283,42 @@ class HistoricalDataFetcher:
         else:
             features["category"] = category_result
 
+        # === V2: Historical price-derived features ===
+        # These provide the crucial momentum/volatility/trend signals
+        token_id = outcome.token_id
+        if token_id and token_id in self._price_features_cache:
+            price_features = self._price_features_cache[token_id]
+            features.update(price_features)
+        else:
+            # Add default values for historical price features
+            features.update(self._default_historical_price_features())
+
         return features
+
+    def _default_historical_price_features(self) -> dict[str, Any]:
+        """Return default values for historical price features when not available."""
+        return {
+            "historical_price": 0.5,
+            "historical_price_1h_ago": 0.5,
+            "historical_price_4h_ago": 0.5,
+            "historical_price_24h_ago": 0.5,
+            "historical_price_7d_ago": 0.5,
+            "historical_momentum_1h": 0.0,
+            "historical_momentum_4h": 0.0,
+            "historical_momentum_24h": 0.0,
+            "historical_momentum_7d": 0.0,
+            "historical_volatility_1h": 0.0,
+            "historical_volatility_4h": 0.0,
+            "historical_volatility_24h": 0.0,
+            "historical_volatility_7d": 0.0,
+            "historical_high_24h": 0.5,
+            "historical_low_24h": 0.5,
+            "historical_range_24h": 0.0,
+            "historical_sma_1h": 0.5,
+            "historical_sma_24h": 0.5,
+            "historical_price_vs_sma_24h": 0.0,
+            "historical_data_points": 0,
+        }
 
     def extract_training_examples(
         self,
@@ -404,15 +476,19 @@ class HistoricalDataFetcher:
         days: int = 365,
         max_markets: int = 50000,
         progress_callback: Optional[callable] = None,
+        fidelity: int = 60,
     ) -> dict[str, Any]:
         """Fetch historical markets and save as training examples.
 
         This is the main entry point for historical data collection.
+        V2: Now also fetches historical price timeseries data from CLOB API
+        to provide real momentum/volatility features.
 
         Args:
             days: Number of days of history to fetch.
             max_markets: Maximum number of markets to fetch.
             progress_callback: Optional callback for progress updates.
+            fidelity: Price history resolution in minutes (default: 60 = hourly).
 
         Returns:
             Dictionary with statistics about the fetch operation.
@@ -424,6 +500,8 @@ class HistoricalDataFetcher:
             "markets_fetched": 0,
             "examples_created": 0,
             "examples_saved": 0,
+            "price_history_tokens": 0,
+            "price_history_points": 0,
             "categories": {},
             "errors": [],
         }
@@ -438,7 +516,19 @@ class HistoricalDataFetcher:
             stats["markets_fetched"] = len(markets)
 
             if progress_callback:
-                progress_callback(f"Fetched {len(markets)} markets, processing...")
+                progress_callback(f"Fetched {len(markets)} markets, collecting price history...")
+
+            # === V2: Fetch historical price timeseries data ===
+            if self.fetch_price_history:
+                await self._collect_price_history_for_markets(
+                    markets,
+                    fidelity=fidelity,
+                    progress_callback=progress_callback,
+                    stats=stats,
+                )
+
+            if progress_callback:
+                progress_callback(f"Processing {len(markets)} markets into training examples...")
 
             # Convert to training examples
             all_examples = []
@@ -470,7 +560,8 @@ class HistoricalDataFetcher:
 
             logger.info(
                 f"Historical fetch complete: {stats['markets_fetched']} markets, "
-                f"{stats['examples_created']} examples, {stats['examples_saved']} saved"
+                f"{stats['examples_created']} examples, {stats['examples_saved']} saved, "
+                f"{stats['price_history_tokens']} tokens with price history"
             )
 
         except Exception as e:
@@ -479,6 +570,82 @@ class HistoricalDataFetcher:
             stats["failed_at"] = datetime.now(timezone.utc).isoformat()
 
         return stats
+
+    async def _collect_price_history_for_markets(
+        self,
+        markets: list[Market],
+        fidelity: int,
+        progress_callback: Optional[callable],
+        stats: dict[str, Any],
+    ) -> None:
+        """Collect historical price timeseries data for market tokens.
+
+        Args:
+            markets: List of markets to collect price history for.
+            fidelity: Data resolution in minutes.
+            progress_callback: Optional progress callback.
+            stats: Stats dictionary to update.
+        """
+        total_tokens = sum(len(m.outcomes) for m in markets)
+        processed = 0
+
+        logger.info(f"Collecting price history for {total_tokens} tokens from {len(markets)} markets")
+
+        async with CLOBClient() as clob:
+            for market in markets:
+                for outcome in market.outcomes:
+                    if not outcome.token_id:
+                        continue
+
+                    try:
+                        # Fetch price history from CLOB API
+                        history = await self.price_collector.fetch_price_history_for_token(
+                            clob,
+                            outcome.token_id,
+                            market.condition_id,
+                            fidelity=fidelity,
+                        )
+
+                        if history and history.points:
+                            # Store raw history
+                            stored = self.price_collector.store_price_history(
+                                outcome.token_id,
+                                market.condition_id,
+                                history,
+                            )
+                            stats["price_history_points"] += stored
+
+                            # Compute features and cache them
+                            price_history = [(p.timestamp, p.price) for p in history.points]
+                            features_data = self.price_collector.compute_features_from_history(
+                                outcome.token_id,
+                                market.condition_id,
+                                price_history,
+                            )
+
+                            if features_data:
+                                # Cache in memory for this run
+                                self._price_features_cache[outcome.token_id] = features_data.to_features_dict()
+                                # Also persist to disk
+                                self.price_collector.cache_computed_features(features_data)
+                                stats["price_history_tokens"] += 1
+
+                        processed += 1
+
+                        if progress_callback and processed % 200 == 0:
+                            progress_callback(
+                                f"Collected price history: {processed}/{total_tokens} tokens, "
+                                f"{stats['price_history_points']} points"
+                            )
+
+                    except Exception as e:
+                        logger.debug(f"Error collecting price history for {outcome.token_id[:12]}: {e}")
+                        processed += 1
+
+        logger.info(
+            f"Price history collection complete: {stats['price_history_tokens']} tokens, "
+            f"{stats['price_history_points']} points"
+        )
 
     def get_statistics(self) -> dict[str, Any]:
         """Get statistics about the stored historical data.

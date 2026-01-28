@@ -152,7 +152,7 @@ class TradingScheduler:
         """Run main trading loop continuously."""
         self.is_running = True
         logger.info("Starting trading loop")
-        
+
         # Start WebSocket connection for real-time market data
         if self.ws_client:
             try:
@@ -164,7 +164,11 @@ class TradingScheduler:
                     logger.warning("WebSocket connection failed - falling back to HTTP polling")
             except Exception as e:
                 logger.warning(f"WebSocket startup error: {e} - falling back to HTTP polling")
-        
+
+        # === NEW: Run comprehensive historical data collection on startup ===
+        if self.settings.historical_collection_on_startup:
+            await self._run_initial_historical_collection()
+
         # Backfill missing price data on startup (if enabled)
         if self.settings.ml_enable_backfill:
             try:
@@ -217,6 +221,62 @@ class TradingScheduler:
 
             # Wait before next cycle
             await asyncio.sleep(self.settings.loop_interval_seconds)
+
+    async def _run_initial_historical_collection(self) -> None:
+        """Run comprehensive historical data collection on startup.
+
+        This fetches:
+        1. Historical resolved markets from Gamma API
+        2. Price timeseries data from CLOB /prices-history endpoint
+        3. Computes momentum, volatility, and trend features for ML training
+
+        This runs once on startup and can take several minutes depending on
+        the amount of data to fetch.
+        """
+        logger.info("=" * 60)
+        logger.info("STARTING INITIAL HISTORICAL DATA COLLECTION")
+        logger.info("=" * 60)
+
+        try:
+            from polyb0t.ml.comprehensive_collector import get_comprehensive_collector
+
+            collector = get_comprehensive_collector(
+                historical_db_path=self.settings.historical_training_db,
+                continuous_db_path=self.settings.ai_training_db,
+                price_history_db_path=self.settings.historical_prices_db,
+            )
+
+            def progress_callback(msg: str) -> None:
+                logger.info(f"[Historical Collection] {msg}")
+
+            # Run the initial collection
+            stats = await collector.run_initial_collection(
+                days=self.settings.historical_days_to_fetch,
+                max_markets=self.settings.historical_max_markets,
+                progress_callback=progress_callback,
+            )
+
+            # Log summary
+            historical_stats = stats.get("historical_stats", {})
+            price_stats = stats.get("price_history_stats", {})
+
+            logger.info("=" * 60)
+            logger.info("HISTORICAL DATA COLLECTION COMPLETE")
+            logger.info(f"  Markets fetched: {historical_stats.get('markets_fetched', 0)}")
+            logger.info(f"  Training examples: {historical_stats.get('examples_saved', 0)}")
+            logger.info(f"  Price history tokens: {historical_stats.get('price_history_tokens', 0)}")
+            logger.info(f"  Price history points: {historical_stats.get('price_history_points', 0)}")
+            logger.info(f"  Active market tokens: {price_stats.get('tokens_processed', 0)}")
+            logger.info(f"  Active market price points: {price_stats.get('price_points_stored', 0)}")
+            if stats.get("errors"):
+                logger.warning(f"  Errors: {len(stats['errors'])}")
+            logger.info("=" * 60)
+
+        except ImportError as e:
+            logger.warning(f"Historical data collection modules not available: {e}")
+        except Exception as e:
+            logger.error(f"Historical data collection failed: {e}", exc_info=True)
+            # Don't fail startup - continue with whatever data we have
 
     async def _run_cycle(self, cycle_id: str) -> None:
         """Run single trading cycle.

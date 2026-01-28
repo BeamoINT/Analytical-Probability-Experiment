@@ -561,6 +561,53 @@ class Settings(BaseSettings):
         default="https://clob.polymarket.com", description="CLOB API base URL"
     )
 
+    # === API Rate Limiting Configuration ===
+    # Based on Polymarket documented limits (with safety margin)
+    # Gamma: 4000/10s general, 300/10s /markets endpoint
+    # CLOB: 1500/10s market data, 200/10s trades
+    gamma_rate_limit_per_sec: float = Field(
+        default=25.0,
+        description="Gamma API rate limit requests/second (300/10s = 30, use 25 for safety)"
+    )
+    clob_rate_limit_per_sec: float = Field(
+        default=100.0,
+        description="CLOB API rate limit requests/second (1500/10s = 150, use 100 for safety)"
+    )
+    clob_price_history_rate_limit: float = Field(
+        default=100.0,
+        description="CLOB price history endpoint rate limit req/sec"
+    )
+
+    # === Historical Data Collection Configuration ===
+    historical_training_db: str = Field(
+        default="data/historical_training.db",
+        description="SQLite database for historical training data (resolved markets)"
+    )
+    historical_prices_db: str = Field(
+        default="data/historical_prices.db",
+        description="SQLite database for historical price timeseries data"
+    )
+    historical_days_to_fetch: int = Field(
+        default=365,
+        description="Number of days of historical data to fetch on startup"
+    )
+    historical_max_markets: int = Field(
+        default=50000,
+        description="Maximum markets to fetch during historical data collection"
+    )
+    historical_price_fidelity: int = Field(
+        default=60,
+        description="Price history resolution in minutes (60 = hourly, 15 = 15-min)"
+    )
+    historical_collection_on_startup: bool = Field(
+        default=True,
+        description="Run comprehensive historical data collection on startup"
+    )
+    historical_refresh_interval_hours: int = Field(
+        default=6,
+        description="Hours between price history refreshes for active markets"
+    )
+
     # Live Trading Credentials (ONLY for live mode with explicit user consent)
     polygon_private_key: str | None = Field(
         default=None, description="Polygon L2 private key (NEVER commit or print)"
