@@ -573,6 +573,15 @@ class MoETrainer:
         timestamps = []
         categories = []
         
+        # Features that are actually labels - MUST be excluded to prevent data leakage
+        LEAKY_FEATURES = {
+            "price_change_1h", "price_change_4h", "price_change_24h", "price_change_7d",
+            "price_change_15m", "price_change_to_resolution",
+            "label_price_change_1h", "label_price_change_4h", "label_price_change_24h",
+            "label_price_change_7d", "label_direction_1h", "label_direction_24h",
+            "direction_1h", "direction_24h", "resolved_outcome", "label_resolved_outcome",
+        }
+
         for sample in data:
             # Get features
             features = sample.get("features", sample)
@@ -582,10 +591,14 @@ class MoETrainer:
                     features = json.loads(features)
                 except (json.JSONDecodeError, TypeError):
                     features = {}
-            
-            # Extract feature vector
+
+            # Extract feature vector (excluding any leaky features)
             row = []
             for col in feature_cols:
+                # Skip if this is a leaky feature (should not be in feature_cols, but double-check)
+                if col in LEAKY_FEATURES:
+                    row.append(0.0)
+                    continue
                 val = features.get(col, 0)
                 try:
                     row.append(float(val) if val is not None else 0.0)
@@ -632,6 +645,10 @@ class MoETrainer:
 
         V2: Now includes historical price-derived features from CLOB API
         for real momentum, volatility, and trend signals.
+
+        IMPORTANT: price_change_* are LABELS, not features. Including them
+        causes data leakage and 100% accuracy (model predicts label from itself).
+        Only include backward-looking features available at prediction time.
         """
         return [
             # === REAL-TIME FEATURES (from continuous collector) ===
@@ -641,7 +658,9 @@ class MoETrainer:
             "orderbook_imbalance", "bid_depth", "ask_depth",
             "bid_depth_5", "ask_depth_5", "bid_depth_10", "ask_depth_10",
             "best_bid_size", "best_ask_size", "bid_ask_size_ratio",
+            # NOTE: momentum_* are backward-looking (past price changes), safe to use
             "momentum_1h", "momentum_4h", "momentum_24h", "momentum_7d",
+            # NOTE: price_change_* are LABELS (future changes) - EXCLUDED to prevent leakage
             "volatility_1h", "volatility_24h", "volatility_7d",
             "trade_count_1h", "trade_count_24h",
             "avg_trade_size_1h", "avg_trade_size_24h",
@@ -649,14 +668,17 @@ class MoETrainer:
             "days_to_resolution", "hours_to_resolution", "market_age_days",
             "hour_of_day", "day_of_week", "is_weekend",
             "open_interest", "unique_traders",
+            # High/low/range are backward-looking (past 24h stats), safe to use
+            "price_high_24h", "price_low_24h", "price_range_24h",
 
             # === V2: HISTORICAL PRICE FEATURES (from CLOB /prices-history) ===
-            # These provide crucial predictive signals for the model
+            # These are backward-looking features computed from past price data
             "historical_price",
             "historical_price_1h_ago",
             "historical_price_4h_ago",
             "historical_price_24h_ago",
             "historical_price_7d_ago",
+            # Historical momentum = (current - past) / past, backward-looking
             "historical_momentum_1h",
             "historical_momentum_4h",
             "historical_momentum_24h",

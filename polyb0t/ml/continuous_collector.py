@@ -166,9 +166,9 @@ class MarketSnapshot:
             "bid_depth_5", "ask_depth_5", "bid_depth_10", "ask_depth_10",
             "bid_levels", "ask_levels", "best_bid_size", "best_ask_size",
             "bid_ask_size_ratio",
-            # Momentum
+            # Momentum (backward-looking only - how price changed in the PAST)
             "momentum_1h", "momentum_4h", "momentum_24h", "momentum_7d",
-            "price_change_1h", "price_change_4h", "price_change_24h",
+            # NOTE: price_change_1h/4h/24h are LABELS, not features - excluded to prevent data leakage
             "price_high_24h", "price_low_24h", "price_range_24h",
             # Volatility
             "volatility_1h", "volatility_24h", "volatility_7d", "atr_24h",
