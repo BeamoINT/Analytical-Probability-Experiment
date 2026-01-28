@@ -218,36 +218,6 @@ class Settings(BaseSettings):
     # Database
     db_url: str = Field(default="sqlite:///./polybot.db", description="Database connection URL")
 
-    # === DISCORD NOTIFICATIONS ===
-    discord_webhook_url: str = Field(
-        default="",
-        description="Discord webhook URL for notifications"
-    )
-    discord_notifications_enabled: bool = Field(
-        default=True,
-        description="Enable Discord notifications"
-    )
-    discord_notify_on_trade: bool = Field(
-        default=True,
-        description="Send notification on trade execution"
-    )
-    discord_notify_on_whale: bool = Field(
-        default=True,
-        description="Send notification on whale activity"
-    )
-    discord_notify_on_error: bool = Field(
-        default=True,
-        description="Send notification on errors"
-    )
-    discord_hourly_summary: bool = Field(
-        default=True,
-        description="Send hourly status summary"
-    )
-    discord_daily_report: bool = Field(
-        default=True,
-        description="Send daily performance report"
-    )
-
     # Market Filtering
     resolve_min_days: int = Field(default=7, description="Minimum days until resolution (avoid last-minute volatility)")
     resolve_max_days: int = Field(default=180, description="Maximum days until resolution (6 months - captures most markets)")
