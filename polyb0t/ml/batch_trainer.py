@@ -483,10 +483,10 @@ class BatchTrainer:
         Returns:
             Dictionary with gating metrics.
         """
-        if not self.expert_pool or not self.expert_pool.gating_network:
+        if not self.expert_pool or not self.expert_pool.gating:
             return {"error": "Gating network not available"}
 
-        gating = self.expert_pool.gating_network
+        gating = self.expert_pool.gating
 
         metrics = {
             "n_experts": len(self.expert_pool.experts),

@@ -555,7 +555,9 @@ class Expert:
             nn_config=nn_config,
             xgb_config=xgb_config,
             lgb_config=lgb_config,
-            weights=weights,
+            nn_weight=weights[0],
+            xgb_weight=weights[1],
+            lgb_weight=weights[2],
         )
 
         # Time-based split for validation (prevent look-ahead bias)

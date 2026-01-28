@@ -13,7 +13,29 @@
       "Bash(ssh:*)",
       "Bash(mcp-ssh-tool:*)",
       "Bash(npx mcp-ssh-tool:*)",
-      "Bash(npm info:*)"
+      "Bash(npm info:*)",
+      "Bash(scp:*)",
+      "Bash(gcloud compute ssh:*)",
+      "Bash(git show 44cbce9 --no-patch --format=\"%B\")",
+      "Bash(poetry run python:*)",
+      "WebSearch",
+      "WebFetch(domain:docs.polymarket.com)",
+      "WebFetch(domain:gamma-api.polymarket.com)",
+      "Bash(sqlite3:*)",
+      "Bash(ls:*)",
+      "Bash(python -c \"from polyb0t.data.storage import ClosedTradeDB; print\\(''storage.py OK''\\)\")",
+      "Bash(python -c \"from polyb0t.services.trade_lifecycle import TradeLifecycleService; print\\(''trade_lifecycle.py OK''\\)\")",
+      "Bash(python -c \"from polyb0t.execution.intents import IntentManager; print\\(''intents.py OK''\\)\")",
+      "Bash(python3 -c \"from polyb0t.data.storage import ClosedTradeDB; print\\(''storage.py OK''\\)\")",
+      "Bash(python3 -c \"from polyb0t.services.trade_lifecycle import TradeLifecycleService; print\\(''trade_lifecycle.py OK''\\)\")",
+      "Bash(python3 -c \"from polyb0t.execution.intents import IntentManager; print\\(''intents.py OK''\\)\")",
+      "Bash(python3 -c \"from polyb0t.services.scheduler import Scheduler; print\\(''scheduler.py OK''\\)\")",
+      "Bash(python3 -c \"from polyb0t.services.discord_notifier import DiscordNotifier; print\\(''discord_notifier.py OK''\\)\")",
+      "Bash(python3 -c \"from polyb0t.services.scheduler import TradingScheduler; print\\(''scheduler.py OK''\\)\")",
+      "Bash(poetry lock:*)",
+      "Bash(python -c \"\nfrom polyb0t.ml.historical_fetcher import HistoricalDataFetcher, fetch_historical_data\nfrom polyb0t.ml.batch_trainer import BatchTrainer, run_batch_training\nfrom polyb0t.ml.dryrun_stats import DryRunStatsCollector, get_dryrun_stats_collector\nprint\\(''All new modules import successfully!''\\)\n\")",
+      "Bash(cd:*)",
+      "Bash(git reset:*)"
     ]
   }
 }
