@@ -177,8 +177,12 @@ class HistoricalDataFetcher:
         features = {}
 
         # Price features
-        features["outcome_price"] = outcome.price or 0.5
-        features["initial_price"] = 0.5  # Approximate - markets start near 50/50
+        # IMPORTANT: For resolved markets, outcome.price is the POST-resolution price
+        # (0.0 for losers, 1.0 for winners), which would leak the label.
+        # We use 0.5 (neutral) since we don't have the actual pre-resolution prices.
+        # This forces the model to learn from other features rather than the answer.
+        features["outcome_price"] = 0.5  # Neutral - actual pre-resolution price unknown
+        features["initial_price"] = 0.5  # Markets typically start near 50/50
 
         # Volume/Liquidity features
         features["total_volume"] = market.volume or 0.0

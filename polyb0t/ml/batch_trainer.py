@@ -2,6 +2,22 @@
 
 One-time batch training on historical Polymarket data, replacing the
 continuous online learning approach.
+
+IMPORTANT LIMITATIONS:
+- Historical data only contains POST-resolution market state
+- Pre-resolution prices are unavailable, so price features are set to 0.5 (neutral)
+- This means the model learns from metadata (volume, category, timing) not price action
+- For proper price-movement prediction, use continuous_collector with live markets
+- Models trained on historical data predict "market outcome" not "short-term price change"
+
+The model trained here is useful for:
+- Learning which categories/volumes/timing correlate with winning outcomes
+- Providing a baseline signal for the MoE ensemble
+- Bootstrap training before live data accumulates
+
+For real trading decisions, combine with:
+- Live price snapshots from continuous_collector
+- Actual momentum/volatility from recent price history
 """
 
 import json
@@ -162,9 +178,11 @@ class BatchTrainer:
                 price_change = -0.01  # 1% loss
 
             # Build features dict with all available features
+            # NOTE: For historical data, price features are neutral (0.5) since we don't
+            # have pre-resolution prices. The model must learn from metadata features.
             moe_features = {
-                # Price features
-                "price": features.get("outcome_price", 0.5),
+                # Price features (neutral for historical - see historical_fetcher.py)
+                "price": features.get("outcome_price", 0.5),  # Always 0.5 for historical
                 "initial_price": features.get("initial_price", 0.5),
 
                 # Volume/Liquidity
