@@ -262,7 +262,6 @@ class NeuralExpertTrainer:
             mode='min',
             factor=0.5,
             patience=5,
-            verbose=False,
         )
 
         # Loss function with label smoothing

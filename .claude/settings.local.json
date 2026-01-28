@@ -35,7 +35,8 @@
       "Bash(poetry lock:*)",
       "Bash(python -c \"\nfrom polyb0t.ml.historical_fetcher import HistoricalDataFetcher, fetch_historical_data\nfrom polyb0t.ml.batch_trainer import BatchTrainer, run_batch_training\nfrom polyb0t.ml.dryrun_stats import DryRunStatsCollector, get_dryrun_stats_collector\nprint\\(''All new modules import successfully!''\\)\n\")",
       "Bash(cd:*)",
-      "Bash(git reset:*)"
+      "Bash(git reset:*)",
+      "Bash(ping:*)"
     ]
   }
 }
