@@ -34,10 +34,13 @@ logger = logging.getLogger(__name__)
 
 # Training constants
 MIN_TRAINING_SAMPLES = 100
-TRAINING_INTERVAL_HOURS = 2  # Train every 2 hours for faster learning
 HOLDOUT_FRACTION = 0.2
 SAMPLE_WEIGHT_DECAY = 0.5  # Recent data weighted more
 MIN_EXPERT_SAMPLES = 30  # Minimum samples for an expert to train
+
+# Profitability thresholds for trading simulation
+SPREAD_COST = 0.02  # 2% spread cost
+MIN_PROFIT_THRESHOLD = 0.005  # 0.5% minimum profit
 
 
 class MoETrainer:
@@ -72,15 +75,23 @@ class MoETrainer:
         self._price_features_cache: Dict[str, Dict[str, Any]] = {}
     
     def should_train(self) -> bool:
-        """Check if training should run now."""
+        """Check if training should run now based on configured interval."""
         if self._is_training:
             return False
-        
+
         if self._last_training is None:
             return True
-        
+
+        # Get training interval from settings
+        try:
+            from polyb0t.config import get_settings
+            settings = get_settings()
+            interval_hours = settings.ai_retrain_interval_hours
+        except Exception:
+            interval_hours = 6  # Default to 6 hours
+
         elapsed = datetime.utcnow() - self._last_training
-        return elapsed.total_seconds() >= TRAINING_INTERVAL_HOURS * 3600
+        return elapsed.total_seconds() >= interval_hours * 3600
     
     def train(self) -> Optional[Dict[str, Any]]:
         """Run complete MoE training cycle.
@@ -267,6 +278,13 @@ class MoETrainer:
             logger.info(f"  New experts created: {len(new_experts)}")
             logger.info("=" * 60)
 
+            # === RECORD TRAINING CYCLE TO HISTORY ===
+            self._record_training_cycle(
+                training_mode=training_mode,
+                expert_results=expert_results,
+                training_time=training_time,
+            )
+
             return results
             
         except Exception as e:
@@ -275,7 +293,47 @@ class MoETrainer:
             
         finally:
             self._is_training = False
-    
+
+    def _record_training_cycle(
+        self,
+        training_mode: str,
+        expert_results: Dict[str, Any],
+        training_time: float,
+    ) -> None:
+        """Record training cycle summary to history database."""
+        try:
+            from polyb0t.ml.training_history import get_training_history_tracker
+            import uuid
+
+            tracker = get_training_history_tracker()
+
+            # Build expert results list for the tracker
+            results_list = []
+            for expert_id, profits in expert_results.items():
+                expert = self.pool.experts.get(expert_id)
+                if expert:
+                    metrics = expert.metrics
+                    results_list.append({
+                        "expert_id": expert_id,
+                        "profit_pct": metrics.simulated_profit_pct if metrics else 0,
+                        "win_rate": metrics.simulated_win_rate if metrics else 0,
+                        "val_acc": getattr(metrics, "ensemble_val_acc", 0) if metrics else 0,
+                        "deployed": expert.state.value in ("active", "probation"),
+                        "state": expert.state.value,
+                    })
+
+            tracker.record_training_cycle(
+                cycle_id=str(uuid.uuid4()),
+                training_mode=training_mode,
+                expert_results=results_list,
+                total_training_time=training_time,
+            )
+
+            logger.info(f"Recorded training cycle to history database")
+
+        except Exception as e:
+            logger.warning(f"Failed to record training cycle: {e}")
+
     def _load_training_data(self, category_balanced: bool = True, max_per_category: int = 10000) -> List[Dict[str, Any]]:
         """Load training data from database with optional category balancing.
 

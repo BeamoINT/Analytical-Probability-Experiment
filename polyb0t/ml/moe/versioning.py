@@ -2,12 +2,16 @@
 
 Each expert maintains up to 3 model versions, allowing rollback
 to previous versions if the current one underperforms.
+
+V2: Added model comparison with minimum improvement threshold and
+    integration with training history tracking.
 """
 
 import logging
 import os
 import pickle
 import shutil
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -17,6 +21,15 @@ if TYPE_CHECKING:
     from polyb0t.ml.moe.expert import Expert, ExpertMetrics
 
 logger = logging.getLogger(__name__)
+
+
+def _get_min_improvement_pct() -> float:
+    """Get minimum improvement percentage from settings."""
+    try:
+        from polyb0t.config import get_settings
+        return get_settings().ai_min_improvement_pct / 100.0  # Convert 1.0 -> 0.01
+    except Exception:
+        return 0.01  # Default 1%
 
 # Constants
 MAX_VERSIONS = 3
@@ -275,9 +288,13 @@ class ExpertVersionManager:
         return True
     
     def _create_metrics_only_version(self, metrics: "ExpertMetrics") -> ExpertVersion:
-        """Create a version for metrics tracking without saving model file."""
+        """Create a version for metrics tracking without saving model file.
+
+        Includes model comparison against previous best version and
+        records to training history database.
+        """
         version_id = self.current_version_id + 1
-        
+
         # Create version object (no model path)
         version = ExpertVersion(
             version_id=version_id,
@@ -291,11 +308,16 @@ class ExpertVersionManager:
             simulated_max_drawdown=metrics.simulated_max_drawdown,
             training_cycles=1,
         )
-        
+
+        # === MODEL COMPARISON ===
+        # Compare against best previous version to decide deployment
+        best_previous = self.get_best_version()
+        comparison_result = self._compare_with_previous(version, best_previous)
+
         # Validate the version
         version.is_validated = True
-        version.validation_passed = self._validate_version(version)
-        
+        version.validation_passed = self._validate_version(version) and comparison_result["should_deploy"]
+
         # Update positive/negative cycle tracking
         if metrics.simulated_profit_pct > 0:
             version.positive_cycles = 1
@@ -303,11 +325,14 @@ class ExpertVersionManager:
         else:
             version.positive_cycles = 0
             version.negative_cycles = 1
-        
+
         # Add to versions list
         self.versions.append(version)
         self.current_version_id = version_id
-        
+
+        # === RECORD TO TRAINING HISTORY ===
+        self._record_training_history(version, metrics, best_previous, comparison_result)
+
         # Update state based on validation
         self._update_state_after_training(version)
         
@@ -386,7 +411,146 @@ class ExpertVersionManager:
         
         if old_state != self.state:
             logger.info(f"Expert {self.expert_id}: State {old_state.value} -> {self.state.value}")
-    
+
+    def _compare_with_previous(
+        self,
+        new_version: ExpertVersion,
+        best_previous: Optional[ExpertVersion],
+    ) -> Dict[str, Any]:
+        """Compare new version against best previous version.
+
+        Returns:
+            Dictionary with comparison results and deployment decision.
+        """
+        min_improvement = _get_min_improvement_pct()
+
+        # First model - always deploy
+        if best_previous is None or len(self.versions) == 0:
+            return {
+                "should_deploy": True,
+                "reason": "first_model",
+                "improvement_pct": None,
+                "min_improvement_pct": min_improvement,
+            }
+
+        old_profit = best_previous.simulated_profit_pct
+        new_profit = new_version.simulated_profit_pct
+        improvement = new_profit - old_profit
+
+        # Check if new model beats old by minimum threshold
+        # For negative profits, we require improvement (less negative)
+        # For positive profits, we require the improvement percentage
+        if old_profit >= 0:
+            # Old model was profitable - new must beat by threshold
+            should_deploy = improvement >= min_improvement
+        else:
+            # Old model was losing - new model just needs to be better
+            should_deploy = new_profit > old_profit
+
+        if should_deploy:
+            reason = f"improvement: {improvement:+.2%} >= {min_improvement:.2%} threshold"
+        else:
+            reason = f"rejected: {improvement:+.2%} < {min_improvement:.2%} threshold"
+
+        logger.info(
+            f"Expert {self.expert_id} model comparison: "
+            f"old_profit={old_profit:+.2%}, new_profit={new_profit:+.2%}, "
+            f"improvement={improvement:+.2%}, deploy={should_deploy}"
+        )
+
+        return {
+            "should_deploy": should_deploy,
+            "reason": reason,
+            "improvement_pct": improvement,
+            "min_improvement_pct": min_improvement,
+            "old_profit_pct": old_profit,
+            "new_profit_pct": new_profit,
+        }
+
+    def _record_training_history(
+        self,
+        version: ExpertVersion,
+        metrics: "ExpertMetrics",
+        best_previous: Optional[ExpertVersion],
+        comparison_result: Dict[str, Any],
+    ) -> None:
+        """Record training run to history database for analysis."""
+        try:
+            from polyb0t.ml.training_history import (
+                get_training_history_tracker,
+                TrainingRunRecord,
+            )
+
+            tracker = get_training_history_tracker()
+
+            # Get validation accuracies if available
+            nn_val_acc = getattr(metrics, "nn_val_acc", 0.0) if hasattr(metrics, "nn_val_acc") else 0.0
+            xgb_val_acc = getattr(metrics, "xgb_val_acc", 0.0) if hasattr(metrics, "xgb_val_acc") else 0.0
+            lgb_val_acc = getattr(metrics, "lgb_val_acc", 0.0) if hasattr(metrics, "lgb_val_acc") else 0.0
+            ensemble_val_acc = getattr(metrics, "ensemble_val_acc", 0.0) if hasattr(metrics, "ensemble_val_acc") else 0.0
+
+            # Determine deployment reason
+            if comparison_result.get("reason") == "first_model":
+                deployment_reason = "first_model"
+            elif comparison_result.get("should_deploy"):
+                deployment_reason = "improvement"
+            else:
+                deployment_reason = "rejected_worse"
+
+            # Create record
+            record = TrainingRunRecord(
+                run_id=str(uuid.uuid4()),
+                expert_id=self.expert_id,
+                timestamp=datetime.utcnow().isoformat(),
+                version_id=version.version_id,
+                training_examples=metrics.n_training_examples,
+                n_features=metrics.n_features_used,
+                training_mode="online",
+                simulated_profit_pct=version.simulated_profit_pct,
+                simulated_num_trades=version.simulated_num_trades,
+                simulated_win_rate=version.simulated_win_rate,
+                simulated_profit_factor=version.simulated_profit_factor,
+                simulated_max_drawdown=version.simulated_max_drawdown,
+                simulated_sharpe=version.simulated_sharpe,
+                nn_val_acc=nn_val_acc,
+                xgb_val_acc=xgb_val_acc,
+                lgb_val_acc=lgb_val_acc,
+                ensemble_val_acc=ensemble_val_acc,
+                previous_version_id=best_previous.version_id if best_previous else None,
+                previous_profit_pct=best_previous.simulated_profit_pct if best_previous else None,
+                improvement_pct=comparison_result.get("improvement_pct"),
+                deployed=comparison_result.get("should_deploy", False),
+                deployment_reason=deployment_reason,
+                expert_state=self.state.value,
+            )
+
+            tracker.record_training_run(record)
+
+            # Also record the comparison
+            tracker.record_model_comparison(
+                expert_id=self.expert_id,
+                old_version_id=best_previous.version_id if best_previous else None,
+                old_metrics={
+                    "simulated_profit_pct": best_previous.simulated_profit_pct,
+                    "simulated_win_rate": best_previous.simulated_win_rate,
+                    "simulated_sharpe": best_previous.simulated_sharpe,
+                } if best_previous else None,
+                new_version_id=version.version_id,
+                new_metrics={
+                    "simulated_profit_pct": version.simulated_profit_pct,
+                    "simulated_win_rate": version.simulated_win_rate,
+                    "simulated_sharpe": version.simulated_sharpe,
+                },
+                min_improvement_threshold=comparison_result.get("min_improvement_pct", 0.01),
+                decision="deploy" if comparison_result.get("should_deploy") else "reject",
+                reason=comparison_result.get("reason", ""),
+            )
+
+            logger.debug(f"Recorded training history for {self.expert_id} v{version.version_id}")
+
+        except Exception as e:
+            logger.warning(f"Failed to record training history: {e}")
+
     def _try_rollback(self) -> bool:
         """Try to rollback to a previous good version."""
         # Find the best previous version

@@ -45,8 +45,8 @@ class Settings(BaseSettings):
     
     # === AI TRAINING CONFIGURATION ===
     ai_training_mode: str = Field(
-        default="batch",
-        description="Training mode: 'batch' (one-time historical) or 'online' (continuous)"
+        default="online",
+        description="Training mode: 'batch' (one-time historical) or 'online' (continuous retraining)"
     )
     ai_batch_training_complete: bool = Field(
         default=False,
@@ -61,8 +61,12 @@ class Settings(BaseSettings):
         description="Minimum training examples before AI can start training"
     )
     ai_retrain_interval_hours: int = Field(
-        default=2,
-        description="How often to retrain the AI model (hours) - only used in 'online' mode"
+        default=6,
+        description="How often to retrain the AI model (hours) - used in 'online' mode"
+    )
+    ai_training_history_db: str = Field(
+        default="data/training_history.db",
+        description="SQLite database for historical training metrics and model comparisons"
     )
     ai_example_interval_minutes: int = Field(
         default=2,
