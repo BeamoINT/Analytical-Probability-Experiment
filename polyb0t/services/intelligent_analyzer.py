@@ -232,7 +232,7 @@ Does this news DEFINITIVELY answer the market question? Think carefully, then re
                         {"role": "system", "content": SYSTEM_PROMPT},
                         {"role": "user", "content": user_prompt}
                     ],
-                    "max_tokens": self.MAX_TOKENS,
+                    "max_completion_tokens": self.MAX_TOKENS,  # Use max_completion_tokens for newer models
                     "temperature": self.TEMPERATURE,
                     "response_format": {"type": "json_object"},  # Force JSON output
                 },

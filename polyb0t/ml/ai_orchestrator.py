@@ -554,13 +554,13 @@ class AIOrchestrator:
     
     def _evaluate_predictions_for_categories(self) -> None:
         """Evaluate simulated predictions and record results for category learning.
-        
+
         This runs after labeling to check which predictions were right/wrong
         and update category statistics.
         """
         try:
-            import sqlite3
-            conn = sqlite3.connect(self.collector.db_path, timeout=10.0)
+            # Use collector's connection method for WAL mode and proper timeout
+            conn = self.collector._get_connection()
             cursor = conn.cursor()
             
             # Find examples with predictions that haven't been evaluated yet

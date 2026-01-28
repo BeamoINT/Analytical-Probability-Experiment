@@ -226,10 +226,10 @@ class TrainingExample:
 
 class ContinuousDataCollector:
     """Collects training data continuously from Polymarket."""
-    
+
     def __init__(self, db_path: str = "data/ai_training.db", max_storage_bytes: int = MAX_STORAGE_BYTES):
         """Initialize the collector.
-        
+
         Args:
             db_path: Path to SQLite database for persistence.
             max_storage_bytes: Maximum storage size in bytes (default 140GB).
@@ -240,19 +240,30 @@ class ContinuousDataCollector:
         self._lock = threading.Lock()
         self._running = False
         self._collection_thread: Optional[threading.Thread] = None
-        
+
         # Track when we last collected data
         self._last_collection_time: Optional[datetime] = None
         self._load_state()
-        
+
         # Check storage on startup
         self._check_storage()
+
+    def _get_connection(self) -> sqlite3.Connection:
+        """Get a database connection with WAL mode and busy timeout.
+
+        Returns:
+            SQLite connection with proper settings for concurrent access.
+        """
+        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
+        return conn
         
     def _ensure_db(self) -> None:
         """Create database tables if they don't exist, and migrate old schemas."""
         os.makedirs(os.path.dirname(self.db_path) if os.path.dirname(self.db_path) else ".", exist_ok=True)
         
-        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn = self._get_connection()
         cursor = conn.cursor()
         
         # Market snapshots table (expanded schema)
@@ -453,7 +464,7 @@ class ContinuousDataCollector:
             
     def _cleanup_old_data(self) -> None:
         """Remove oldest data to stay under storage limit."""
-        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn = self._get_connection()
         cursor = conn.cursor()
         
         try:
@@ -498,7 +509,7 @@ class ContinuousDataCollector:
         
     def _load_state(self) -> None:
         """Load collector state from database."""
-        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn = self._get_connection()
         cursor = conn.cursor()
         
         cursor.execute("SELECT value FROM collector_state WHERE key = 'last_collection_time'")
@@ -510,7 +521,7 @@ class ContinuousDataCollector:
         
     def _save_state(self) -> None:
         """Save collector state to database."""
-        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn = self._get_connection()
         cursor = conn.cursor()
         
         if self._last_collection_time:
@@ -524,7 +535,7 @@ class ContinuousDataCollector:
         
     def get_tracked_market_count(self) -> int:
         """Get number of markets being tracked."""
-        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn = self._get_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM tracked_markets WHERE is_resolved = 0")
         count = cursor.fetchone()[0]
@@ -533,7 +544,7 @@ class ContinuousDataCollector:
     
     def get_total_examples(self) -> int:
         """Get total number of training examples."""
-        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn = self._get_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM training_examples")
         count = cursor.fetchone()[0]
@@ -542,7 +553,7 @@ class ContinuousDataCollector:
     
     def get_labeled_examples(self) -> int:
         """Get number of examples with 24h labels (usable for training)."""
-        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn = self._get_connection()
         cursor = conn.cursor()
         # Count examples with 24h price change labels (main training target)
         cursor.execute("SELECT COUNT(*) FROM training_examples WHERE price_change_24h IS NOT NULL")
@@ -552,7 +563,7 @@ class ContinuousDataCollector:
     
     def get_resolved_examples(self) -> int:
         """Get number of examples from resolved markets (final ground truth)."""
-        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn = self._get_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM training_examples WHERE is_fully_labeled = 1")
         count = cursor.fetchone()[0]
@@ -561,7 +572,7 @@ class ContinuousDataCollector:
     
     def get_unlabeled_examples(self) -> int:
         """Get number of examples waiting for labels."""
-        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn = self._get_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM training_examples WHERE is_fully_labeled = 0")
         count = cursor.fetchone()[0]
@@ -573,7 +584,7 @@ class ContinuousDataCollector:
         try:
             db_size = os.path.getsize(self.db_path) if os.path.exists(self.db_path) else 0
             
-            conn = sqlite3.connect(self.db_path, timeout=30)
+            conn = self._get_connection()
             cursor = conn.cursor()
             
             cursor.execute("SELECT COUNT(*) FROM market_snapshots")
@@ -609,7 +620,7 @@ class ContinuousDataCollector:
         Returns:
             True if added, False if already tracking.
         """
-        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn = self._get_connection()
         cursor = conn.cursor()
         
         try:
@@ -631,7 +642,7 @@ class ContinuousDataCollector:
         Args:
             snapshot: Market snapshot to record.
         """
-        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn = self._get_connection()
         cursor = conn.cursor()
         
         try:
@@ -690,7 +701,7 @@ class ContinuousDataCollector:
         # Track which features are available (for backwards compat)
         available_features = [k for k, v in features.items() if v is not None and v != 0 and v != ""]
 
-        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn = self._get_connection()
         cursor = conn.cursor()
 
         cursor.execute("""
@@ -720,7 +731,7 @@ class ContinuousDataCollector:
         Returns:
             List of (timestamp, price) tuples.
         """
-        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn = self._get_connection()
         cursor = conn.cursor()
         
         cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
@@ -793,7 +804,7 @@ class ContinuousDataCollector:
         Returns:
             Number of examples labeled.
         """
-        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn = self._get_connection()
         cursor = conn.cursor()
         
         # Get unlabeled examples
@@ -941,7 +952,7 @@ class ContinuousDataCollector:
             token_id: Token ID of resolved market.
             outcome: Resolution outcome (1 = Yes, 0 = No).
         """
-        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn = self._get_connection()
         cursor = conn.cursor()
         
         cursor.execute(
@@ -968,7 +979,7 @@ class ContinuousDataCollector:
         Returns:
             List of training examples as dictionaries.
         """
-        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn = self._get_connection()
         cursor = conn.cursor()
         
         query = """
