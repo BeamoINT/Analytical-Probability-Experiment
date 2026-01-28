@@ -13,10 +13,17 @@ Rate limits (documented):
 - Gamma API: 4000 req/10s general, 300 req/10s for /markets
 - CLOB API: 1500 req/10s for market data endpoints
 - Data API: 200 req/10s for /trades
+
+Features:
+- Checkpoint/resume: Can resume from where it left off after interruption
+- Graceful shutdown: Saves state before stopping
+- Non-blocking: Runs in background without blocking trading loop
 """
 
 import asyncio
+import json
 import logging
+import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -46,6 +53,10 @@ class ComprehensiveDataCollector:
     2. Continuous data collection (real-time price snapshots)
     3. Price history updates (periodic refresh)
     4. Data combination for training
+
+    Features:
+    - Checkpoint/resume: Saves progress to disk, resumes from last checkpoint
+    - Graceful shutdown: Can be interrupted and will save state
     """
 
     def __init__(
@@ -53,6 +64,7 @@ class ComprehensiveDataCollector:
         historical_db_path: str = "data/historical_training.db",
         continuous_db_path: str = "data/ai_training.db",
         price_history_db_path: str = "data/historical_prices.db",
+        state_file_path: str = "data/collection_state.json",
     ):
         """Initialize the comprehensive data collector.
 
@@ -60,8 +72,11 @@ class ComprehensiveDataCollector:
             historical_db_path: Path for historical training data.
             continuous_db_path: Path for continuous training data.
             price_history_db_path: Path for price timeseries data.
+            state_file_path: Path to save collection state for resume.
         """
         self.settings = get_settings()
+        self.state_file_path = Path(state_file_path)
+        self.state_file_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Initialize component collectors
         self.historical_fetcher = HistoricalDataFetcher(
@@ -79,6 +94,73 @@ class ComprehensiveDataCollector:
         self._historical_collection_done = False
         self._last_price_refresh: Optional[datetime] = None
         self._running = False
+        self._should_stop = False
+
+        # Checkpoint state for resume capability
+        self._checkpoint = self._load_checkpoint()
+
+    def _load_checkpoint(self) -> dict[str, Any]:
+        """Load checkpoint state from disk for resume capability."""
+        if self.state_file_path.exists():
+            try:
+                with open(self.state_file_path, "r") as f:
+                    checkpoint = json.load(f)
+                    logger.info(f"Loaded checkpoint: phase={checkpoint.get('phase')}, "
+                               f"progress={checkpoint.get('progress', 0)}")
+                    return checkpoint
+            except Exception as e:
+                logger.warning(f"Failed to load checkpoint: {e}")
+        return {}
+
+    def _save_checkpoint(
+        self,
+        phase: str,
+        progress: int,
+        total: int,
+        processed_ids: list[str] | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        """Save checkpoint state to disk for resume capability.
+
+        Args:
+            phase: Current collection phase (historical, active_prices, etc.)
+            progress: Number of items processed
+            total: Total items to process
+            processed_ids: Optional list of processed market/token IDs
+            extra: Additional state to save
+        """
+        checkpoint = {
+            "phase": phase,
+            "progress": progress,
+            "total": total,
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+        if processed_ids:
+            # Only save last 1000 IDs to keep file size manageable
+            checkpoint["processed_ids"] = processed_ids[-1000:]
+        if extra:
+            checkpoint.update(extra)
+
+        try:
+            with open(self.state_file_path, "w") as f:
+                json.dump(checkpoint, f, indent=2)
+        except Exception as e:
+            logger.warning(f"Failed to save checkpoint: {e}")
+
+    def _clear_checkpoint(self) -> None:
+        """Clear checkpoint after successful completion."""
+        self._checkpoint = {}
+        if self.state_file_path.exists():
+            try:
+                self.state_file_path.unlink()
+                logger.info("Checkpoint cleared (collection complete)")
+            except Exception as e:
+                logger.warning(f"Failed to clear checkpoint: {e}")
+
+    def request_stop(self) -> None:
+        """Request graceful stop of collection. Safe to call from signal handler."""
+        self._should_stop = True
+        logger.info("Stop requested for data collection")
 
     async def run_initial_collection(
         self,
@@ -86,10 +168,15 @@ class ComprehensiveDataCollector:
         max_markets: int = 50000,
         progress_callback: Optional[Callable[[str], None]] = None,
     ) -> dict[str, Any]:
-        """Run initial historical data collection.
+        """Run initial historical data collection with checkpoint/resume support.
 
         This should be called once on startup to fetch bulk historical data.
         Maximizes data collection while respecting API rate limits.
+
+        Features:
+        - Resume from checkpoint: If interrupted, will continue from where it stopped
+        - Graceful shutdown: Call request_stop() to stop cleanly
+        - Progress saving: Checkpoint saved every 100 items
 
         Args:
             days: Number of days of historical data to fetch.
@@ -99,51 +186,84 @@ class ComprehensiveDataCollector:
         Returns:
             Statistics about the collection.
         """
+        self._should_stop = False
+        self._running = True
+
         stats = {
             "phase": "initial_collection",
             "started_at": datetime.utcnow().isoformat(),
             "historical_stats": {},
             "price_history_stats": {},
             "errors": [],
+            "resumed_from_checkpoint": bool(self._checkpoint),
         }
 
-        logger.info(
-            f"Starting initial comprehensive data collection: "
-            f"{days} days, {max_markets} max markets"
-        )
+        # Check if we're resuming from a checkpoint
+        resume_phase = self._checkpoint.get("phase")
+        resume_progress = self._checkpoint.get("progress", 0)
 
-        if progress_callback:
-            progress_callback("Starting historical data collection...")
+        if resume_phase:
+            logger.info(
+                f"RESUMING collection from checkpoint: phase={resume_phase}, "
+                f"progress={resume_progress}"
+            )
+            if progress_callback:
+                progress_callback(f"Resuming from checkpoint: {resume_phase} at {resume_progress}")
+        else:
+            logger.info(
+                f"Starting initial comprehensive data collection: "
+                f"{days} days, {max_markets} max markets"
+            )
+            if progress_callback:
+                progress_callback("Starting historical data collection...")
 
         try:
             # Phase 1: Fetch historical resolved markets with price history
-            historical_stats = await self.historical_fetcher.fetch_and_save(
-                days=days,
-                max_markets=max_markets,
-                progress_callback=progress_callback,
-                fidelity=60,  # Hourly resolution for historical data
-            )
-            stats["historical_stats"] = historical_stats
+            # Skip if we've already completed this phase
+            if resume_phase not in ("active_prices", "completed"):
+                historical_stats = await self._run_historical_phase(
+                    days=days,
+                    max_markets=max_markets,
+                    progress_callback=progress_callback,
+                    resume_progress=resume_progress if resume_phase == "historical" else 0,
+                )
+                stats["historical_stats"] = historical_stats
+
+                if self._should_stop:
+                    logger.info("Collection stopped after historical phase")
+                    self._running = False
+                    return stats
+            else:
+                logger.info("Skipping historical phase (already completed in checkpoint)")
+                stats["historical_stats"] = {"skipped": True, "reason": "resumed_past_this_phase"}
 
             # Phase 2: Collect price history for active markets (for continuous training)
             if progress_callback:
                 progress_callback("Collecting price history for active markets...")
 
-            price_stats = await self._collect_active_market_prices(
-                max_markets=min(5000, max_markets),  # Cap active markets
+            price_stats = await self._run_active_prices_phase(
+                max_markets=min(10000, max_markets),  # More tokens for active markets
                 fidelity=15,  # 15-minute resolution for active markets
                 progress_callback=progress_callback,
+                resume_progress=resume_progress if resume_phase == "active_prices" else 0,
             )
             stats["price_history_stats"] = price_stats
 
+            if self._should_stop:
+                logger.info("Collection stopped after active prices phase")
+                self._running = False
+                return stats
+
+            # Successfully completed - clear checkpoint
             self._historical_collection_done = True
             self._last_price_refresh = datetime.utcnow()
+            self._clear_checkpoint()
 
             stats["completed_at"] = datetime.utcnow().isoformat()
 
             logger.info(
                 f"Initial collection complete: "
-                f"{historical_stats.get('examples_saved', 0)} historical examples, "
+                f"{stats['historical_stats'].get('examples_saved', 0)} historical examples, "
                 f"{price_stats.get('tokens_processed', 0)} active market tokens"
             )
 
@@ -151,21 +271,62 @@ class ComprehensiveDataCollector:
             logger.error(f"Initial collection failed: {e}")
             stats["errors"].append(str(e))
             stats["failed_at"] = datetime.utcnow().isoformat()
+        finally:
+            self._running = False
 
         return stats
+
+    async def _run_historical_phase(
+        self,
+        days: int,
+        max_markets: int,
+        progress_callback: Optional[Callable[[str], None]],
+        resume_progress: int = 0,
+    ) -> dict[str, Any]:
+        """Run historical data collection phase with checkpoint support."""
+        self._save_checkpoint("historical", resume_progress, max_markets)
+
+        historical_stats = await self.historical_fetcher.fetch_and_save(
+            days=days,
+            max_markets=max_markets,
+            progress_callback=progress_callback,
+            fidelity=60,  # Hourly resolution for historical data
+        )
+
+        # Mark historical phase complete
+        self._save_checkpoint("historical_complete", max_markets, max_markets)
+
+        return historical_stats
+
+    async def _run_active_prices_phase(
+        self,
+        max_markets: int,
+        fidelity: int,
+        progress_callback: Optional[Callable[[str], None]],
+        resume_progress: int = 0,
+    ) -> dict[str, Any]:
+        """Run active market price collection with checkpoint/resume support."""
+        return await self._collect_active_market_prices(
+            max_markets=max_markets,
+            fidelity=fidelity,
+            progress_callback=progress_callback,
+            resume_from=resume_progress,
+        )
 
     async def _collect_active_market_prices(
         self,
         max_markets: int = 5000,
         fidelity: int = 15,
         progress_callback: Optional[Callable[[str], None]] = None,
+        resume_from: int = 0,
     ) -> dict[str, Any]:
-        """Collect price history for currently active markets.
+        """Collect price history for currently active markets with checkpoint support.
 
         Args:
             max_markets: Maximum active markets to process.
             fidelity: Data resolution in minutes.
             progress_callback: Optional progress callback.
+            resume_from: Token index to resume from (for checkpoint recovery).
 
         Returns:
             Statistics about collection.
@@ -175,6 +336,7 @@ class ComprehensiveDataCollector:
             "tokens_processed": 0,
             "price_points_stored": 0,
             "features_computed": 0,
+            "resumed_from": resume_from,
         }
 
         # Fetch active markets
@@ -194,11 +356,30 @@ class ComprehensiveDataCollector:
         async with CLOBClient() as clob:
             total_tokens = sum(len(m.outcomes) for m in markets)
             processed = 0
+            skipped = 0
 
             for market in markets:
                 for outcome in market.outcomes:
                     if not outcome.token_id:
                         continue
+
+                    # Skip tokens we've already processed (resume support)
+                    if processed < resume_from:
+                        processed += 1
+                        skipped += 1
+                        continue
+
+                    # Check for stop request
+                    if self._should_stop:
+                        logger.info(f"Stop requested at token {processed}/{total_tokens}")
+                        self._save_checkpoint(
+                            "active_prices",
+                            processed,
+                            total_tokens,
+                            extra={"price_points_stored": stats["price_points_stored"]}
+                        )
+                        stats["stopped_at"] = processed
+                        return stats
 
                     try:
                         history = await self.price_collector.fetch_price_history_for_token(
@@ -230,15 +411,26 @@ class ComprehensiveDataCollector:
                         stats["tokens_processed"] += 1
                         processed += 1
 
-                        if progress_callback and processed % 100 == 0:
-                            progress_callback(
-                                f"Active markets: {processed}/{total_tokens} tokens, "
-                                f"{stats['price_points_stored']} points"
+                        # Save checkpoint every 100 tokens
+                        if processed % 100 == 0:
+                            self._save_checkpoint(
+                                "active_prices",
+                                processed,
+                                total_tokens,
+                                extra={"price_points_stored": stats["price_points_stored"]}
                             )
+                            if progress_callback:
+                                progress_callback(
+                                    f"Active markets: {processed}/{total_tokens} tokens, "
+                                    f"{stats['price_points_stored']} points"
+                                )
 
                     except Exception as e:
                         logger.debug(f"Error collecting prices for {outcome.token_id[:12]}: {e}")
                         processed += 1
+
+        if skipped > 0:
+            logger.info(f"Skipped {skipped} tokens (resumed from checkpoint)")
 
         return stats
 

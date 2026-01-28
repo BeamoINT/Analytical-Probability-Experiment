@@ -134,8 +134,12 @@ def run(paper: bool, live: bool) -> None:
 
         scheduler = TradingScheduler()
         asyncio.run(scheduler.run())
+        click.echo("\nShutdown complete. State saved for resume on restart.")
     except KeyboardInterrupt:
         logger.info("Shutting down gracefully...")
+        click.echo("\nShutdown complete. Background tasks will save state for resume.")
+    except asyncio.CancelledError:
+        logger.info("Tasks cancelled during shutdown")
         click.echo("\nShutdown complete.")
     except Exception as e:
         logger.error(f"Fatal error: {e}", exc_info=True)

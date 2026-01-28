@@ -2,9 +2,10 @@
 
 import asyncio
 import logging
+import signal
 import time
 import uuid
-from typing import Any
+from typing import Any, Optional
 from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session
@@ -68,8 +69,14 @@ class TradingScheduler:
         """Initialize trading scheduler."""
         self.settings = get_settings()
         self.is_running = False
+        self.is_shutting_down = False
         self.health = get_health_status()
         self.consecutive_errors = 0
+
+        # Background tasks tracking for graceful shutdown
+        self._background_tasks: list[asyncio.Task] = []
+        self._historical_collection_task: Optional[asyncio.Task] = None
+        self._comprehensive_collector: Any = None  # Set during historical collection
 
         # Check strategy mode before anything else
         _check_strategy_mode()
@@ -151,7 +158,13 @@ class TradingScheduler:
     async def run(self) -> None:
         """Run main trading loop continuously."""
         self.is_running = True
+        self.is_shutting_down = False
         logger.info("Starting trading loop")
+
+        # Set up signal handlers for graceful shutdown
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(self._handle_shutdown(s)))
 
         # Start WebSocket connection for real-time market data
         if self.ws_client:
@@ -165,26 +178,22 @@ class TradingScheduler:
             except Exception as e:
                 logger.warning(f"WebSocket startup error: {e} - falling back to HTTP polling")
 
-        # === NEW: Run comprehensive historical data collection on startup ===
+        # === Run historical data collection in BACKGROUND (non-blocking) ===
         if self.settings.historical_collection_on_startup:
-            await self._run_initial_historical_collection()
+            logger.info("Starting historical data collection in BACKGROUND (trading loop will start immediately)")
+            self._historical_collection_task = asyncio.create_task(
+                self._run_initial_historical_collection(),
+                name="historical_collection"
+            )
+            self._background_tasks.append(self._historical_collection_task)
 
-        # Backfill missing price data on startup (if enabled)
+        # Backfill missing price data on startup (if enabled) - also in background
         if self.settings.ml_enable_backfill:
-            try:
-                from polyb0t.ml.backfill import HistoricalDataBackfiller
-                logger.info("Checking for missing price data to backfill...")
-                backfiller = HistoricalDataBackfiller(self.settings.ml_data_db)
-                stats = backfiller.get_price_history_stats()
-                logger.info(
-                    f"Price history: {stats['total_price_points']} points, "
-                    f"{stats['unique_tokens']} tokens, "
-                    f"{stats['coverage_days']:.1f} days coverage, "
-                    f"avg interval: {stats['avg_interval_minutes']:.1f}min "
-                    f"(target: {stats['target_interval_minutes']}min)"
-                )
-            except Exception as e:
-                logger.warning(f"Price history backfill check failed: {e}")
+            backfill_task = asyncio.create_task(
+                self._run_backfill_check(),
+                name="backfill_check"
+            )
+            self._background_tasks.append(backfill_task)
 
         while self.is_running:
             cycle_start = time.time()
@@ -222,25 +231,90 @@ class TradingScheduler:
             # Wait before next cycle
             await asyncio.sleep(self.settings.loop_interval_seconds)
 
+        # Graceful shutdown: wait for background tasks to complete or cancel them
+        await self._cleanup_background_tasks()
+
+    async def _handle_shutdown(self, sig: signal.Signals) -> None:
+        """Handle shutdown signal gracefully.
+
+        Args:
+            sig: The signal received.
+        """
+        if self.is_shutting_down:
+            logger.warning(f"Received {sig.name} again, forcing exit...")
+            return
+
+        self.is_shutting_down = True
+        logger.info(f"Received {sig.name}, initiating graceful shutdown...")
+        self.is_running = False
+
+        # Request stop on comprehensive collector so it saves checkpoint
+        if hasattr(self, '_comprehensive_collector') and self._comprehensive_collector:
+            logger.info("Requesting stop on historical data collector (saving checkpoint)...")
+            self._comprehensive_collector.request_stop()
+
+    async def _cleanup_background_tasks(self) -> None:
+        """Wait for background tasks to complete or cancel them gracefully."""
+        if not self._background_tasks:
+            return
+
+        logger.info(f"Waiting for {len(self._background_tasks)} background task(s) to complete...")
+
+        # Give tasks a chance to complete (up to 30 seconds)
+        for task in self._background_tasks:
+            if not task.done():
+                try:
+                    await asyncio.wait_for(asyncio.shield(task), timeout=30.0)
+                except asyncio.TimeoutError:
+                    logger.warning(f"Task {task.get_name()} timed out, cancelling...")
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                except Exception as e:
+                    logger.warning(f"Task {task.get_name()} error during cleanup: {e}")
+
+        logger.info("All background tasks completed or cancelled")
+
+    async def _run_backfill_check(self) -> None:
+        """Run price history backfill check in background."""
+        try:
+            from polyb0t.ml.backfill import HistoricalDataBackfiller
+            logger.info("Checking for missing price data to backfill...")
+            backfiller = HistoricalDataBackfiller(self.settings.ml_data_db)
+            stats = backfiller.get_price_history_stats()
+            logger.info(
+                f"Price history: {stats['total_price_points']} points, "
+                f"{stats['unique_tokens']} tokens, "
+                f"{stats['coverage_days']:.1f} days coverage, "
+                f"avg interval: {stats['avg_interval_minutes']:.1f}min "
+                f"(target: {stats['target_interval_minutes']}min)"
+            )
+        except Exception as e:
+            logger.warning(f"Price history backfill check failed: {e}")
+
     async def _run_initial_historical_collection(self) -> None:
-        """Run comprehensive historical data collection on startup.
+        """Run comprehensive historical data collection in background.
 
         This fetches:
         1. Historical resolved markets from Gamma API
         2. Price timeseries data from CLOB /prices-history endpoint
         3. Computes momentum, volatility, and trend features for ML training
 
-        This runs once on startup and can take several minutes depending on
-        the amount of data to fetch.
+        Features:
+        - Runs in background (non-blocking)
+        - Checkpoint/resume: Can resume from where it left off
+        - Graceful shutdown: Saves state before stopping
         """
         logger.info("=" * 60)
-        logger.info("STARTING INITIAL HISTORICAL DATA COLLECTION")
+        logger.info("STARTING INITIAL HISTORICAL DATA COLLECTION (BACKGROUND)")
         logger.info("=" * 60)
 
         try:
             from polyb0t.ml.comprehensive_collector import get_comprehensive_collector
 
-            collector = get_comprehensive_collector(
+            self._comprehensive_collector = get_comprehensive_collector(
                 historical_db_path=self.settings.historical_training_db,
                 continuous_db_path=self.settings.ai_training_db,
                 price_history_db_path=self.settings.historical_prices_db,
@@ -250,7 +324,7 @@ class TradingScheduler:
                 logger.info(f"[Historical Collection] {msg}")
 
             # Run the initial collection
-            stats = await collector.run_initial_collection(
+            stats = await self._comprehensive_collector.run_initial_collection(
                 days=self.settings.historical_days_to_fetch,
                 max_markets=self.settings.historical_max_markets,
                 progress_callback=progress_callback,
@@ -261,7 +335,11 @@ class TradingScheduler:
             price_stats = stats.get("price_history_stats", {})
 
             logger.info("=" * 60)
-            logger.info("HISTORICAL DATA COLLECTION COMPLETE")
+            if stats.get("stopped_at") or price_stats.get("stopped_at"):
+                logger.info("HISTORICAL DATA COLLECTION STOPPED (will resume on restart)")
+            else:
+                logger.info("HISTORICAL DATA COLLECTION COMPLETE")
+            logger.info(f"  Resumed from checkpoint: {stats.get('resumed_from_checkpoint', False)}")
             logger.info(f"  Markets fetched: {historical_stats.get('markets_fetched', 0)}")
             logger.info(f"  Training examples: {historical_stats.get('examples_saved', 0)}")
             logger.info(f"  Price history tokens: {historical_stats.get('price_history_tokens', 0)}")
@@ -274,6 +352,12 @@ class TradingScheduler:
 
         except ImportError as e:
             logger.warning(f"Historical data collection modules not available: {e}")
+        except asyncio.CancelledError:
+            logger.info("Historical data collection cancelled (shutdown requested)")
+            # Request graceful stop so checkpoint is saved
+            if hasattr(self, '_comprehensive_collector'):
+                self._comprehensive_collector.request_stop()
+            raise  # Re-raise to allow proper task cancellation
         except Exception as e:
             logger.error(f"Historical data collection failed: {e}", exc_info=True)
             # Don't fail startup - continue with whatever data we have
