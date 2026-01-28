@@ -231,12 +231,16 @@ class HistoricalDataFetcher:
         features["has_description"] = 1 if market.description else 0
         features["question_length"] = len(market.question) if market.question else 0
 
-        # Category
-        category = self.category_tracker.categorize_market(
+        # Category - categorize_market returns (category, confidence) tuple
+        category_result = self.category_tracker.categorize_market(
             market.question or "",
             market.description or "",
         )
-        features["category"] = category
+        # Extract just the category string, not the confidence
+        if isinstance(category_result, tuple):
+            features["category"] = category_result[0]
+        else:
+            features["category"] = category_result
 
         return features
 
