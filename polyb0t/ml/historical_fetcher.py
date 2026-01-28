@@ -11,7 +11,7 @@ import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from polyb0t.data.clob_client import CLOBClient
 from polyb0t.data.gamma_client import GammaClient
@@ -475,7 +475,7 @@ class HistoricalDataFetcher:
         self,
         days: int = 365,
         max_markets: int = 50000,
-        progress_callback: Optional[callable] = None,
+        progress_callback: Optional[Callable[[str], None]] = None,
         fidelity: int = 60,
     ) -> dict[str, Any]:
         """Fetch historical markets and save as training examples.
@@ -575,7 +575,7 @@ class HistoricalDataFetcher:
         self,
         markets: list[Market],
         fidelity: int,
-        progress_callback: Optional[callable],
+        progress_callback: Optional[Callable[[str], None]],
         stats: dict[str, Any],
     ) -> None:
         """Collect historical price timeseries data for market tokens.

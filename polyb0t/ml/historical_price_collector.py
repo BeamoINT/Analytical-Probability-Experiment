@@ -21,7 +21,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from polyb0t.config import get_settings
 from polyb0t.data.clob_client import CLOBClient, PriceHistory, PricePoint
@@ -490,7 +490,7 @@ class HistoricalPriceCollector:
         max_markets: int = 5000,
         fidelity: int = 60,
         include_resolved: bool = True,
-        progress_callback: callable | None = None,
+        progress_callback: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
         """Collect historical price data for all available markets.
 
