@@ -233,26 +233,49 @@ class DeepExpertEnsemble:
             EnsembleMetrics with training results
         """
         import time
+        from sklearn.model_selection import train_test_split
         start_time = time.time()
 
         # Scale features
         X_scaled = self.scaler.fit_transform(X)
 
-        # Time-based split (train on older, validate on newer)
-        n_samples = len(X)
-        val_size = int(n_samples * val_fraction)
-        train_idx = np.arange(n_samples - val_size)
-        val_idx = np.arange(n_samples - val_size, n_samples)
-
-        X_train, X_val = X_scaled[train_idx], X_scaled[val_idx]
-        y_train, y_val = y[train_idx], y[val_idx]
-
-        if sample_weights is not None:
-            w_train = sample_weights[train_idx]
-            w_val = sample_weights[val_idx]
-        else:
-            w_train = None
-            w_val = None
+        # Stratified split to ensure both classes in train and validation
+        # This prevents the bug where all validation examples are one class
+        # (which gives false 100% accuracy)
+        try:
+            if sample_weights is not None:
+                X_train, X_val, y_train, y_val, w_train, w_val = train_test_split(
+                    X_scaled, y, sample_weights,
+                    test_size=val_fraction,
+                    stratify=y,
+                    random_state=42,
+                )
+            else:
+                X_train, X_val, y_train, y_val = train_test_split(
+                    X_scaled, y,
+                    test_size=val_fraction,
+                    stratify=y,
+                    random_state=42,
+                )
+                w_train = None
+                w_val = None
+        except ValueError:
+            # Fallback to random split if stratification fails (e.g., only one class)
+            logger.warning("Stratified split failed, using random split")
+            if sample_weights is not None:
+                X_train, X_val, y_train, y_val, w_train, w_val = train_test_split(
+                    X_scaled, y, sample_weights,
+                    test_size=val_fraction,
+                    random_state=42,
+                )
+            else:
+                X_train, X_val, y_train, y_val = train_test_split(
+                    X_scaled, y,
+                    test_size=val_fraction,
+                    random_state=42,
+                )
+                w_train = None
+                w_val = None
 
         # Store OOF predictions for stacking
         oof_preds = np.zeros((len(X_train), 0))
