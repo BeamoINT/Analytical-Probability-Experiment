@@ -103,6 +103,17 @@ class TradingScheduler:
             except Exception as e:
                 logger.warning(f"Failed to initialize AI orchestrator: {e}")
 
+        # Dry-run stats collector (for batch training mode)
+        self.dryrun_stats_collector = None
+        self._last_dryrun_stats_save: datetime | None = None
+        if self.settings.ai_training_mode == "batch":
+            try:
+                from polyb0t.ml.dryrun_stats import get_dryrun_stats_collector
+                self.dryrun_stats_collector = get_dryrun_stats_collector()
+                logger.info("Dry-run stats collector initialized (batch training mode)")
+            except Exception as e:
+                logger.warning(f"Failed to initialize dry-run stats collector: {e}")
+
         # Arbitrage scanner (optional)
         self.arbitrage_scanner = None
         if self.settings.enable_arbitrage_scanner:
@@ -1379,6 +1390,46 @@ class TradingScheduler:
                         "balance": balance_summary or {},
                     },
                 )
+
+            # === DRY-RUN STATS COLLECTION (batch training mode) ===
+            if self.dryrun_stats_collector is not None:
+                try:
+                    # Record signals generated
+                    for signal in signals:
+                        expert_id = signal.features.get("best_expert") if signal.features else None
+                        category = signal.features.get("category") if signal.features else None
+                        self.dryrun_stats_collector.record_signal(
+                            signal={
+                                "prediction": 1 if signal.side == "BUY" else 0,
+                                "confidence": signal.confidence,
+                            },
+                            expert_id=expert_id,
+                            category=category,
+                        )
+
+                    # Record intents created
+                    if self.settings.mode == "live" and created > 0:
+                        for _ in range(created):
+                            self.dryrun_stats_collector.record_intent({"action": "BUY"})
+
+                    # Save stats periodically (every N hours)
+                    now = datetime.utcnow()
+                    should_save = False
+                    if self._last_dryrun_stats_save is None:
+                        should_save = True
+                    else:
+                        hours_since = (now - self._last_dryrun_stats_save).total_seconds() / 3600
+                        if hours_since >= self.settings.ai_dryrun_stats_interval_hours:
+                            should_save = True
+
+                    if should_save:
+                        self.dryrun_stats_collector.save_stats()
+                        self._last_dryrun_stats_save = now
+                        logger.info(
+                            f"Dry-run stats saved (next in {self.settings.ai_dryrun_stats_interval_hours}h)"
+                        )
+                except Exception as e:
+                    logger.warning(f"Dry-run stats collection failed: {e}")
 
             # Step 9: Update portfolio prices
             current_prices = self._extract_current_prices(orderbooks)

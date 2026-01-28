@@ -1883,6 +1883,226 @@ def backfill_categories_cmd(max_examples: int, batch_size: int) -> None:
         click.echo(f"  {cat}: {count}")
 
 
+@cli.command(name="fetch-history")
+@click.option(
+    "--days",
+    default=365,
+    type=int,
+    help="Days of history to fetch (default: 365).",
+)
+@click.option(
+    "--output",
+    default="data/historical_training.db",
+    help="Output database path.",
+)
+@click.option(
+    "--max-markets",
+    default=250000,
+    type=int,
+    help="Maximum markets to fetch (default: 250000).",
+)
+def fetch_history(days: int, output: str, max_markets: int) -> None:
+    """Fetch resolved Polymarket markets for historical training.
+
+    Downloads resolved markets from the last N days and extracts
+    training examples with labels based on actual outcomes.
+
+    Example:
+        polyb0t fetch-history --days 365
+        polyb0t fetch-history --days 90 --max-markets 10000
+    """
+    setup_logging()
+
+    click.echo("\n" + "=" * 60)
+    click.echo("HISTORICAL DATA FETCH")
+    click.echo("=" * 60)
+    click.echo(f"Days of history: {days}")
+    click.echo(f"Max markets: {max_markets}")
+    click.echo(f"Output: {output}")
+    click.echo("=" * 60 + "\n")
+
+    from polyb0t.ml.historical_fetcher import HistoricalDataFetcher
+
+    fetcher = HistoricalDataFetcher(output_path=output)
+
+    def progress_callback(msg: str) -> None:
+        click.echo(f"  {msg}")
+
+    try:
+        stats = asyncio.run(
+            fetcher.fetch_and_save(
+                days=days,
+                max_markets=max_markets,
+                progress_callback=progress_callback,
+            )
+        )
+
+        click.echo("\n" + "=" * 60)
+        click.echo("FETCH COMPLETE")
+        click.echo("=" * 60)
+        click.echo(f"Markets fetched: {stats.get('markets_fetched', 0)}")
+        click.echo(f"Examples created: {stats.get('examples_created', 0)}")
+        click.echo(f"Examples saved: {stats.get('examples_saved', 0)}")
+
+        if stats.get("categories"):
+            click.echo("\nCategory distribution:")
+            for cat, count in sorted(stats["categories"].items(), key=lambda x: -x[1])[:10]:
+                click.echo(f"  {cat}: {count}")
+
+        if stats.get("errors"):
+            click.echo(f"\nErrors: {len(stats['errors'])}")
+
+        click.echo("=" * 60 + "\n")
+
+    except Exception as e:
+        logger.error(f"Fetch failed: {e}", exc_info=True)
+        click.echo(f"ERROR: {e}")
+
+
+@cli.command(name="train-historical")
+@click.option(
+    "--data",
+    default="data/historical_training.db",
+    help="Training data path.",
+)
+@click.option(
+    "--test-split",
+    default=0.2,
+    type=float,
+    help="Fraction of data for testing (default: 0.2).",
+)
+@click.option(
+    "--metrics-output",
+    default="data/training_metrics.json",
+    help="Path to save training metrics.",
+)
+def train_historical(data: str, test_split: float, metrics_output: str) -> None:
+    """Run one-time batch training on historical data.
+
+    Trains the MoE ensemble on historical resolved markets and
+    validates on a held-out test set.
+
+    Example:
+        polyb0t train-historical
+        polyb0t train-historical --test-split 0.3
+    """
+    setup_logging()
+
+    click.echo("\n" + "=" * 60)
+    click.echo("BATCH TRAINING ON HISTORICAL DATA")
+    click.echo("=" * 60)
+    click.echo(f"Data: {data}")
+    click.echo(f"Test split: {test_split:.0%}")
+    click.echo(f"Metrics output: {metrics_output}")
+    click.echo("=" * 60 + "\n")
+
+    from polyb0t.ml.batch_trainer import BatchTrainer
+
+    trainer = BatchTrainer(
+        data_path=data,
+        test_split=test_split,
+        metrics_output=metrics_output,
+    )
+
+    try:
+        results = trainer.train()
+
+        click.echo("\n" + "=" * 60)
+        click.echo("TRAINING COMPLETE")
+        click.echo("=" * 60)
+
+        if results.get("status") == "success":
+            data_stats = results.get("data_stats", {})
+            validation = results.get("validation", {})
+            training = results.get("training_result", {})
+
+            click.echo(f"Status: SUCCESS")
+            click.echo(f"\nData:")
+            click.echo(f"  Train examples: {data_stats.get('train_examples', 0)}")
+            click.echo(f"  Test examples: {data_stats.get('test_examples', 0)}")
+
+            click.echo(f"\nTraining:")
+            click.echo(f"  Experts trained: {training.get('experts_trained', 0)}")
+
+            click.echo(f"\nValidation:")
+            click.echo(f"  Accuracy: {validation.get('accuracy', 0):.2%}")
+            click.echo(f"  Win rate: {validation.get('win_rate', 0):.2%}")
+            click.echo(f"  Simulated profit: {validation.get('simulated_profit_pct', 0):.2%}")
+
+            if validation.get("category_metrics"):
+                click.echo(f"\nTop categories by accuracy:")
+                sorted_cats = sorted(
+                    validation["category_metrics"].items(),
+                    key=lambda x: x[1].get("accuracy", 0),
+                    reverse=True,
+                )
+                for cat, metrics in sorted_cats[:5]:
+                    click.echo(f"  {cat}: {metrics.get('accuracy', 0):.1%} ({metrics.get('n_examples', 0)} examples)")
+
+            click.echo(f"\nMetrics saved to: {metrics_output}")
+        else:
+            click.echo(f"Status: FAILED")
+            click.echo(f"Error: {results.get('error', 'Unknown')}")
+
+        click.echo("=" * 60 + "\n")
+
+    except Exception as e:
+        logger.error(f"Training failed: {e}", exc_info=True)
+        click.echo(f"ERROR: {e}")
+
+
+@cli.command(name="dryrun-stats")
+@click.option(
+    "--periods",
+    default=10,
+    type=int,
+    help="Number of recent periods to summarize (default: 10).",
+)
+@click.option(
+    "--json-output",
+    is_flag=True,
+    help="Output as JSON.",
+)
+def dryrun_stats(periods: int, json_output: bool) -> None:
+    """Show dry-run performance statistics.
+
+    Displays collected performance metrics from dry-run trading,
+    including win rate, P&L, and expert usage.
+
+    Example:
+        polyb0t dryrun-stats
+        polyb0t dryrun-stats --periods 20 --json-output
+    """
+    setup_logging()
+
+    from polyb0t.ml.dryrun_stats import get_dryrun_stats_collector
+
+    collector = get_dryrun_stats_collector()
+    summary = collector.get_summary(periods=periods)
+
+    if json_output:
+        click.echo(json.dumps(summary, indent=2))
+    else:
+        if "error" in summary:
+            click.echo(f"Error: {summary['error']}")
+            return
+
+        click.echo("\n" + "=" * 60)
+        click.echo("DRY-RUN PERFORMANCE STATISTICS")
+        click.echo("=" * 60)
+        click.echo(f"Periods analyzed: {summary.get('periods_analyzed', 0)}")
+        click.echo(f"Total hours: {summary.get('total_hours', 0):.1f}")
+        click.echo(f"\nSignals & Trades:")
+        click.echo(f"  Signals generated: {summary.get('total_signals', 0)}")
+        click.echo(f"  Trades: {summary.get('total_trades', 0)}")
+        click.echo(f"  Trades per day: {summary.get('trades_per_day', 0):.1f}")
+        click.echo(f"\nPerformance:")
+        click.echo(f"  Win rate: {summary.get('win_rate', 0):.1%}")
+        click.echo(f"  Total P&L: {summary.get('total_pnl_pct', 0):.2%}")
+        click.echo(f"  Avg P&L per trade: {summary.get('avg_pnl_per_trade_pct', 0):.2%}")
+        click.echo("=" * 60 + "\n")
+
+
 if __name__ == "__main__":
     cli()
 

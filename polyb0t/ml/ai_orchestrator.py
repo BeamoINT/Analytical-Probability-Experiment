@@ -181,24 +181,31 @@ class AIOrchestrator:
     
     def should_train(self) -> bool:
         """Check if we should start training.
-        
+
+        In batch mode: never retrain automatically (training is done via CLI).
+        In online mode: retrain periodically based on interval.
+
         Returns:
             True if training should start.
         """
+        # Batch mode: no automatic retraining
+        if self.settings.ai_training_mode == "batch":
+            return False
+
         if self.trainer.is_training():
             return False
-            
+
         # Check if enough examples
         labeled_examples = self.collector.get_labeled_examples()
         if not self.trainer.can_train(labeled_examples):
             return False
-            
+
         # Check if enough time has passed since last training
         if self._last_training_time:
             hours_since = (datetime.utcnow() - self._last_training_time).total_seconds() / 3600
             if hours_since < self.settings.ai_retrain_interval_hours:
                 return False
-                
+
         return True
     
     def should_create_examples(self) -> bool:
