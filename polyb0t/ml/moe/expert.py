@@ -181,8 +181,18 @@ class _ExpertEnsemble:
                 if probs.ndim == 1:
                     probs = np.column_stack([1 - probs, probs])
                 elif probs.shape[1] == 1:
-                    # Single class only - expand to 2 classes
-                    probs = np.column_stack([1 - probs, probs])
+                    # Single class only - check which class the classifier knows
+                    if hasattr(clf, 'classes_'):
+                        known_class = clf.classes_[0]  # The only class it knows
+                        if known_class == 0:
+                            # Classifier only knows class 0, return [probs, 1-probs]
+                            probs = np.column_stack([probs, 1 - probs])
+                        else:
+                            # Classifier only knows class 1
+                            probs = np.column_stack([1 - probs, probs])
+                    else:
+                        # Default: assume it's probability for class 1
+                        probs = np.column_stack([1 - probs, probs])
                 all_probs.append(probs)
             except Exception:
                 continue
@@ -682,39 +692,42 @@ class Expert:
         n_confident = np.sum(confident_mask)
         
         # === PROFITABILITY SIMULATION ===
-        portfolio = 1.0
-        peak_portfolio = 1.0
+        # Use additive returns (not compound) for realistic profit calculation
+        cumulative_pnl = 0.0
+        peak_pnl = 0.0
         max_drawdown = 0.0
-        
+
         trade_returns = []
         wins = []
         losses = []
-        
+
         for i in range(len(X)):
             if not confident_mask[i]:
                 continue
-            
+
             if predictions[i] == 1:  # Model says profitable
                 actual_change = y_reg[i] if i < len(y_reg) else 0
                 trade_return = actual_change - SPREAD_COST
-                
+
                 portfolio_return = POSITION_SIZE * trade_return
-                portfolio = portfolio * (1 + portfolio_return)
+                cumulative_pnl += portfolio_return
                 trade_returns.append(portfolio_return)
-                
+
                 if portfolio_return > 0:
                     wins.append(portfolio_return)
                 else:
                     losses.append(portfolio_return)
-                
-                if portfolio > peak_portfolio:
-                    peak_portfolio = portfolio
-                current_dd = (peak_portfolio - portfolio) / peak_portfolio
-                if current_dd > max_drawdown:
-                    max_drawdown = current_dd
-        
+
+                if cumulative_pnl > peak_pnl:
+                    peak_pnl = cumulative_pnl
+                # Calculate drawdown from peak
+                if peak_pnl > 0:
+                    current_dd = (peak_pnl - cumulative_pnl) / peak_pnl
+                    if current_dd > max_drawdown:
+                        max_drawdown = current_dd
+
         num_trades = len(trade_returns)
-        
+
         if num_trades == 0:
             return ExpertMetrics(
                 directional_accuracy=accuracy,
@@ -722,8 +735,8 @@ class Expert:
                 confident_trade_pct=float(n_confident / len(X)) if len(X) > 0 else 0,
                 avg_confidence=float(np.mean(confidence)),
             )
-        
-        total_profit = portfolio - 1.0
+
+        total_profit = cumulative_pnl  # Additive, not compound
         win_rate = len(wins) / num_trades if num_trades > 0 else 0
         avg_win = np.mean(wins) if wins else 0
         avg_loss = np.mean(losses) if losses else 0
