@@ -177,6 +177,12 @@ class _ExpertEnsemble:
         for clf in self.classifiers:
             try:
                 probs = clf.predict_proba(X_scaled)
+                # Ensure probs has shape (n, 2) for binary classification
+                if probs.ndim == 1:
+                    probs = np.column_stack([1 - probs, probs])
+                elif probs.shape[1] == 1:
+                    # Single class only - expand to 2 classes
+                    probs = np.column_stack([1 - probs, probs])
                 all_probs.append(probs)
             except Exception:
                 continue
@@ -185,8 +191,8 @@ class _ExpertEnsemble:
             # Return 50/50 if no classifiers work
             return np.full((len(X), 2), 0.5)
 
-        # Average probabilities
-        return np.mean(all_probs, axis=0)
+        # Average probabilities - all should now be (n, 2)
+        return np.mean(np.array(all_probs), axis=0)
 
     def predict(self, X: np.ndarray) -> np.ndarray:
         """Get class predictions."""

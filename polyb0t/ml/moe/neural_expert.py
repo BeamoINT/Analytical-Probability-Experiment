@@ -287,9 +287,8 @@ class NeuralExpertTrainer:
                     X_batch, y_batch = batch
                     w_batch = None
 
-                # Data augmentation: add Gaussian noise
-                if self.training:
-                    X_batch = X_batch + torch.randn_like(X_batch) * 0.01
+                # Data augmentation: add Gaussian noise during training
+                X_batch = X_batch + torch.randn_like(X_batch) * 0.01
 
                 optimizer.zero_grad()
                 logits = self.model(X_batch)
