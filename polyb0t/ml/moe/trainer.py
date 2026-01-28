@@ -154,13 +154,19 @@ class MoETrainer:
                 if len(indices) < MIN_EXPERT_SAMPLES:
                     logger.info(f"  Skipping - only {len(indices)} samples (need {MIN_EXPERT_SAMPLES})")
                     continue
-                
+
                 # Extract subset
                 X_expert = X[indices]
                 y_binary_expert = y_binary_horizon[indices]
                 y_reg_expert = y_reg_horizon[indices]
                 weights_expert = sample_weights[indices]
-                
+
+                # Check for single-class data (skip if only one class present)
+                unique_classes = np.unique(y_binary_expert)
+                if len(unique_classes) < 2:
+                    logger.info(f"  Skipping - only one class in data (class={unique_classes[0]})")
+                    continue
+
                 # Train
                 metrics = expert.train(
                     X_expert, y_binary_expert, y_reg_expert, weights_expert
