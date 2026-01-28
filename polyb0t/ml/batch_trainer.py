@@ -15,7 +15,7 @@ import numpy as np
 
 from polyb0t.config import get_settings
 from polyb0t.ml.moe.expert_pool import ExpertPool, get_expert_pool
-from polyb0t.ml.moe.trainer import MoETrainer, get_moe_trainer
+from polyb0t.ml.moe.trainer import MoETrainer
 
 logger = logging.getLogger(__name__)
 
@@ -23,9 +23,9 @@ logger = logging.getLogger(__name__)
 class BatchTrainer:
     """One-time batch training on historical data.
 
-    This trainer loads historical training data, performs a comprehensive
-    training pass on all MoE experts, validates on a held-out test set,
-    and saves detailed metrics.
+    This trainer loads historical training data, converts it to the MoE trainer's
+    expected format, trains all experts on the appropriate data subsets, and
+    validates on a held-out test set.
     """
 
     def __init__(
@@ -45,6 +45,9 @@ class BatchTrainer:
         self.test_split = test_split
         self.metrics_output = Path(metrics_output)
         self.metrics_output.parent.mkdir(parents=True, exist_ok=True)
+
+        # Path for converted training data
+        self.converted_db_path = Path("data/historical_training_converted.db")
 
         self.settings = get_settings()
         self.expert_pool: Optional[ExpertPool] = None
@@ -71,13 +74,14 @@ class BatchTrainer:
 
         all_examples = []
         for row in cursor.fetchall():
+            features = json.loads(row[5]) if row[5] else {}
             example = {
                 "token_id": row[0],
                 "market_id": row[1],
                 "market_title": row[2],
                 "outcome_name": row[3],
-                "category": row[4],
-                "features": json.loads(row[5]),
+                "category": row[4] or "other",
+                "features": features,
                 "label": row[6],
                 "target": row[6],  # Alias for compatibility with MoE trainer
                 "winning_token_id": row[7],
@@ -101,65 +105,135 @@ class BatchTrainer:
 
         return train_data, test_data
 
-    def _prepare_moe_format(self, examples: list[dict]) -> list[dict]:
-        """Convert historical examples to MoE trainer format.
+    def _convert_to_moe_db(self, examples: list[dict]) -> None:
+        """Convert historical examples to MoE trainer database format.
 
-        The MoE trainer expects a specific format with certain keys.
+        Creates a SQLite database with the schema expected by MoETrainer._load_training_data().
 
         Args:
-            examples: Historical example dicts.
-
-        Returns:
-            Examples formatted for MoE trainer.
+            examples: List of historical examples.
         """
-        moe_examples = []
+        # Remove old converted database
+        if self.converted_db_path.exists():
+            self.converted_db_path.unlink()
 
+        conn = sqlite3.connect(str(self.converted_db_path))
+        cursor = conn.cursor()
+
+        # Create table with schema expected by MoE trainer
+        cursor.execute("""
+            CREATE TABLE training_examples (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token_id TEXT NOT NULL,
+                market_id TEXT,
+                category TEXT,
+                features TEXT,
+                price_change_1h REAL,
+                price_change_4h REAL,
+                price_change_24h REAL,
+                created_at TEXT NOT NULL
+            )
+        """)
+
+        cursor.execute("""
+            CREATE INDEX idx_training_category ON training_examples(category)
+        """)
+        cursor.execute("""
+            CREATE INDEX idx_training_price_change ON training_examples(price_change_24h)
+        """)
+
+        # Convert and insert examples
+        inserted = 0
         for ex in examples:
             features = ex["features"]
+            label = ex["label"]  # 0 or 1
 
-            # Create MoE-compatible example
-            moe_ex = {
-                "token_id": ex["token_id"],
-                "market_id": ex["market_id"],
-                "market_title": ex["market_title"],
-                "category": ex["category"],
-                "target": ex["label"],
+            # Convert binary label to simulated price change
+            # label=1 (won) -> price went to 1.0, so positive change
+            # label=0 (lost) -> price went to 0.0, so negative change
+            initial_price = features.get("outcome_price", 0.5)
+            if label == 1:
+                # Winner: price went to 1.0
+                final_price = 1.0
+            else:
+                # Loser: price went to 0.0
+                final_price = 0.0
 
-                # Flatten features into top-level keys
+            # Calculate price change as percentage
+            if initial_price > 0:
+                price_change = (final_price - initial_price) / initial_price
+            else:
+                price_change = 1.0 if label == 1 else -1.0
+
+            # Build features dict with all available features
+            moe_features = {
+                # Price features
                 "price": features.get("outcome_price", 0.5),
+                "initial_price": features.get("initial_price", 0.5),
+
+                # Volume/Liquidity
                 "volume_24h": features.get("total_volume", 0.0),
                 "liquidity": features.get("liquidity", 0.0),
-                "days_to_resolution": features.get("days_to_resolution", 30.0),
+                "volume_per_day": features.get("volume_per_day", 0.0),
 
                 # Time features
+                "days_to_resolution": features.get("days_to_resolution", 30.0),
+                "market_age_days": features.get("market_age_days", 30.0),
                 "hour_of_day": features.get("hour_of_day", 12),
                 "day_of_week": features.get("day_of_week", 2),
                 "is_weekend": features.get("is_weekend", 0),
 
-                # Market features
-                "market_age_days": features.get("market_age_days", 30.0),
+                # Market structure
                 "num_outcomes": features.get("num_outcomes", 2),
+                "has_description": features.get("has_description", 0),
                 "question_length": features.get("question_length", 50),
 
-                # Volume derived
-                "volume_per_day": features.get("volume_per_day", 0.0),
-
-                # Placeholder features (not available for historical data)
-                # Set to neutral values
-                "spread": 0.02,  # Assume 2% spread
+                # Simulated orderbook features (neutral values)
+                "spread": 0.02,
                 "bid_depth": features.get("liquidity", 0.0) / 2,
                 "ask_depth": features.get("liquidity", 0.0) / 2,
-                "momentum_1h": 0.0,
-                "momentum_24h": 0.0,
-                "volatility_24h": 0.05,  # Assume 5% volatility
+                "best_bid_size": features.get("liquidity", 0.0) / 4,
+                "best_ask_size": features.get("liquidity", 0.0) / 4,
 
-                # Store original features for reference
-                "_historical_features": features,
+                # Momentum (neutral for historical)
+                "momentum_1h": 0.0,
+                "momentum_4h": 0.0,
+                "momentum_24h": 0.0,
+                "momentum_7d": 0.0,
+
+                # Volatility (moderate assumption)
+                "volatility_1h": 0.02,
+                "volatility_24h": 0.05,
+                "volatility_7d": 0.1,
+
+                # Category
+                "category": ex["category"],
             }
 
-            moe_examples.append(moe_ex)
+            try:
+                cursor.execute("""
+                    INSERT INTO training_examples
+                    (token_id, market_id, category, features,
+                     price_change_1h, price_change_4h, price_change_24h, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    ex["token_id"],
+                    ex["market_id"],
+                    ex["category"],
+                    json.dumps(moe_features),
+                    price_change,  # Use same value for all horizons
+                    price_change,
+                    price_change,
+                    ex.get("resolution_date") or datetime.now(timezone.utc).isoformat(),
+                ))
+                inserted += 1
+            except Exception as e:
+                logger.warning(f"Failed to insert example: {e}")
 
-        return moe_examples
+        conn.commit()
+        conn.close()
+
+        logger.info(f"Converted {inserted} examples to MoE format at {self.converted_db_path}")
 
     def train(self) -> dict[str, Any]:
         """Run full MoE training pipeline on historical data.
@@ -193,30 +267,40 @@ class BatchTrainer:
                 categories[cat] = categories.get(cat, 0) + 1
             results["data_stats"]["categories"] = categories
 
-            # Prepare data for MoE trainer
-            moe_train = self._prepare_moe_format(train_data)
-            moe_test = self._prepare_moe_format(test_data)
+            logger.info(f"Category distribution: {categories}")
 
-            # Initialize expert pool and trainer
+            # Convert training data to MoE format database
+            logger.info("Converting historical data to MoE format...")
+            self._convert_to_moe_db(train_data)
+
+            # Initialize expert pool and trainer with converted database
             logger.info("Initializing MoE expert pool...")
             self.expert_pool = get_expert_pool()
-            self.moe_trainer = get_moe_trainer()
 
-            # Override trainer's training data
-            self.moe_trainer.training_data = moe_train
+            # Create trainer pointing to converted database
+            self.moe_trainer = MoETrainer(
+                pool=self.expert_pool,
+                db_path=str(self.converted_db_path),
+            )
 
             # Train MoE system
-            logger.info(f"Training MoE on {len(moe_train)} examples...")
+            logger.info(f"Training MoE on {len(train_data)} examples...")
             train_result = self.moe_trainer.train()
 
-            results["training_result"] = {
-                "experts_trained": train_result.get("experts_trained", 0),
-                "training_time_seconds": train_result.get("training_time", 0),
-            }
+            if train_result:
+                results["training_result"] = {
+                    "experts_trained": train_result.get("experts_trained", 0),
+                    "training_time_seconds": train_result.get("training_time", 0),
+                    "active_experts": train_result.get("active", 0),
+                    "suspended_experts": train_result.get("suspended", 0),
+                    "deprecated_experts": train_result.get("deprecated", 0),
+                }
+            else:
+                results["training_result"] = {"error": "Training returned None"}
 
             # Validate on test set
-            logger.info(f"Validating on {len(moe_test)} test examples...")
-            validation_results = self.validate(moe_test)
+            logger.info(f"Validating on {len(test_data)} test examples...")
+            validation_results = self.validate(test_data)
             results["validation"] = validation_results
 
             # Get expert metrics
@@ -230,7 +314,8 @@ class BatchTrainer:
 
             logger.info("=" * 60)
             logger.info("BATCH TRAINING COMPLETE")
-            logger.info(f"  Experts trained: {results['training_result']['experts_trained']}")
+            logger.info(f"  Experts trained: {results['training_result'].get('experts_trained', 0)}")
+            logger.info(f"  Active experts: {results['training_result'].get('active_experts', 0)}")
             logger.info(f"  Test accuracy: {validation_results.get('accuracy', 0):.2%}")
             logger.info(f"  Test profit: {validation_results.get('simulated_profit_pct', 0):.2%}")
             logger.info("=" * 60)
@@ -272,8 +357,24 @@ class BatchTrainer:
 
         for example in test_data:
             try:
+                # Build features dict for prediction
+                features = example["features"]
+                pred_features = {
+                    "price": features.get("outcome_price", 0.5),
+                    "volume_24h": features.get("total_volume", 0.0),
+                    "liquidity": features.get("liquidity", 0.0),
+                    "days_to_resolution": features.get("days_to_resolution", 30.0),
+                    "market_age_days": features.get("market_age_days", 30.0),
+                    "hour_of_day": features.get("hour_of_day", 12),
+                    "day_of_week": features.get("day_of_week", 2),
+                    "is_weekend": features.get("is_weekend", 0),
+                    "num_outcomes": features.get("num_outcomes", 2),
+                    "spread": 0.02,
+                    "category": example.get("category", "other"),
+                }
+
                 # Get prediction from expert pool
-                prediction = self.expert_pool.predict(example)
+                prediction = self.expert_pool.predict(pred_features)
 
                 if prediction is None:
                     continue
@@ -281,15 +382,14 @@ class BatchTrainer:
                 metrics["predictions"] += 1
 
                 # Check if prediction was correct
-                actual = example.get("target", 0)
+                actual = example.get("label", 0)
                 predicted = 1 if prediction > 0.5 else 0
 
                 if predicted == actual:
                     metrics["correct"] += 1
 
                 # Simulate profit/loss
-                # If we predicted profitable (>0.5) and it was profitable (actual=1)
-                # we made money. Otherwise we lost.
+                profit = 0.0
                 if prediction > 0.5:  # We would have traded
                     if actual == 1:
                         profit = 0.05  # 5% profit on correct trade
@@ -305,12 +405,14 @@ class BatchTrainer:
                         "n": 0,
                         "correct": 0,
                         "profit": 0.0,
+                        "trades": 0,
                     }
                 category_stats[cat]["n"] += 1
                 if predicted == actual:
                     category_stats[cat]["correct"] += 1
                 if prediction > 0.5:
-                    category_stats[cat]["profit"] += profit if actual == 1 else -0.05
+                    category_stats[cat]["trades"] += 1
+                    category_stats[cat]["profit"] += profit
 
             except Exception as e:
                 logger.debug(f"Validation error for example: {e}")
@@ -319,9 +421,8 @@ class BatchTrainer:
         # Calculate summary metrics
         if metrics["predictions"] > 0:
             metrics["accuracy"] = metrics["correct"] / metrics["predictions"]
-            metrics["win_rate"] = metrics["profitable_predictions"] / max(
-                1, sum(1 for ex in test_data if self.expert_pool.predict(ex) or 0 > 0.5)
-            )
+            trades = sum(1 for _ in test_data if True)  # placeholder
+            metrics["win_rate"] = metrics["profitable_predictions"] / max(1, metrics["predictions"])
         else:
             metrics["accuracy"] = 0.0
             metrics["win_rate"] = 0.0
@@ -333,6 +434,7 @@ class BatchTrainer:
             metrics["category_metrics"][cat] = {
                 "n_examples": stats["n"],
                 "accuracy": stats["correct"] / max(1, stats["n"]),
+                "trades": stats["trades"],
                 "profit_pct": stats["profit"],
             }
 
@@ -354,6 +456,8 @@ class BatchTrainer:
                 m = expert.metrics
                 expert_metrics[expert_id] = {
                     "state": expert.state.value,
+                    "domain": expert.domain,
+                    "expert_type": expert.expert_type,
                     "simulated_profit_pct": m.simulated_profit_pct,
                     "simulated_win_rate": m.simulated_win_rate,
                     "simulated_num_trades": m.simulated_num_trades,
@@ -366,6 +470,8 @@ class BatchTrainer:
             else:
                 expert_metrics[expert_id] = {
                     "state": expert.state.value,
+                    "domain": expert.domain,
+                    "expert_type": expert.expert_type,
                     "error": "No metrics available",
                 }
 
