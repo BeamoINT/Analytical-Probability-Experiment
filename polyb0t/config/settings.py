@@ -566,15 +566,15 @@ class Settings(BaseSettings):
     # Gamma: 4000/10s general, 300/10s /markets endpoint
     # CLOB: 1500/10s market data, 200/10s trades
     gamma_rate_limit_per_sec: float = Field(
-        default=25.0,
-        description="Gamma API rate limit requests/second (300/10s = 30, use 25 for safety)"
+        default=27.0,
+        description="Gamma API rate limit requests/second (300/10s = 30, use 27 for safety)"
     )
     clob_rate_limit_per_sec: float = Field(
-        default=100.0,
-        description="CLOB API rate limit requests/second (1500/10s = 150, use 100 for safety)"
+        default=140.0,
+        description="CLOB API rate limit requests/second (1500/10s = 150, use 140 for safety)"
     )
     clob_price_history_rate_limit: float = Field(
-        default=100.0,
+        default=140.0,
         description="CLOB price history endpoint rate limit req/sec"
     )
 
