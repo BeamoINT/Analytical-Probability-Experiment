@@ -222,8 +222,12 @@ def get_gamma_limiter() -> RateLimiter:
     """Get rate limiter for Gamma API."""
     global _gamma_limiter
     if _gamma_limiter is None:
-        # Gamma: ~1000 requests/hour = ~17/sec, use 15 for safety
-        _gamma_limiter = RateLimiter(calls_per_second=15.0, name="gamma")
+        # Gamma API limits (per Polymarket docs):
+        # - General: 400 req/s (4,000/10s)
+        # - /markets endpoint: 30 req/s (300/10s)
+        # - /markets & /events listing: 90 req/s (900/10s)
+        # Using 25 req/s for safety margin on /markets endpoint
+        _gamma_limiter = RateLimiter(calls_per_second=25.0, name="gamma")
     return _gamma_limiter
 
 
@@ -231,6 +235,9 @@ def get_clob_limiter() -> RateLimiter:
     """Get rate limiter for CLOB API."""
     global _clob_limiter
     if _clob_limiter is None:
-        # CLOB: ~600 requests/hour = ~10/sec, use 8 for safety
-        _clob_limiter = RateLimiter(calls_per_second=8.0, name="clob")
+        # CLOB API limits (per Polymarket docs):
+        # - /book & /price & /midprice: 150 req/s (1,500/10s)
+        # - /books, /prices, /midprices (batch): 50 req/s (500/10s)
+        # Using 120 req/s for safety margin
+        _clob_limiter = RateLimiter(calls_per_second=120.0, name="clob")
     return _clob_limiter

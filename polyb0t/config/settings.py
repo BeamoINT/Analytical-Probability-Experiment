@@ -295,21 +295,24 @@ class Settings(BaseSettings):
     )
 
     # Live scanning / rate-limit controls (MAXIMIZED for data collection)
+    # Based on Polymarket API limits: Gamma /markets=30req/s, CLOB /book=150req/s
     live_scan_markets_limit: int = Field(
-        default=1000,
+        default=2000,
         description="How many markets to fetch from Gamma in live mode (maximized).",
     )
     live_enrich_markets_limit: int = Field(
-        default=250,
-        description="How many of the scanned markets to enrich with outcomes/token_ids (maximized).",
+        default=800,
+        description="How many of the scanned markets to enrich with outcomes/token_ids. "
+                    "Gamma allows 30 req/s = 300/10s cycle, using 800 with rate limiting.",
     )
     live_clob_markets_limit: int = Field(
-        default=250,
-        description="How many markets to fetch orderbooks/trades for per cycle (maximized).",
+        default=500,
+        description="How many markets to fetch orderbooks for per cycle. "
+                    "CLOB /book allows 150 req/s. Each market has ~2 outcomes = ~1000 requests.",
     )
     live_clob_concurrency: int = Field(
-        default=12,
-        description="Max concurrent CLOB HTTP requests per cycle (increased, within rate limits).",
+        default=30,
+        description="Max concurrent CLOB HTTP requests per cycle (CLOB allows 150 req/s).",
     )
     live_fetch_trades: bool = Field(
         default=False,
