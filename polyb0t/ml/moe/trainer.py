@@ -581,27 +581,18 @@ class MoETrainer:
                     except (json.JSONDecodeError, TypeError):
                         features = {}
 
-                    # Convert historical example to training format
-                    # Use label as a proxy for price direction (winners went up)
-                    label = row["label"]
-                    # Simulate price change: winners = +10%, losers = -10%
-                    # This gives the model a signal about outcome correlation
-                    simulated_price_change = 0.10 if label == 1 else -0.10
-
-                    example = {
-                        "token_id": row["token_id"],
-                        "market_id": row["market_id"],
-                        "category": row["category"],
-                        "features": features,
-                        "price_change_24h": simulated_price_change,
-                        "price_change_1h": simulated_price_change * 0.3,
-                        "price_change_4h": simulated_price_change * 0.6,
-                        "created_at": None,  # Unknown for historical
-                        "_source": "historical",
-                    }
-
-                    example = self._enrich_with_price_features(example)
-                    data.append(example)
+                    # IMPORTANT: Historical data does NOT have real price change labels
+                    # We only know the final resolution outcome, not intermediate price movements
+                    # Using fabricated price changes based on labels causes DATA LEAKAGE
+                    # and results in false 100% accuracy (model predicts label from itself)
+                    #
+                    # Instead, we SKIP historical examples that don't have real price data.
+                    # The continuous collector provides examples with real price change labels.
+                    #
+                    # Historical data is primarily useful for:
+                    # 1. Understanding which market types resolve to Yes vs No
+                    # 2. NOT for predicting short-term price movements
+                    continue  # Skip historical data - use only continuous data with real labels
 
             conn.close()
             return data

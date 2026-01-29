@@ -432,9 +432,22 @@ class Expert:
         # Add interaction features
         X_enhanced = self._add_interaction_features(X)
 
-        # Scale features
+        # Time-based split: train (80%), test (20%)
+        # Test set is used ONLY for final profitability evaluation
+        n_samples = len(X_enhanced)
+        train_end = int(n_samples * 0.8)
+
+        X_train = X_enhanced[:train_end]
+        y_train = y_binary[:train_end]
+        X_test = X_enhanced[train_end:]
+        y_test = y_binary[train_end:]
+        y_reg_test = y_reg[train_end:]
+        w_train = sample_weights[:train_end] if sample_weights is not None else None
+
+        # Scale features (fit on train only to prevent leakage)
         scaler = StandardScaler()
-        X_scaled = scaler.fit_transform(X_enhanced)
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_test_scaled = scaler.transform(X_test)
 
         # Train multiple classifiers and select best
         classifiers = []
@@ -457,17 +470,17 @@ class Expert:
             )),
         ]
 
-        # Cross-validate and select top 3 classifiers
+        # Cross-validate on TRAINING DATA ONLY and select top 3 classifiers
         cv_scores = []
         for name, clf in classifier_configs:
             try:
-                if sample_weights is not None and hasattr(clf, 'fit'):
-                    clf.fit(X_scaled, y_binary, sample_weight=sample_weights)
+                if w_train is not None and hasattr(clf, 'fit'):
+                    clf.fit(X_train_scaled, y_train, sample_weight=w_train)
                 else:
-                    clf.fit(X_scaled, y_binary)
+                    clf.fit(X_train_scaled, y_train)
 
-                # Get CV score
-                scores = cross_val_score(clf, X_scaled, y_binary, cv=3, scoring='roc_auc')
+                # Get CV score on training data only
+                scores = cross_val_score(clf, X_train_scaled, y_train, cv=3, scoring='roc_auc')
                 cv_scores.append((name, clf, np.mean(scores)))
             except Exception as e:
                 logger.debug(f"Expert {self.expert_id}: Failed to train {name}: {e}")
@@ -484,8 +497,9 @@ class Expert:
         # Create ensemble
         self._model = _ExpertEnsemble(classifiers, scaler, is_deep=False)
 
-        # Evaluate with profitability simulation
-        self.metrics = self._evaluate_profitability(X_enhanced, y_binary, y_reg)
+        # IMPORTANT: Evaluate profitability on HELD-OUT TEST SET only
+        # This prevents inflated metrics from evaluating on training data
+        self.metrics = self._evaluate_profitability(X_test, y_test, y_reg_test)
         self.metrics.n_training_examples = len(X)
         self.metrics.n_features_used = X_enhanced.shape[1]
         self.metrics.last_trained = datetime.utcnow()
@@ -577,18 +591,25 @@ class Expert:
         )
 
         # Time-based split for validation (prevent look-ahead bias)
+        # Use 3-way split: train (60%), validation (20%), test (20%)
+        # - Train: for model fitting
+        # - Validation: for early stopping and hyperparameter selection
+        # - Test: for final profitability evaluation (NEVER seen during training)
         n_samples = len(X_enhanced)
-        val_fraction = 0.2
-        train_end = int(n_samples * (1 - val_fraction))
+        train_end = int(n_samples * 0.6)
+        val_end = int(n_samples * 0.8)
 
         X_train = X_enhanced[:train_end]
         y_train = y_binary[:train_end]
-        X_val = X_enhanced[train_end:]
-        y_val = y_binary[train_end:]
+        X_val = X_enhanced[train_end:val_end]
+        y_val = y_binary[train_end:val_end]
+        X_test = X_enhanced[val_end:]
+        y_test = y_binary[val_end:]
+        y_reg_test = y_reg[val_end:]  # For profitability simulation
         w_train = sample_weights[:train_end] if sample_weights is not None else None
 
         try:
-            # Train ensemble
+            # Train ensemble on train set, using internal validation for early stopping
             ensemble_metrics = deep_ensemble.train(
                 X_train, y_train, w_train, val_fraction=0.15
             )
@@ -603,7 +624,7 @@ class Expert:
                 early_stopping=True, validation_fraction=0.1,
                 random_state=42
             )
-            fallback_clf.fit(X_scaled, y_binary)
+            fallback_clf.fit(X_scaled[:train_end], y_binary[:train_end])
 
             # Create hybrid ensemble with deep learning + sklearn fallback
             self._model = _ExpertEnsemble(
@@ -630,8 +651,9 @@ class Expert:
             )
             return self._train_sklearn(X, y_binary, y_reg, sample_weights)
 
-        # Evaluate with profitability simulation
-        self.metrics = self._evaluate_profitability(X_enhanced, y_binary, y_reg)
+        # IMPORTANT: Evaluate profitability on HELD-OUT TEST SET only
+        # This prevents inflated metrics from evaluating on data seen during training
+        self.metrics = self._evaluate_profitability(X_test, y_test, y_reg_test)
         self.metrics.n_training_examples = len(X)
         self.metrics.n_features_used = X_enhanced.shape[1]
         self.metrics.last_trained = datetime.utcnow()
