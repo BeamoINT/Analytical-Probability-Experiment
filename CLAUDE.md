@@ -21,6 +21,7 @@ polyb0t db reset                  # Reset (deletes all data)
 # Testing
 pytest tests/ -v                  # Run all tests
 pytest tests/test_strategy.py -v  # Single file
+pytest tests/test_strategy.py::test_function -v  # Single test
 pytest --cov=polyb0t              # With coverage
 
 # Code Quality
@@ -49,7 +50,7 @@ polyb0t diagnose-filters          # Analyze why markets are being filtered out
 ## Architecture
 
 ```
-Scheduler (Main Loop)
+TradingScheduler (Main Loop - polyb0t/services/scheduler.py)
     │
     ├── GammaClient → fetches markets from Polymarket API
     ├── MarketFilter → filters by liquidity, spread, resolution date
@@ -64,13 +65,29 @@ Scheduler (Main Loop)
 ### Key Directories
 
 - `polyb0t/api/` - FastAPI REST endpoints & WebSocket server
-- `polyb0t/cli/` - Command-line interface
+- `polyb0t/cli/` - Command-line interface (Click-based)
 - `polyb0t/config/` - Pydantic settings with `POLYBOT_` env prefix
-- `polyb0t/data/` - API clients (Gamma, CLOB, WebSocket), models, storage
+- `polyb0t/data/` - API clients (Gamma, CLOB, WebSocket), Pydantic models, SQLAlchemy storage
 - `polyb0t/execution/` - Portfolio, orders, paper simulator, live executor, intents
 - `polyb0t/ml/` - AI orchestrator, trainer, MoE experts, continuous learning
 - `polyb0t/models/` - Strategy, features, filters, risk management
-- `polyb0t/services/` - Scheduler, reporter, Discord notifier, health checks
+- `polyb0t/services/` - Scheduler, reporter, health checks, arbitrage scanner
+
+### ML/MoE Architecture
+
+The `polyb0t/ml/` directory contains the machine learning system:
+
+- **AIOrchestrator** (`ai_orchestrator.py`) - Central coordinator for data collection, training, and prediction
+- **MoE System** (`moe/`) - Mixture of Experts ensemble:
+  - `expert_pool.py` - Manages collection of trained experts
+  - `trainer.py` - Trains experts and gating network (optimizes for profitability, not accuracy)
+  - `expert.py` - Individual expert models (sklearn classifiers or neural networks)
+  - `deep_ensemble.py` - Deep learning backends (PyTorch, XGBoost, LightGBM)
+  - `auto_discovery.py` - Automatically discovers new expert opportunities
+- **Data Collection** (`continuous_collector.py`, `historical_fetcher.py`) - Collects training data with automatic backfill
+- **Category Tracker** (`category_tracker.py`) - Learns which market types to avoid
+
+Training runs every 6 hours and hot-swaps models without downtime.
 
 ### Data Flow
 
@@ -80,7 +97,7 @@ Scheduler (Main Loop)
 4. **Execution**:
    - Paper: PaperTradingSimulator with slippage/fees
    - Live: Creates TradeIntent → user approves via CLI → LiveExecutor submits to CLOB
-5. **Learning**: ContinuousDataCollector → AITrainer → MoE ensemble updates
+5. **Learning**: ContinuousDataCollector → MoETrainer → ExpertPool updates
 
 ## Configuration
 
@@ -104,6 +121,19 @@ See `.env.example` for full reference.
 - **Human-in-the-loop**: Live mode requires explicit intent approval via CLI
 - **Risk by default**: Hard limits on positions, exposure, drawdown with kill switches
 - **AI primary, baseline fallback**: MoE ensemble predictions with explainable baseline strategy
+- **Singleton pattern**: Core components use `get_*()` factory functions with caching (e.g., `get_settings()`, `get_ai_orchestrator()`, `get_expert_pool()`)
+
+## Testing
+
+Tests use pytest with `asyncio_mode = "auto"`. Key fixtures in `tests/conftest.py`:
+- `db_session` - In-memory SQLite session
+- `sample_market`, `sample_orderbook`, `sample_trades` - Test data fixtures
+- `_set_required_env` (autouse) - Sets required env vars and clears settings cache
+
+Run a single test function:
+```bash
+pytest tests/test_strategy.py::test_generate_signal_buy -v
+```
 
 ## Paper vs Live Mode
 
@@ -122,3 +152,108 @@ SQLite (dev) or PostgreSQL (prod). Key tables:
 - `simulated_orders/fills` - Paper trading records
 - `trade_intents` - Live mode approval queue
 - `ai_training_examples` - ML training data
+
+ML training data is stored separately in `data/ai_training.db` and `data/historical_prices.db`.
+
+## GCP Production VM
+
+The bot runs on a Google Cloud VM as a systemd service.
+
+### Quick Reference
+
+| Item | Value |
+|------|-------|
+| **SSH Command** | `ssh -i /Users/HP/.ssh/gcp_vm beamo_beamosupport_com@34.2.57.194` |
+| **Host IP** | `34.2.57.194` |
+| **Username** | `beamo_beamosupport_com` |
+| **SSH Key** | `/Users/HP/.ssh/gcp_vm` |
+| **Project Path** | `~/Analytical-Probability-Experiment` |
+| **Service Name** | `polybot.service` |
+
+### VM Specs
+
+| Resource | Value |
+|----------|-------|
+| **OS** | Ubuntu 24.04.3 LTS |
+| **CPU** | AMD EPYC 7B12 (2 cores) |
+| **Memory** | 7.8 GB |
+| **Disk** | 145 GB total |
+| **Python** | 3.12.3 |
+| **Virtualenv** | `~/.cache/pypoetry/virtualenvs/polyb0t-adUcXa5t-py3.12` |
+
+### Systemd Service Management
+
+**IMPORTANT**: Always use `systemctl` commands, NOT manual process management (pkill/nohup).
+
+```bash
+# Restart (use after code changes)
+sudo systemctl restart polybot.service
+
+# Check status
+sudo systemctl status polybot.service
+
+# Stop/Start
+sudo systemctl stop polybot.service
+sudo systemctl start polybot.service
+
+# View logs
+sudo journalctl -u polybot.service -f              # Follow live
+sudo journalctl -u polybot.service --no-pager -n 50  # Last 50 lines
+```
+
+The service runs `scripts/start_all.sh` which starts both the trading bot (`polyb0t run --live`) and API server (`polyb0t api --host 0.0.0.0 --port 8000`).
+
+### Deployment Workflow
+
+```bash
+# 1. Local: commit and push
+git add . && git commit -m "Your changes" && git push
+
+# 2. Deploy to VM (one-liner)
+ssh -i /Users/HP/.ssh/gcp_vm beamo_beamosupport_com@34.2.57.194 \
+  "cd ~/Analytical-Probability-Experiment && git pull && sudo systemctl restart polybot.service"
+
+# 3. Verify
+ssh -i /Users/HP/.ssh/gcp_vm beamo_beamosupport_com@34.2.57.194 \
+  "sudo systemctl status polybot.service"
+```
+
+### Common SSH Commands
+
+```bash
+# SSH into VM
+ssh -i /Users/HP/.ssh/gcp_vm beamo_beamosupport_com@34.2.57.194
+
+# View application logs
+ssh -i /Users/HP/.ssh/gcp_vm beamo_beamosupport_com@34.2.57.194 \
+  "tail -100 ~/Analytical-Probability-Experiment/live_run.log"
+
+# Check for errors
+ssh -i /Users/HP/.ssh/gcp_vm beamo_beamosupport_com@34.2.57.194 \
+  "grep -i 'error\|exception\|traceback' ~/Analytical-Probability-Experiment/live_run.log | tail -30"
+
+# Run polyb0t CLI command
+ssh -i /Users/HP/.ssh/gcp_vm beamo_beamosupport_com@34.2.57.194 \
+  "cd ~/Analytical-Probability-Experiment && source ~/.cache/pypoetry/virtualenvs/polyb0t-adUcXa5t-py3.12/bin/activate && polyb0t status"
+
+# Check disk/memory
+ssh -i /Users/HP/.ssh/gcp_vm beamo_beamosupport_com@34.2.57.194 "df -h && free -h"
+```
+
+### Key Paths on VM
+
+- **Project**: `~/Analytical-Probability-Experiment`
+- **Config**: `~/Analytical-Probability-Experiment/.env`
+- **Main DB**: `~/Analytical-Probability-Experiment/polybot.db` (~12GB)
+- **Logs**: `~/Analytical-Probability-Experiment/live_run.log`
+- **AI Models**: `~/Analytical-Probability-Experiment/data/ai_models/`
+- **MoE Models**: `~/Analytical-Probability-Experiment/data/moe_models/`
+- **Service File**: `/etc/systemd/system/polybot.service`
+
+### API Access
+
+The API runs on port 8000: `http://34.2.57.194:8000`
+
+Endpoints: `/health`, `/status`, `/markets`, `/positions`, `/intents`, `/report`, `/metrics`, WebSocket `/ws`
+
+See `docs/GCP_VM_REFERENCE.md` for comprehensive VM documentation including database schemas, troubleshooting, and detailed configuration.
