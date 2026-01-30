@@ -219,6 +219,34 @@ class Settings(BaseSettings):
         description="NewsAPI.org API key for fetching news headlines"
     )
 
+    # === NEWS/SENTIMENT FEATURE CONFIGURATION ===
+    enable_news_features: bool = Field(
+        default=True,
+        description="Enable news sentiment features in ML training"
+    )
+    news_feature_cache_minutes: int = Field(
+        default=30,
+        description="Cache duration for news features per market (minutes)"
+    )
+
+    # === INSIDER TRACKING CONFIGURATION ===
+    enable_insider_tracking: bool = Field(
+        default=True,
+        description="Enable insider transaction tracking for ML training"
+    )
+    insider_tracking_db: str = Field(
+        default="data/insider_tracking.db",
+        description="SQLite database for insider tracking data"
+    )
+    smart_wallet_min_trades: int = Field(
+        default=10,
+        description="Minimum trades before wallet gets reputation score"
+    )
+    smart_wallet_threshold: float = Field(
+        default=0.65,
+        description="Win rate threshold to be considered smart money (0.65 = 65%)"
+    )
+
     # Database
     db_url: str = Field(default="sqlite:///./polybot.db", description="Database connection URL")
 

@@ -23,7 +23,7 @@ import threading
 logger = logging.getLogger(__name__)
 
 # Schema version - increment when adding new features
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Maximum storage size (120GB)
 MAX_STORAGE_BYTES = 120 * 1024 * 1024 * 1024
@@ -146,7 +146,38 @@ class MarketSnapshot:
     price_vs_volume_ratio: float = 0.0  # Price relative to volume
     liquidity_per_dollar_volume: float = 0.0
     spread_adjusted_edge: float = 0.0
-    
+
+    # === MICROSTRUCTURE FEATURES (V3) ===
+    vpin: float = 0.0  # Volume-sync probability of informed trading
+    order_flow_toxicity: float = 0.0  # Kyle's lambda normalized
+    trade_impact_10usd: float = 0.0  # Price impact for $10 trade
+    trade_impact_100usd: float = 0.0  # Price impact for $100 trade
+    amihud_illiquidity: float = 0.0  # Amihud illiquidity ratio
+
+    # === NEWS/SENTIMENT FEATURES (V3) ===
+    news_article_count: int = 0  # Number of relevant articles found
+    news_recency_hours: float = 999.0  # Hours since most recent article
+    news_sentiment_score: float = 0.0  # Aggregate sentiment (-1 to +1)
+    news_sentiment_confidence: float = 0.0  # Confidence in sentiment
+    keyword_positive_count: int = 0  # Headlines with positive keywords
+    keyword_negative_count: int = 0  # Headlines with negative keywords
+    headline_confirmation: float = 0.0  # Headline-based outcome signal (-1, 0, +1)
+    headline_conf_confidence: float = 0.0  # Confidence in headline confirmation
+    intelligent_confirmation: float = 0.0  # GPT-based outcome signal (-1, 0, +1)
+    intelligent_conf_confidence: float = 0.0  # Confidence in intelligent confirmation
+
+    # === INSIDER TRACKING FEATURES (V3) ===
+    smart_wallet_buy_count_1h: int = 0  # Smart wallet buys in last hour
+    smart_wallet_sell_count_1h: int = 0  # Smart wallet sells in last hour
+    smart_wallet_net_direction_1h: float = 0.0  # Net direction (-1 to +1)
+    smart_wallet_volume_1h: float = 0.0  # Total smart wallet volume (USD)
+    avg_buyer_reputation: float = 0.5  # Average reputation of buyers
+    avg_seller_reputation: float = 0.5  # Average reputation of sellers
+    smart_wallet_buy_count_24h: int = 0  # Smart wallet buys in last 24h
+    smart_wallet_sell_count_24h: int = 0  # Smart wallet sells in last 24h
+    smart_wallet_net_direction_24h: float = 0.0  # Net direction 24h
+    unusual_activity_score: float = 0.0  # Unusual activity detection (0 to 1)
+
     def to_dict(self) -> dict:
         d = asdict(self)
         d['timestamp'] = self.timestamp.isoformat()
@@ -188,6 +219,21 @@ class MarketSnapshot:
             # Derived
             "price_vs_volume_ratio", "liquidity_per_dollar_volume",
             "spread_adjusted_edge",
+            # Microstructure (V3)
+            "vpin", "order_flow_toxicity", "trade_impact_10usd",
+            "trade_impact_100usd", "amihud_illiquidity",
+            # News/Sentiment (V3)
+            "news_article_count", "news_recency_hours", "news_sentiment_score",
+            "news_sentiment_confidence", "keyword_positive_count",
+            "keyword_negative_count", "headline_confirmation",
+            "headline_conf_confidence", "intelligent_confirmation",
+            "intelligent_conf_confidence",
+            # Insider Tracking (V3)
+            "smart_wallet_buy_count_1h", "smart_wallet_sell_count_1h",
+            "smart_wallet_net_direction_1h", "smart_wallet_volume_1h",
+            "avg_buyer_reputation", "avg_seller_reputation",
+            "smart_wallet_buy_count_24h", "smart_wallet_sell_count_24h",
+            "smart_wallet_net_direction_24h", "unusual_activity_score",
         ]
 
 

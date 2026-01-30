@@ -743,6 +743,40 @@ class MoETrainer:
             "historical_sma_24h",
             "historical_price_vs_sma_24h",
             "historical_data_points",
+
+            # === V3: MICROSTRUCTURE FEATURES ===
+            # VPIN and order flow toxicity for detecting informed trading
+            "vpin",
+            "order_flow_toxicity",
+            "trade_impact_10usd",
+            "trade_impact_100usd",
+            "amihud_illiquidity",
+
+            # === V3: NEWS/SENTIMENT FEATURES ===
+            # News article counts and sentiment scores
+            "news_article_count",
+            "news_recency_hours",
+            "news_sentiment_score",
+            "news_sentiment_confidence",
+            "keyword_positive_count",
+            "keyword_negative_count",
+            "headline_confirmation",
+            "headline_conf_confidence",
+            "intelligent_confirmation",
+            "intelligent_conf_confidence",
+
+            # === V3: INSIDER TRACKING FEATURES ===
+            # Smart wallet activity and reputation
+            "smart_wallet_buy_count_1h",
+            "smart_wallet_sell_count_1h",
+            "smart_wallet_net_direction_1h",
+            "smart_wallet_volume_1h",
+            "avg_buyer_reputation",
+            "avg_seller_reputation",
+            "smart_wallet_buy_count_24h",
+            "smart_wallet_sell_count_24h",
+            "smart_wallet_net_direction_24h",
+            "unusual_activity_score",
         ]
     
     def _calculate_sample_weights(self, timestamps: List[str]) -> np.ndarray:

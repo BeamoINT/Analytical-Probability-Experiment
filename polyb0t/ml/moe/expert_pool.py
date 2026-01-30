@@ -76,7 +76,20 @@ HORIZON_EXPERTS = [
     ("horizon_24h", "horizon", "24h"),  # Predict 24-hour price changes
 ]
 
-# All default experts (27 total)
+# News/Sentiment Experts (3) - markets with news activity
+NEWS_EXPERTS = [
+    ("news_driven", "news", "news_driven"),      # Markets with recent news articles
+    ("sentiment_positive", "news", "positive"),   # Positive sentiment signals
+    ("sentiment_negative", "news", "negative"),   # Negative sentiment signals
+]
+
+# Smart Money Experts (2) - follow smart wallet activity
+SMART_MONEY_EXPERTS = [
+    ("smart_accumulation", "smart_money", "accumulation"),  # Smart wallets buying
+    ("smart_distribution", "smart_money", "distribution"),  # Smart wallets selling
+]
+
+# All default experts (32 total)
 ALL_DEFAULT_EXPERTS = (
     CATEGORY_EXPERTS +
     RISK_EXPERTS +
@@ -84,7 +97,9 @@ ALL_DEFAULT_EXPERTS = (
     VOLUME_EXPERTS +
     VOLATILITY_EXPERTS +
     TIMING_EXPERTS +
-    HORIZON_EXPERTS
+    HORIZON_EXPERTS +
+    NEWS_EXPERTS +
+    SMART_MONEY_EXPERTS
 )
 
 
@@ -536,7 +551,36 @@ class ExpertPool:
             elif expert.expert_type == "dynamic":
                 # Dynamic experts get all data for now
                 match = True
-            
+
+            elif expert.expert_type == "news":
+                # News-based experts filter by sentiment features
+                news_count = features.get("news_article_count", 0)
+                sentiment = features.get("news_sentiment_score", 0)
+
+                if expert.domain == "news_driven":
+                    # Any market with recent news activity
+                    match = news_count > 0
+                elif expert.domain == "positive":
+                    # Markets with positive sentiment
+                    match = sentiment > 0.3
+                elif expert.domain == "negative":
+                    # Markets with negative sentiment
+                    match = sentiment < -0.3
+
+            elif expert.expert_type == "smart_money":
+                # Smart money experts filter by insider tracking features
+                direction_24h = features.get("smart_wallet_net_direction_24h", 0)
+                buy_count = features.get("smart_wallet_buy_count_24h", 0)
+                sell_count = features.get("smart_wallet_sell_count_24h", 0)
+                total_activity = buy_count + sell_count
+
+                if expert.domain == "accumulation":
+                    # Smart wallets accumulating (net buying)
+                    match = total_activity > 0 and direction_24h > 0.3
+                elif expert.domain == "distribution":
+                    # Smart wallets distributing (net selling)
+                    match = total_activity > 0 and direction_24h < -0.3
+
             if match:
                 filtered.append(sample)
         

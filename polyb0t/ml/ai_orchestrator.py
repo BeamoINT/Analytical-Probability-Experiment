@@ -345,6 +345,37 @@ class AIOrchestrator:
         correlated_avg_price: float = 0,
         correlated_momentum: float = 0,
         avg_correlation_strength: float = 0,
+        # Microstructure features (V3)
+        vpin: float = 0,
+        order_flow_toxicity: float = 0,
+        trade_impact_10usd: float = 0,
+        trade_impact_100usd: float = 0,
+        amihud_illiquidity: float = 0,
+        # News/Sentiment features (V3)
+        news_article_count: int = 0,
+        news_recency_hours: float = 999.0,
+        news_sentiment_score: float = 0,
+        news_sentiment_confidence: float = 0,
+        keyword_positive_count: int = 0,
+        keyword_negative_count: int = 0,
+        headline_confirmation: float = 0,
+        headline_conf_confidence: float = 0,
+        intelligent_confirmation: float = 0,
+        intelligent_conf_confidence: float = 0,
+        # Insider tracking features (V3)
+        smart_wallet_buy_count_1h: int = 0,
+        smart_wallet_sell_count_1h: int = 0,
+        smart_wallet_net_direction_1h: float = 0,
+        smart_wallet_volume_1h: float = 0,
+        avg_buyer_reputation: float = 0.5,
+        avg_seller_reputation: float = 0.5,
+        smart_wallet_buy_count_24h: int = 0,
+        smart_wallet_sell_count_24h: int = 0,
+        smart_wallet_net_direction_24h: float = 0,
+        unusual_activity_score: float = 0,
+        # Optional: raw data for microstructure calculation
+        recent_trades: list = None,
+        orderbook: Any = None,
     ) -> bool:
         """Collect a comprehensive market snapshot for training data.
         
@@ -383,7 +414,70 @@ class AIOrchestrator:
                 avg_correlation_strength = corr_features.get("avg_correlation_strength", 0.0)
             except Exception:
                 pass  # Correlation tracker not available
-        
+
+        # Try to get microstructure features if not provided
+        if vpin == 0 and recent_trades:
+            try:
+                from polyb0t.ml.microstructure import (
+                    get_microstructure_analyzer,
+                    convert_trades_to_trade_data,
+                    convert_orderbook_to_snapshot
+                )
+                analyzer = get_microstructure_analyzer()
+                trade_data = convert_trades_to_trade_data(recent_trades)
+                ob_snapshot = convert_orderbook_to_snapshot(orderbook) if orderbook else None
+                micro_features = analyzer.get_microstructure_features(
+                    trade_data, ob_snapshot, token_id
+                )
+                vpin = micro_features.get("vpin", 0)
+                order_flow_toxicity = micro_features.get("order_flow_toxicity", 0)
+                trade_impact_10usd = micro_features.get("trade_impact_10usd", 0)
+                trade_impact_100usd = micro_features.get("trade_impact_100usd", 0)
+                amihud_illiquidity = micro_features.get("amihud_illiquidity", 0)
+            except Exception as e:
+                logger.debug(f"Microstructure features not available: {e}")
+
+        # Try to get sentiment features if not provided
+        if news_article_count == 0 and market_slug:
+            try:
+                from polyb0t.ml.sentiment_features import get_sentiment_feature_engine
+                sentiment_engine = get_sentiment_feature_engine()
+                if sentiment_engine.is_available():
+                    sentiment_features = sentiment_engine.get_features_dict(
+                        market_id, market_slug, category
+                    )
+                    news_article_count = int(sentiment_features.get("news_article_count", 0))
+                    news_recency_hours = sentiment_features.get("news_recency_hours", 999.0)
+                    news_sentiment_score = sentiment_features.get("news_sentiment_score", 0)
+                    news_sentiment_confidence = sentiment_features.get("news_sentiment_confidence", 0)
+                    keyword_positive_count = int(sentiment_features.get("keyword_positive_count", 0))
+                    keyword_negative_count = int(sentiment_features.get("keyword_negative_count", 0))
+                    headline_confirmation = sentiment_features.get("headline_confirmation", 0)
+                    headline_conf_confidence = sentiment_features.get("headline_conf_confidence", 0)
+                    intelligent_confirmation = sentiment_features.get("intelligent_confirmation", 0)
+                    intelligent_conf_confidence = sentiment_features.get("intelligent_conf_confidence", 0)
+            except Exception as e:
+                logger.debug(f"Sentiment features not available: {e}")
+
+        # Try to get insider tracking features if not provided
+        if smart_wallet_buy_count_1h == 0:
+            try:
+                from polyb0t.services.insider_tracker import get_insider_tracker
+                insider_tracker = get_insider_tracker()
+                insider_features = insider_tracker.get_features_dict(token_id)
+                smart_wallet_buy_count_1h = int(insider_features.get("smart_wallet_buy_count_1h", 0))
+                smart_wallet_sell_count_1h = int(insider_features.get("smart_wallet_sell_count_1h", 0))
+                smart_wallet_net_direction_1h = insider_features.get("smart_wallet_net_direction_1h", 0)
+                smart_wallet_volume_1h = insider_features.get("smart_wallet_volume_1h", 0)
+                avg_buyer_reputation = insider_features.get("avg_buyer_reputation", 0.5)
+                avg_seller_reputation = insider_features.get("avg_seller_reputation", 0.5)
+                smart_wallet_buy_count_24h = int(insider_features.get("smart_wallet_buy_count_24h", 0))
+                smart_wallet_sell_count_24h = int(insider_features.get("smart_wallet_sell_count_24h", 0))
+                smart_wallet_net_direction_24h = insider_features.get("smart_wallet_net_direction_24h", 0)
+                unusual_activity_score = insider_features.get("unusual_activity_score", 0)
+            except Exception as e:
+                logger.debug(f"Insider tracking features not available: {e}")
+
         # Compute spread if not provided
         if spread == 0 and price > 0:
             spread = ask - bid
@@ -478,8 +572,36 @@ class AIOrchestrator:
             correlated_avg_price=correlated_avg_price,
             correlated_momentum=correlated_momentum,
             avg_correlation_strength=avg_correlation_strength,
+            # Microstructure features (V3)
+            vpin=vpin,
+            order_flow_toxicity=order_flow_toxicity,
+            trade_impact_10usd=trade_impact_10usd,
+            trade_impact_100usd=trade_impact_100usd,
+            amihud_illiquidity=amihud_illiquidity,
+            # News/Sentiment features (V3)
+            news_article_count=news_article_count,
+            news_recency_hours=news_recency_hours,
+            news_sentiment_score=news_sentiment_score,
+            news_sentiment_confidence=news_sentiment_confidence,
+            keyword_positive_count=keyword_positive_count,
+            keyword_negative_count=keyword_negative_count,
+            headline_confirmation=headline_confirmation,
+            headline_conf_confidence=headline_conf_confidence,
+            intelligent_confirmation=intelligent_confirmation,
+            intelligent_conf_confidence=intelligent_conf_confidence,
+            # Insider tracking features (V3)
+            smart_wallet_buy_count_1h=smart_wallet_buy_count_1h,
+            smart_wallet_sell_count_1h=smart_wallet_sell_count_1h,
+            smart_wallet_net_direction_1h=smart_wallet_net_direction_1h,
+            smart_wallet_volume_1h=smart_wallet_volume_1h,
+            avg_buyer_reputation=avg_buyer_reputation,
+            avg_seller_reputation=avg_seller_reputation,
+            smart_wallet_buy_count_24h=smart_wallet_buy_count_24h,
+            smart_wallet_sell_count_24h=smart_wallet_sell_count_24h,
+            smart_wallet_net_direction_24h=smart_wallet_net_direction_24h,
+            unusual_activity_score=unusual_activity_score,
         )
-        
+
         self.collector.record_snapshot(snapshot)
         
         # Create training example if it's time
