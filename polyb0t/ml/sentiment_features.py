@@ -7,7 +7,7 @@ news articles relevant to each market.
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -130,7 +130,7 @@ class SentimentFeatureEngine:
         # Check cache first
         if market_id in self._cache:
             cached_time, cached_features = self._cache[market_id]
-            if datetime.utcnow() - cached_time < self._cache_ttl:
+            if datetime.now(timezone.utc) - cached_time < self._cache_ttl:
                 self._cache_hits += 1
                 return cached_features
 
@@ -149,7 +149,7 @@ class SentimentFeatureEngine:
             logger.warning(f"Error computing sentiment features for {market_id}: {e}")
 
         # Cache the result
-        self._cache[market_id] = (datetime.utcnow(), features)
+        self._cache[market_id] = (datetime.now(timezone.utc), features)
 
         return features
 
@@ -189,11 +189,16 @@ class SentimentFeatureEngine:
         article_times = []
         for article in articles:
             if hasattr(article, 'published_at') and article.published_at:
-                article_times.append(article.published_at)
+                pub_time = article.published_at
+                # Normalize to timezone-aware UTC
+                if pub_time.tzinfo is None:
+                    pub_time = pub_time.replace(tzinfo=timezone.utc)
+                article_times.append(pub_time)
 
         if article_times:
             most_recent = max(article_times)
-            hours_ago = (datetime.utcnow() - most_recent).total_seconds() / 3600
+            now_utc = datetime.now(timezone.utc)
+            hours_ago = (now_utc - most_recent).total_seconds() / 3600
             features.news_recency_hours = max(0.0, min(999.0, hours_ago))
 
         # Analyze headlines for sentiment
