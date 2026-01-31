@@ -47,10 +47,11 @@ class NewsClient:
     API_KEY_ENV = "NEWSAPI_KEY"
     BASE_URL = "https://newsapi.org/v2"
     DAILY_LIMIT = 1000  # Requests per day
-    
+    DAILY_BUDGET = 500  # Conservative budget to leave headroom for retries
+
     # Cache settings - longer cache = fewer API calls
     _cache: dict = {}
-    _cache_duration = timedelta(minutes=30)  # 30 min cache
+    _cache_duration = timedelta(minutes=60)  # 60 min cache (was 30)
     
     def __init__(self, api_key: Optional[str] = None):
         """Initialize the news client.

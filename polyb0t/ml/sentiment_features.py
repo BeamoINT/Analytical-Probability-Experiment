@@ -52,13 +52,19 @@ class SentimentFeatureEngine:
     - IntelligentAnalyzer: GPT-based deep analysis (optional, costly)
 
     Features are cached per market to minimize API calls.
+    Uses smart rate limiting to stay within API quotas.
     """
 
-    def __init__(self, cache_ttl_minutes: int = 30):
+    # Daily budget for new API calls (leaves headroom from 1000 limit)
+    DAILY_BUDGET = 400
+    # Minimum price movement to prioritize a market for news fetch
+    MIN_PRICE_MOVEMENT_PCT = 2.0
+
+    def __init__(self, cache_ttl_minutes: int = 60):
         """Initialize the sentiment feature engine.
 
         Args:
-            cache_ttl_minutes: Cache time-to-live for sentiment features
+            cache_ttl_minutes: Cache time-to-live for sentiment features (default 60 min)
         """
         self._cache: Dict[str, Tuple[datetime, SentimentFeatures]] = {}
         self._cache_ttl = timedelta(minutes=cache_ttl_minutes)
@@ -71,6 +77,11 @@ class SentimentFeatureEngine:
         # Track API usage
         self._api_calls = 0
         self._cache_hits = 0
+        self._skipped_budget = 0
+
+        # Daily budget tracking
+        self._daily_api_calls = 0
+        self._daily_reset_date = datetime.now(timezone.utc).date()
 
     @property
     def news_client(self):
@@ -109,12 +120,31 @@ class SentimentFeatureEngine:
         """Check if sentiment analysis is available."""
         return self.news_client is not None and self.news_client.api_key
 
+    def _check_daily_reset(self):
+        """Reset daily budget counter at midnight UTC."""
+        today = datetime.now(timezone.utc).date()
+        if today > self._daily_reset_date:
+            logger.info(
+                f"Sentiment daily budget reset. Yesterday: {self._daily_api_calls} calls, "
+                f"{self._skipped_budget} skipped"
+            )
+            self._daily_api_calls = 0
+            self._skipped_budget = 0
+            self._daily_reset_date = today
+
+    def _has_budget(self) -> bool:
+        """Check if we have remaining daily budget."""
+        self._check_daily_reset()
+        return self._daily_api_calls < self.DAILY_BUDGET
+
     def get_sentiment_features(
         self,
         market_id: str,
         market_title: str,
         category: str = "",
-        use_intelligent: bool = False
+        use_intelligent: bool = False,
+        priority: bool = False,
+        price_change_pct: float = 0.0
     ) -> SentimentFeatures:
         """Get sentiment features for a market.
 
@@ -123,6 +153,8 @@ class SentimentFeatureEngine:
             market_title: Market title/question for keyword extraction
             category: Market category for filtering
             use_intelligent: Whether to use GPT-based analysis (costs money)
+            priority: If True, fetch even when budget is low (for signal evaluation)
+            price_change_pct: Recent price change % (markets with movement get priority)
 
         Returns:
             SentimentFeatures with all computed values
@@ -140,11 +172,26 @@ class SentimentFeatureEngine:
         if not self.is_available():
             return features
 
+        # Smart rate limiting: check if we should make an API call
+        has_budget = self._has_budget()
+        is_priority = priority or abs(price_change_pct) >= self.MIN_PRICE_MOVEMENT_PCT
+
+        if not has_budget and not is_priority:
+            # Skip non-priority markets when budget is low
+            self._skipped_budget += 1
+            if self._skipped_budget % 100 == 1:  # Log occasionally
+                logger.info(
+                    f"Sentiment budget limiting: {self._daily_api_calls}/{self.DAILY_BUDGET} used, "
+                    f"{self._skipped_budget} skipped (non-priority)"
+                )
+            return features
+
         try:
             features = self._compute_features(
                 market_id, market_title, category, use_intelligent
             )
             self._api_calls += 1
+            self._daily_api_calls += 1
         except Exception as e:
             logger.warning(f"Error computing sentiment features for {market_id}: {e}")
 
@@ -274,7 +321,9 @@ class SentimentFeatureEngine:
         market_id: str,
         market_title: str,
         category: str = "",
-        use_intelligent: bool = False
+        use_intelligent: bool = False,
+        priority: bool = False,
+        price_change_pct: float = 0.0
     ) -> Dict[str, float]:
         """Get sentiment features as a dictionary for ML training.
 
@@ -285,12 +334,15 @@ class SentimentFeatureEngine:
             market_title: Market title/question
             category: Market category
             use_intelligent: Whether to use GPT analysis
+            priority: If True, fetch even when budget is low
+            price_change_pct: Recent price change % for prioritization
 
         Returns:
             Dictionary of feature name -> value
         """
         features = self.get_sentiment_features(
-            market_id, market_title, category, use_intelligent
+            market_id, market_title, category, use_intelligent,
+            priority=priority, price_change_pct=price_change_pct
         )
         return features.to_dict()
 
@@ -307,11 +359,16 @@ class SentimentFeatureEngine:
 
     def get_stats(self) -> Dict[str, Any]:
         """Get usage statistics."""
+        self._check_daily_reset()
         return {
             "api_calls": self._api_calls,
             "cache_hits": self._cache_hits,
             "cache_size": len(self._cache),
             "cache_hit_rate": self._cache_hits / max(1, self._api_calls + self._cache_hits),
+            "daily_budget": self.DAILY_BUDGET,
+            "daily_used": self._daily_api_calls,
+            "daily_remaining": max(0, self.DAILY_BUDGET - self._daily_api_calls),
+            "daily_skipped": self._skipped_budget,
             "news_client_available": self.news_client is not None,
             "headline_analyzer_available": self.headline_analyzer is not None,
             "intelligent_analyzer_available": self.intelligent_analyzer is not None,
@@ -333,7 +390,9 @@ def get_sentiment_feature_engine() -> SentimentFeatureEngine:
 def get_sentiment_features_for_market(
     market_id: str,
     market_title: str,
-    category: str = ""
+    category: str = "",
+    priority: bool = False,
+    price_change_pct: float = 0.0
 ) -> Dict[str, float]:
     """Convenience function to get sentiment features.
 
@@ -341,9 +400,14 @@ def get_sentiment_features_for_market(
         market_id: Market identifier
         market_title: Market title/question
         category: Market category
+        priority: If True, fetch even when budget is low
+        price_change_pct: Recent price change % for prioritization
 
     Returns:
         Dictionary of sentiment features
     """
     engine = get_sentiment_feature_engine()
-    return engine.get_features_dict(market_id, market_title, category)
+    return engine.get_features_dict(
+        market_id, market_title, category,
+        priority=priority, price_change_pct=price_change_pct
+    )

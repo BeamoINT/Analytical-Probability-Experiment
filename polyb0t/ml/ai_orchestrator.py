@@ -438,13 +438,15 @@ class AIOrchestrator:
                 logger.debug(f"Microstructure features not available: {e}")
 
         # Try to get sentiment features if not provided
+        # Use price_change_24h for prioritization (markets with movement get news)
         if news_article_count == 0 and market_slug:
             try:
                 from polyb0t.ml.sentiment_features import get_sentiment_feature_engine
                 sentiment_engine = get_sentiment_feature_engine()
                 if sentiment_engine.is_available():
                     sentiment_features = sentiment_engine.get_features_dict(
-                        market_id, market_slug, category
+                        market_id, market_slug, category,
+                        price_change_pct=abs(price_change_24h) * 100  # Convert to %
                     )
                     news_article_count = int(sentiment_features.get("news_article_count", 0))
                     news_recency_hours = sentiment_features.get("news_recency_hours", 999.0)
