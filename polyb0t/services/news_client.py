@@ -12,8 +12,8 @@ import os
 import re
 import requests
 from dataclasses import dataclass
-from datetime import datetime, timedelta
-from typing import Optional
+from datetime import datetime, timedelta, timezone
+from typing import Optional, Tuple
 import hashlib
 
 logger = logging.getLogger(__name__)
@@ -55,7 +55,7 @@ class NewsClient:
     
     def __init__(self, api_key: Optional[str] = None):
         """Initialize the news client.
-        
+
         Args:
             api_key: NewsAPI.org API key. If not provided, reads from settings or env var.
         """
@@ -63,8 +63,13 @@ class NewsClient:
         self._last_request_time = None
         self._request_count = 0
         self._daily_count = 0
-        self._daily_reset_date = datetime.utcnow().date()
+        self._daily_reset_date = datetime.now(timezone.utc).date()
         self._cache_hits = 0
+
+        # Rate limit tracking
+        self._is_rate_limited = False
+        self._rate_limit_hit_time: Optional[datetime] = None
+        self._consecutive_429s = 0
         
         # Try to get from settings first, then env var
         if not self.api_key:
@@ -88,11 +93,46 @@ class NewsClient:
     
     def _check_daily_reset(self):
         """Reset daily counter at midnight UTC."""
-        today = datetime.utcnow().date()
+        today = datetime.now(timezone.utc).date()
         if today > self._daily_reset_date:
+            old_count = self._daily_count
+            was_limited = self._is_rate_limited
             self._daily_count = 0
             self._daily_reset_date = today
-            logger.info("NewsAPI daily counter reset")
+            self._is_rate_limited = False
+            self._rate_limit_hit_time = None
+            self._consecutive_429s = 0
+            logger.info(
+                f"NewsAPI daily quota reset. Yesterday: {old_count} requests, "
+                f"was_rate_limited: {was_limited}"
+            )
+
+    def get_time_until_reset(self) -> Tuple[int, int, int]:
+        """Get time until NewsAPI quota resets (midnight UTC).
+
+        Returns:
+            Tuple of (hours, minutes, seconds) until reset
+        """
+        now = datetime.now(timezone.utc)
+        # Next midnight UTC
+        tomorrow = now.date() + timedelta(days=1)
+        reset_time = datetime(tomorrow.year, tomorrow.month, tomorrow.day, tzinfo=timezone.utc)
+        delta = reset_time - now
+        total_seconds = int(delta.total_seconds())
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        seconds = total_seconds % 60
+        return (hours, minutes, seconds)
+
+    def get_reset_time_str(self) -> str:
+        """Get human-readable time until reset."""
+        hours, minutes, seconds = self.get_time_until_reset()
+        return f"{hours}h {minutes}m until reset (midnight UTC)"
+
+    def is_rate_limited(self) -> bool:
+        """Check if we're currently rate-limited by NewsAPI."""
+        self._check_daily_reset()  # May clear the flag
+        return self._is_rate_limited
     
     def _can_make_request(self) -> bool:
         """Check if we can make another request today."""
@@ -126,7 +166,7 @@ class NewsClient:
         cache_key = hashlib.md5(f"{query}:{language}:{page_size}".encode()).hexdigest()
         if cache_key in self._cache:
             cached_time, cached_data = self._cache[cache_key]
-            if datetime.utcnow() - cached_time < self._cache_duration:
+            if datetime.now(timezone.utc) - cached_time < self._cache_duration:
                 self._cache_hits += 1
                 return cached_data
         
@@ -151,7 +191,19 @@ class NewsClient:
             self._daily_count += 1
             
             if response.status_code == 429:
-                logger.warning("NewsAPI rate limit reached")
+                self._consecutive_429s += 1
+                if not self._is_rate_limited:
+                    self._is_rate_limited = True
+                    self._rate_limit_hit_time = datetime.now(timezone.utc)
+                    hours, minutes, _ = self.get_time_until_reset()
+                    logger.warning(
+                        f"NewsAPI rate limit reached (429). "
+                        f"Quota resets in {hours}h {minutes}m (midnight UTC). "
+                        f"Daily requests: {self._daily_count}"
+                    )
+                elif self._consecutive_429s % 50 == 0:  # Log occasionally
+                    hours, minutes, _ = self.get_time_until_reset()
+                    logger.info(f"NewsAPI still rate-limited. Resets in {hours}h {minutes}m")
                 return []
             
             if response.status_code != 200:
@@ -167,7 +219,7 @@ class NewsClient:
                         item.get("publishedAt", "").replace("Z", "+00:00")
                     )
                 except:
-                    published = datetime.utcnow()
+                    published = datetime.now(timezone.utc)
                 
                 article = NewsArticle(
                     title=item.get("title", "") or "",
@@ -180,7 +232,7 @@ class NewsClient:
                 articles.append(article)
             
             # Cache results
-            self._cache[cache_key] = (datetime.utcnow(), articles)
+            self._cache[cache_key] = (datetime.now(timezone.utc), articles)
             
             logger.debug(f"NewsAPI: Found {len(articles)} articles for '{query}'")
             return articles
@@ -214,7 +266,7 @@ class NewsClient:
         cache_key = f"top:{category}:{country}:{page_size}"
         if cache_key in self._cache:
             cached_time, cached_data = self._cache[cache_key]
-            if datetime.utcnow() - cached_time < self._cache_duration:
+            if datetime.now(timezone.utc) - cached_time < self._cache_duration:
                 return cached_data
         
         try:
@@ -241,7 +293,7 @@ class NewsClient:
                         item.get("publishedAt", "").replace("Z", "+00:00")
                     )
                 except:
-                    published = datetime.utcnow()
+                    published = datetime.now(timezone.utc)
                 
                 article = NewsArticle(
                     title=item.get("title", "") or "",
@@ -253,7 +305,7 @@ class NewsClient:
                 )
                 articles.append(article)
             
-            self._cache[cache_key] = (datetime.utcnow(), articles)
+            self._cache[cache_key] = (datetime.now(timezone.utc), articles)
             return articles
             
         except Exception as e:
@@ -268,22 +320,35 @@ class NewsClient:
         """Get detailed usage statistics."""
         self._check_daily_reset()
         remaining = self.DAILY_LIMIT - self._daily_count
-        
+
         cache_rate = (
             self._cache_hits / (self._cache_hits + self._request_count) * 100
             if (self._cache_hits + self._request_count) > 0 else 0
         )
-        
-        return {
+
+        hours, minutes, _ = self.get_time_until_reset()
+
+        stats = {
             "is_available": self.is_available(),
             "daily_limit": self.DAILY_LIMIT,
+            "daily_budget": self.DAILY_BUDGET,
             "daily_used": self._daily_count,
             "daily_remaining": remaining,
+            "is_rate_limited": self._is_rate_limited,
+            "hours_until_reset": hours,
+            "minutes_until_reset": minutes,
+            "reset_time_str": f"{hours}h {minutes}m until midnight UTC",
             "total_requests": self._request_count,
             "cache_hits": self._cache_hits,
             "cache_hit_rate": f"{cache_rate:.1f}%",
             "cache_size": len(self._cache),
+            "consecutive_429s": self._consecutive_429s,
         }
+
+        if self._rate_limit_hit_time:
+            stats["rate_limit_hit_at"] = self._rate_limit_hit_time.isoformat()
+
+        return stats
 
 
 # Singleton
