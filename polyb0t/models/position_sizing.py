@@ -17,6 +17,9 @@ logger = logging.getLogger(__name__)
 # Maximum position size as percentage of available balance
 MAX_POSITION_PCT = 0.15  # 15% max per trade
 
+# Polymarket minimum order size in shares (exchange requirement)
+MIN_SHARES_PER_ORDER = 5  # Minimum 5 shares to place/sell an order
+
 
 @dataclass
 class SizingResult:
@@ -60,6 +63,7 @@ class PositionSizer:
         available_usdc: float,
         reserved_usdc: float,
         expert_confidence_multiplier: float = 1.0,
+        price: float | None = None,
     ) -> SizingResult:
         """Compute position size using percentage-based approach.
 
@@ -149,6 +153,36 @@ class PositionSizer:
             # Too small to be worth it
             size_final = 0
             reason = "below_min_order"
+        # Minimum shares check (Polymarket requires >= 5 shares per order)
+        elif price is not None and price > 0 and size_final > 0:
+            min_usd_for_shares = MIN_SHARES_PER_ORDER * price
+            estimated_shares = size_final / price
+            if estimated_shares < MIN_SHARES_PER_ORDER:
+                # Check if we can afford the minimum shares
+                if min_usd_for_shares <= available_usdc and min_usd_for_shares <= after_exposure_cap:
+                    # Bump up to minimum shares
+                    logger.info(
+                        f"Bumping size from ${size_final:.2f} ({estimated_shares:.1f} shares) "
+                        f"to ${min_usd_for_shares:.2f} ({MIN_SHARES_PER_ORDER} shares) to meet minimum"
+                    )
+                    size_final = min_usd_for_shares
+                    reason = "bumped_to_min_shares"
+                else:
+                    # Can't afford minimum shares, reject
+                    logger.info(
+                        f"Rejecting: ${size_final:.2f} = {estimated_shares:.1f} shares < {MIN_SHARES_PER_ORDER} min, "
+                        f"and can't afford ${min_usd_for_shares:.2f} for min shares"
+                    )
+                    size_final = 0
+                    reason = "below_min_shares"
+            else:
+                reason = self._determine_sizing_reason(
+                    kelly_size=sized_amount,
+                    after_per_trade_cap=after_per_trade_cap,
+                    after_available_cap=after_available_cap,
+                    after_exposure_cap=after_exposure_cap,
+                    size_final=size_final,
+                )
         else:
             reason = self._determine_sizing_reason(
                 kelly_size=sized_amount,

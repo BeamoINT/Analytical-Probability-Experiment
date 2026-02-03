@@ -352,7 +352,7 @@ class Settings(BaseSettings):
 
     # Trade Intent System
     intent_expiry_seconds: int = Field(
-        default=60, description="Trade intent expiry time (seconds)"
+        default=300, description="Trade intent expiry time (seconds) - 5 minutes for human approval"
     )
     intent_cooldown_seconds: int = Field(
         default=120,

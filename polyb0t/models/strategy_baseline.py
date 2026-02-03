@@ -1,7 +1,8 @@
 """Baseline trading strategy with explainable logic."""
 
 import logging
-from datetime import datetime
+from collections import deque
+from datetime import datetime, timedelta
 from typing import Any
 
 import numpy as np
@@ -14,6 +15,105 @@ from polyb0t.models.position_sizing import PositionSizer, SizingResult
 from polyb0t.models.market_edge import get_market_edge_engine, MarketEdgeEngine
 
 logger = logging.getLogger(__name__)
+
+
+class EdgeQualityMonitor:
+    """Monitor edge quality and pause trading when edges degrade."""
+
+    # Minimum average edge to continue trading (3%)
+    MIN_ROLLING_EDGE_PCT = 0.03
+    # Number of signals to track for rolling average
+    ROLLING_WINDOW = 50
+    # Minimum signals before enforcing edge quality check
+    MIN_SIGNALS_FOR_CHECK = 20
+    # Cooldown after edge degradation (hours)
+    DEGRADATION_COOLDOWN_HOURS = 1
+
+    def __init__(self) -> None:
+        """Initialize edge quality monitor."""
+        self.edge_history: deque[tuple[datetime, float]] = deque(maxlen=self.ROLLING_WINDOW)
+        self.is_paused = False
+        self.paused_at: datetime | None = None
+        self.pause_reason: str | None = None
+
+    def record_edge(self, edge: float) -> None:
+        """Record an edge value from a generated signal.
+
+        Args:
+            edge: The net edge value (0-1 scale).
+        """
+        self.edge_history.append((datetime.utcnow(), abs(edge)))
+
+    def get_rolling_avg_edge(self) -> float | None:
+        """Get rolling average edge.
+
+        Returns:
+            Rolling average edge or None if insufficient data.
+        """
+        if len(self.edge_history) < self.MIN_SIGNALS_FOR_CHECK:
+            return None
+        return sum(e for _, e in self.edge_history) / len(self.edge_history)
+
+    def check_edge_quality(self) -> bool:
+        """Check if edge quality is acceptable for trading.
+
+        Returns:
+            True if trading should continue, False if paused.
+        """
+        # Check if in cooldown
+        if self.is_paused and self.paused_at:
+            cooldown_end = self.paused_at + timedelta(hours=self.DEGRADATION_COOLDOWN_HOURS)
+            if datetime.utcnow() < cooldown_end:
+                return False
+            # Cooldown expired, allow trading again
+            self.is_paused = False
+            self.paused_at = None
+            self.pause_reason = None
+            logger.info("Edge quality cooldown expired, resuming signal generation")
+
+        # Check rolling average
+        avg_edge = self.get_rolling_avg_edge()
+        if avg_edge is None:
+            return True  # Not enough data yet
+
+        if avg_edge < self.MIN_ROLLING_EDGE_PCT:
+            if not self.is_paused:
+                logger.warning(
+                    f"EDGE DEGRADATION DETECTED: Rolling avg edge {avg_edge*100:.2f}% "
+                    f"< minimum {self.MIN_ROLLING_EDGE_PCT*100:.1f}%. "
+                    f"Pausing signal generation for {self.DEGRADATION_COOLDOWN_HOURS}h.",
+                    extra={"avg_edge": avg_edge, "threshold": self.MIN_ROLLING_EDGE_PCT},
+                )
+                self.is_paused = True
+                self.paused_at = datetime.utcnow()
+                self.pause_reason = f"Rolling avg edge {avg_edge*100:.2f}% below threshold"
+            return False
+
+        return True
+
+    def get_status(self) -> dict[str, Any]:
+        """Get edge quality status.
+
+        Returns:
+            Status dictionary.
+        """
+        avg_edge = self.get_rolling_avg_edge()
+        return {
+            "is_paused": self.is_paused,
+            "paused_at": self.paused_at.isoformat() if self.paused_at else None,
+            "pause_reason": self.pause_reason,
+            "rolling_avg_edge": avg_edge,
+            "signal_count": len(self.edge_history),
+            "min_required_edge": self.MIN_ROLLING_EDGE_PCT,
+        }
+
+    def reset(self) -> None:
+        """Reset the monitor (manual override)."""
+        self.edge_history.clear()
+        self.is_paused = False
+        self.paused_at = None
+        self.pause_reason = None
+        logger.info("Edge quality monitor reset")
 
 
 class TradingSignal:
@@ -95,7 +195,10 @@ class BaselineStrategy:
         
         # Minimum net edge threshold (after fees/slippage)
         self.min_net_edge = 0.02  # Require at least 2% net edge
-        
+
+        # Edge quality monitor (pauses trading when edges degrade)
+        self.edge_monitor = EdgeQualityMonitor()
+
         # Market Edge Intelligence (smarter rules-based edge)
         self.market_edge_engine: MarketEdgeEngine | None = None
         if self.settings.enable_market_edge_intelligence:
@@ -153,6 +256,17 @@ class BaselineStrategy:
         price_source_counts: dict[str, int] = {"orderbook_mid": 0, "last_trade": 0, "gamma_price": 0, "none": 0}
         rejection_reasons: dict[str, int] = {}
 
+        # Check edge quality before generating signals
+        if not self.edge_monitor.check_edge_quality():
+            status = self.edge_monitor.get_status()
+            logger.warning(
+                f"Signal generation paused due to edge degradation. "
+                f"Rolling avg: {status['rolling_avg_edge']*100:.2f}% "
+                f"(min: {status['min_required_edge']*100:.1f}%)"
+            )
+            rejection_reasons["edge_quality_degraded"] = len(markets) * 2  # Approximate
+            return signals, rejection_reasons
+
         for market in markets:
             for idx, outcome in enumerate(market.outcomes):
                 token_id = outcome.token_id
@@ -164,6 +278,8 @@ class BaselineStrategy:
                 )
                 if signal:
                     signals.append(signal)
+                    # Record edge for quality monitoring
+                    self.edge_monitor.record_edge(signal.edge_net)
                 else:
                     rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
                     
@@ -442,6 +558,7 @@ class BaselineStrategy:
             confidence=confidence,
             available_usdc=available_usdc,
             reserved_usdc=reserved_usdc,
+            price=p_market,  # Pass price for minimum shares validation
         )
         
         # If size is below minimum, reject
@@ -496,6 +613,7 @@ class BaselineStrategy:
             confidence=confidence,
             available_usdc=available_usdc,
             reserved_usdc=reserved_usdc,
+            price=p_market,  # Pass price for minimum shares validation
         )
         
         # === KELLY CRITERION SIZING ===
@@ -678,12 +796,21 @@ class BaselineStrategy:
             # Convert features to DataFrame for ML model
             ml_features_df = pd.DataFrame([features])
             
-            # Get ML prediction (predicted future return)
+            # Get ML prediction (predicted future return as percentage)
             predicted_return = self.ml_model_manager.predict(ml_features_df)
-            
+
+            # Validate prediction - skip if NaN or unreasonable
+            if predicted_return is None or not np.isfinite(predicted_return):
+                logger.debug(f"ML prediction invalid: {predicted_return}")
+                return baseline_prob
+
+            # Clamp predicted return to reasonable range (-50% to +100%)
+            predicted_return = max(-0.5, min(1.0, predicted_return))
+
             # Convert return prediction to probability
-            # Predicted return is change from current price
-            p_ml = p_market + predicted_return
+            # Predicted return is percentage change: (future_price - current_price) / current_price
+            # So new_price = current_price * (1 + predicted_return)
+            p_ml = p_market * (1 + predicted_return)
             p_ml = max(0.01, min(0.99, p_ml))
             
             # Determine blend weight - check if ML should fully take over

@@ -1,12 +1,18 @@
 """Risk management and position sizing."""
 
+import json
 import logging
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from polyb0t.config import get_settings
 from polyb0t.models.strategy_baseline import TradingSignal
 
 logger = logging.getLogger(__name__)
+
+# File to persist peak equity across restarts
+PEAK_EQUITY_FILE = Path("data/peak_equity.json")
 
 
 class RiskCheckResult:
@@ -36,8 +42,45 @@ class RiskManager:
     def __init__(self) -> None:
         """Initialize risk manager."""
         self.settings = get_settings()
-        self.peak_equity = self.settings.paper_bankroll
         self.is_trading_halted = False
+        self.halt_reason: str | None = None
+        self.halted_at: datetime | None = None
+
+        # Load persisted peak equity or use paper bankroll as default
+        self._peak_equity_file = PEAK_EQUITY_FILE
+        saved_peak = self._load_peak_equity()
+
+        if self.settings.mode == "live":
+            # For live mode, start with a conservative peak (will be updated from on-chain)
+            # If we have a saved peak, use that; otherwise start at 0 (will be set on first update)
+            self.peak_equity = saved_peak if saved_peak > 0 else 0.0
+            logger.info(f"Live mode: loaded peak equity ${self.peak_equity:.2f}")
+        else:
+            # Paper mode: use paper bankroll
+            self.peak_equity = self.settings.paper_bankroll
+
+    def _load_peak_equity(self) -> float:
+        """Load peak equity from persistent storage."""
+        try:
+            if self._peak_equity_file.exists():
+                with open(self._peak_equity_file, "r") as f:
+                    data = json.load(f)
+                    return float(data.get("peak_equity", 0.0))
+        except Exception as e:
+            logger.warning(f"Could not load peak equity: {e}")
+        return 0.0
+
+    def _save_peak_equity(self) -> None:
+        """Save peak equity to persistent storage."""
+        try:
+            self._peak_equity_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._peak_equity_file, "w") as f:
+                json.dump({
+                    "peak_equity": self.peak_equity,
+                    "updated_at": datetime.utcnow().isoformat(),
+                }, f)
+        except Exception as e:
+            logger.warning(f"Could not save peak equity: {e}")
 
     def check_position(
         self,
@@ -187,25 +230,85 @@ class RiskManager:
         Returns:
             True if drawdown limit exceeded (should halt trading).
         """
-        # Update peak equity
+        if current_equity <= 0:
+            return False
+
+        # Update peak equity (only if positive and higher than current peak)
         if current_equity > self.peak_equity:
+            old_peak = self.peak_equity
             self.peak_equity = current_equity
+            self._save_peak_equity()
+            if old_peak > 0:
+                logger.info(f"New peak equity: ${self.peak_equity:.2f} (was ${old_peak:.2f})")
+
+        # If peak is 0 (first run in live mode), initialize it
+        if self.peak_equity == 0:
+            self.peak_equity = current_equity
+            self._save_peak_equity()
+            logger.info(f"Initialized peak equity to ${self.peak_equity:.2f}")
+            return False
 
         # Calculate drawdown
         drawdown_pct = ((self.peak_equity - current_equity) / self.peak_equity) * 100
 
         if drawdown_pct >= self.settings.drawdown_limit_pct:
-            logger.error(
-                f"Drawdown limit exceeded: {drawdown_pct:.2f}% >= "
-                f"{self.settings.drawdown_limit_pct}%"
-            )
-            self.is_trading_halted = True
+            if not self.is_trading_halted:
+                logger.error(
+                    f"CIRCUIT BREAKER TRIGGERED: Drawdown {drawdown_pct:.2f}% >= limit {self.settings.drawdown_limit_pct}%",
+                    extra={
+                        "current_equity": current_equity,
+                        "peak_equity": self.peak_equity,
+                        "drawdown_pct": drawdown_pct,
+                        "limit_pct": self.settings.drawdown_limit_pct,
+                    }
+                )
+                self.is_trading_halted = True
+                self.halt_reason = f"Drawdown {drawdown_pct:.2f}% exceeded limit {self.settings.drawdown_limit_pct}%"
+                self.halted_at = datetime.utcnow()
             return True
 
         return False
 
-    def reset_halt(self) -> None:
-        """Reset trading halt (for manual intervention)."""
+    def get_drawdown_pct(self, current_equity: float) -> float:
+        """Get current drawdown percentage.
+
+        Args:
+            current_equity: Current portfolio equity.
+
+        Returns:
+            Drawdown as percentage (0-100).
+        """
+        if self.peak_equity <= 0 or current_equity <= 0:
+            return 0.0
+        return max(0.0, ((self.peak_equity - current_equity) / self.peak_equity) * 100)
+
+    def reset_halt(self, new_peak: float | None = None) -> None:
+        """Reset trading halt (for manual intervention).
+
+        Args:
+            new_peak: Optional new peak equity to set (useful if resetting after deposit).
+        """
         self.is_trading_halted = False
-        logger.info("Trading halt manually reset")
+        self.halt_reason = None
+        self.halted_at = None
+
+        if new_peak is not None and new_peak > 0:
+            self.peak_equity = new_peak
+            self._save_peak_equity()
+            logger.info(f"Trading halt reset with new peak equity: ${new_peak:.2f}")
+        else:
+            logger.info("Trading halt manually reset")
+
+    def get_halt_status(self) -> dict[str, Any]:
+        """Get current halt status.
+
+        Returns:
+            Dict with halt status information.
+        """
+        return {
+            "is_halted": self.is_trading_halted,
+            "reason": self.halt_reason,
+            "halted_at": self.halted_at.isoformat() if self.halted_at else None,
+            "peak_equity": self.peak_equity,
+        }
 

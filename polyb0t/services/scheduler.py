@@ -1181,8 +1181,18 @@ class TradingScheduler:
                     logger.warning(f"Exit intent proposal skipped due to error: {e}")
 
             # Step 6: Check drawdown limit
-            if self.risk_manager.check_drawdown(self.portfolio.total_equity):
-                logger.error("Trading halted due to drawdown limit")
+            # Use on-chain balance for live mode, paper portfolio for paper mode
+            if self.settings.mode == "live" and balance_summary and "total_usdc" in balance_summary:
+                current_equity = float(balance_summary["total_usdc"])
+            else:
+                current_equity = self.portfolio.total_equity
+
+            if self.risk_manager.check_drawdown(current_equity):
+                logger.error(
+                    f"Trading halted due to drawdown limit. "
+                    f"Current: ${current_equity:.2f}, Peak: ${self.risk_manager.peak_equity:.2f}, "
+                    f"Drawdown: {self.risk_manager.get_drawdown_pct(current_equity):.1f}%"
+                )
                 return
 
             # Kill switch checks (live safety)
@@ -1199,7 +1209,7 @@ class TradingScheduler:
                     mid = (ob.bids[0].price + ob.asks[0].price) / 2
                     spreads[o.token_id] = (ob.asks[0].price - ob.bids[0].price) / mid if mid else 0.0
             triggered = kill_switches.check_all_switches(
-                current_equity=self.portfolio.total_equity,
+                current_equity=current_equity,  # Use on-chain balance in live mode
                 peak_equity=self.risk_manager.peak_equity,
                 current_spreads=spreads,
                 cycle_id=cycle_id,
@@ -1374,12 +1384,20 @@ class TradingScheduler:
                     risk_result = None
 
                     # Exposure guardrail (final check)
+                    # Include both pre-existing reserved and cycle-allocated amounts
                     reserved = float(balance_summary.get("reserved_usdc", 0.0) or 0.0) if balance_summary else 0.0
-                    if reserved + size_usd > float(self.settings.max_total_exposure_usd):
+                    total_reserved = reserved + cycle_allocated_usd
+                    if total_reserved + size_usd > float(self.settings.max_total_exposure_usd):
                         rejected += 1
                         logger.info(
                             "Signal rejected: would exceed max_total_exposure_usd",
-                            extra={"reserved_usdc": reserved, "size_usd": size_usd},
+                            extra={
+                                "reserved_usdc": reserved,
+                                "cycle_allocated_usd": cycle_allocated_usd,
+                                "total_reserved": total_reserved,
+                                "size_usd": size_usd,
+                                "max_total_exposure_usd": self.settings.max_total_exposure_usd,
+                            },
                         )
                         continue
 

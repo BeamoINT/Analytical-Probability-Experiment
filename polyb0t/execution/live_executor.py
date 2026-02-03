@@ -193,6 +193,45 @@ class LiveExecutor:
                 ),
             }
 
+        # Pre-flight balance check for BUY orders
+        # Verify we have enough USDC before submitting to avoid API rejections
+        if intent.side == "BUY" and self.settings.polygon_rpc_url:
+            try:
+                from polyb0t.services.balance import BalanceService
+                from sqlalchemy.orm import Session
+                from polyb0t.data.storage import get_session
+
+                with get_session() as bal_session:
+                    bal_service = BalanceService(db_session=bal_session)
+                    snap = bal_service.fetch_usdc_balance()
+                    size_usd = float(intent.size_usd or 0.0)
+
+                    # Check if we have enough available (with 5% safety margin for fees/slippage)
+                    required_with_margin = size_usd * 1.05
+                    if snap.available_usdc < required_with_margin:
+                        logger.warning(
+                            f"Pre-flight balance check failed: need ${required_with_margin:.2f}, "
+                            f"have ${snap.available_usdc:.2f} available",
+                            extra={
+                                "size_usd": size_usd,
+                                "required_with_margin": required_with_margin,
+                                "available_usdc": snap.available_usdc,
+                                "total_usdc": snap.total_usdc,
+                                "reserved_usdc": snap.reserved_usdc,
+                            },
+                        )
+                        return {
+                            "success": False,
+                            "error": f"Insufficient balance: need ${required_with_margin:.2f}, have ${snap.available_usdc:.2f}",
+                            "skip_retry": True,
+                        }
+                    logger.debug(
+                        f"Pre-flight balance check passed: ${snap.available_usdc:.2f} available >= ${required_with_margin:.2f} required"
+                    )
+            except Exception as e:
+                logger.warning(f"Pre-flight balance check failed (non-blocking): {e}")
+                # Continue anyway - the order will fail at the API level if balance is insufficient
+
         # For MVP, we log the order details.
         # When dry_run=false and creds exist, we attempt a best-effort authenticated submit.
         order_details = {
@@ -205,8 +244,7 @@ class LiveExecutor:
         }
 
         logger.warning(
-            "LIVE ORDER EXECUTION PLACEHOLDER: "
-            "In production, this would submit signed order to CLOB API",
+            "LIVE ORDER EXECUTION",
             extra=order_details,
         )
 
