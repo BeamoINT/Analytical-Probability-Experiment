@@ -55,29 +55,28 @@ class ResolvedMarketValidator:
         self.calibrator = ConfidenceCalibrator(calibration_dir)
 
     def get_resolved_examples(self) -> List[Dict[str, Any]]:
-        """Load all labeled market examples.
+        """Load all labeled market examples with stored predictions.
 
-        Uses price_change_24h as the outcome measure since most markets
-        don't have resolved_outcome populated. An example is considered
-        "profitable" if price_change_24h > 0.
+        Uses stored predictions (predicted_change) and actual outcomes (price_change_24h)
+        from the database. This gives us historical model predictions to calibrate against.
 
         Returns:
-            List of examples with features and outcome.
+            List of examples with stored predictions and outcomes.
             Sorted by created_at ascending (oldest first).
         """
         try:
             conn = sqlite3.connect(self.db_path, timeout=30)
             cursor = conn.cursor()
 
-            # Use price_change_24h as the outcome since resolved_outcome is rarely populated
-            # A positive price change means the prediction "buy YES" would have been profitable
+            # Load examples that have both predictions and outcomes
             cursor.execute("""
                 SELECT
                     example_id, token_id, market_id, created_at,
                     features, price_change_24h, price_change_to_resolution,
-                    category, market_title, direction_24h
+                    category, market_title, predicted_change
                 FROM training_examples
                 WHERE price_change_24h IS NOT NULL
+                  AND predicted_change IS NOT NULL
                 ORDER BY created_at ASC
             """)
 
@@ -92,14 +91,22 @@ class ResolvedMarketValidator:
                     features = {}
 
                 price_change_24h = row[5] or 0
+                predicted_change = row[9] or 0
+
                 # Convert to binary outcome: 1 if price went up (profitable for YES buyers)
                 # Use a small threshold to filter out noise
                 if price_change_24h > 0.01:  # >1% up
-                    outcome = 1
+                    actual_outcome = 1
                 elif price_change_24h < -0.01:  # >1% down
-                    outcome = 0
+                    actual_outcome = 0
                 else:
                     continue  # Skip flat examples (within 1% either way)
+
+                # Convert prediction to confidence
+                # predicted_change > 0 means model expected price to go up
+                # Map magnitude to confidence (sigmoid-like transformation)
+                import math
+                raw_conf = 1 / (1 + math.exp(-predicted_change * 10))  # Scale and sigmoid
 
                 examples.append({
                     "example_id": row[0],
@@ -107,14 +114,16 @@ class ResolvedMarketValidator:
                     "market_id": row[2],
                     "created_at": row[3],
                     "features": features,
-                    "resolved_outcome": outcome,
+                    "resolved_outcome": actual_outcome,
                     "price_change_to_resolution": row[6] or price_change_24h,
                     "category": row[7],
                     "market_title": row[8],
                     "price_change_24h": price_change_24h,
+                    "predicted_change": predicted_change,
+                    "raw_confidence": raw_conf,
                 })
 
-            logger.info(f"Loaded {len(examples)} labeled market examples (using 24h price change)")
+            logger.info(f"Loaded {len(examples)} examples with stored predictions")
             return examples
 
         except Exception as e:
@@ -123,23 +132,22 @@ class ResolvedMarketValidator:
 
     def validate_model(
         self,
-        expert_pool,
+        expert_pool=None,  # Optional - not needed when using stored predictions
         test_split: float = 0.2,
         update_calibrator: bool = True,
     ) -> Optional[ValidationResult]:
-        """Run full validation pipeline.
+        """Run full validation pipeline using stored predictions.
 
         Steps:
-        1. Load resolved examples
+        1. Load examples with stored predictions and outcomes
         2. Temporal split (older=calibration train, newer=test)
-        3. Get model predictions on both sets
-        4. Fit calibration model on train set
-        5. Apply calibration to test predictions
-        6. Compute metrics
-        7. Simulate P&L
+        3. Fit calibration model on train set
+        4. Apply calibration to test predictions
+        5. Compute metrics
+        6. Simulate P&L
 
         Args:
-            expert_pool: Trained ExpertPool to validate
+            expert_pool: Optional, not used (kept for backward compatibility)
             test_split: Fraction for test set (time-based, most recent)
             update_calibrator: Whether to update the calibration model
 
@@ -150,7 +158,7 @@ class ResolvedMarketValidator:
 
         if len(examples) < self.min_samples:
             logger.warning(
-                f"Only {len(examples)} resolved examples - need at least {self.min_samples}"
+                f"Only {len(examples)} examples - need at least {self.min_samples}"
             )
             return None
 
@@ -164,8 +172,8 @@ class ResolvedMarketValidator:
             f"{len(test_examples)} test"
         )
 
-        # Get predictions for calibration training set
-        train_preds = self._get_predictions(expert_pool, train_examples)
+        # Extract stored predictions from training examples
+        train_preds = [(ex["raw_confidence"], ex["resolved_outcome"]) for ex in train_examples]
 
         if len(train_preds) < 50:
             logger.warning(f"Only {len(train_preds)} train predictions - need more data")
@@ -182,8 +190,8 @@ class ResolvedMarketValidator:
                 self.calibrator.calibrate(train_raw_confs), train_actuals
             )
 
-        # Get test predictions
-        test_preds = self._get_predictions(expert_pool, test_examples)
+        # Extract stored predictions from test examples
+        test_preds = [(ex["raw_confidence"], ex["resolved_outcome"]) for ex in test_examples]
 
         if len(test_preds) < 20:
             logger.warning(f"Only {len(test_preds)} test predictions - insufficient")
