@@ -843,10 +843,14 @@ class AIOrchestrator:
             result = meta.predict_with_mixture(features, include_inactive=include_inactive)
 
             if result is not None:
-                prediction, confidence, metadata = result
+                prediction, raw_confidence, metadata = result
 
                 # Store metadata for later analysis
                 self._last_prediction_metadata = metadata
+
+                # === APPLY CONFIDENCE CALIBRATION ===
+                # Maps raw model confidence to empirical probability
+                confidence = self._calibrate_confidence(raw_confidence)
 
                 # Convert binary prediction to edge-like value
                 # 1.0 = strongly profitable, 0.0 = not profitable
@@ -866,8 +870,11 @@ class AIOrchestrator:
             # Fallback to standard pool predict if mixture fails
             result = self.expert_pool.predict(features, include_inactive=include_inactive)
             if result is not None:
-                prediction, confidence, best_expert = result
+                prediction, raw_confidence, best_expert = result
                 self._last_prediction_metadata = {"best_expert": best_expert, "include_inactive": include_inactive}
+
+                # Apply confidence calibration
+                confidence = self._calibrate_confidence(raw_confidence)
 
                 if prediction > 0.5:
                     momentum = features.get("momentum_24h", 0)
@@ -882,7 +889,41 @@ class AIOrchestrator:
         
         # No MoE prediction available
         return None
-    
+
+    def _calibrate_confidence(self, raw_confidence: float) -> float:
+        """Apply confidence calibration to map raw model confidence to empirical probability.
+
+        Uses isotonic regression trained on resolved market outcomes to correct
+        for model overconfidence/underconfidence.
+
+        Args:
+            raw_confidence: Raw confidence from model (0-1)
+
+        Returns:
+            Calibrated confidence (0-1)
+        """
+        # Lazy-load calibrator
+        if not hasattr(self, "_calibrator"):
+            try:
+                from polyb0t.ml.validation.calibration import get_calibrator
+                self._calibrator = get_calibrator()
+            except Exception as e:
+                logger.warning(f"Failed to load calibrator: {e}")
+                self._calibrator = None
+
+        if self._calibrator is None or not self._calibrator.is_loaded():
+            return raw_confidence
+
+        calibrated = self._calibrator.calibrate_single(raw_confidence)
+
+        # Log significant adjustments for monitoring
+        if abs(raw_confidence - calibrated) > 0.1:
+            logger.debug(
+                f"Confidence calibration: raw={raw_confidence:.2f} -> calibrated={calibrated:.2f}"
+            )
+
+        return calibrated
+
     def get_ai_signal(
         self,
         token_id: str,

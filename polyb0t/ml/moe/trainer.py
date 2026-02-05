@@ -285,6 +285,40 @@ class MoETrainer:
                 training_time=training_time,
             )
 
+            # === VALIDATE ON RESOLVED MARKETS & UPDATE CALIBRATION ===
+            try:
+                from polyb0t.ml.validation.resolved_validator import ResolvedMarketValidator
+
+                validator = ResolvedMarketValidator(db_path=self.db_path)
+                val_result = validator.validate_model(self.pool)
+
+                if val_result:
+                    logger.info("=" * 60)
+                    logger.info("VALIDATION ON RESOLVED MARKETS")
+                    logger.info("=" * 60)
+                    logger.info(f"  Test examples: {val_result.n_test}")
+                    logger.info(f"  Raw accuracy: {val_result.raw_accuracy:.1%}")
+                    logger.info(f"  Calibrated accuracy: {val_result.calibrated_accuracy:.1%}")
+                    logger.info(f"  ECE (calibration error): {val_result.calibration_metrics.expected_calibration_error:.3f}")
+                    logger.info(f"  Simulated P&L: {val_result.simulated_pnl:+.2%}")
+                    logger.info(f"  Simulated win rate: {val_result.simulated_win_rate:.1%}")
+
+                    # Log confidence bucket breakdown
+                    logger.info("  Confidence buckets:")
+                    for bucket, stats in val_result.confidence_buckets.items():
+                        status = stats.get('status', 'UNKNOWN')
+                        logger.info(
+                            f"    {bucket}: {stats['count']} trades, "
+                            f"{stats['win_rate']:.1%} actual vs {stats['expected']:.1%} expected [{status}]"
+                        )
+
+                    results["validation"] = val_result.to_dict()
+                else:
+                    logger.info("Validation skipped: insufficient resolved markets")
+
+            except Exception as e:
+                logger.warning(f"Validation failed: {e}")
+
             return results
             
         except Exception as e:

@@ -2107,6 +2107,128 @@ def dryrun_stats(periods: int, json_output: bool) -> None:
         click.echo("=" * 60 + "\n")
 
 
+@cli.command(name="validate-model")
+@click.option(
+    "--test-split",
+    default=0.2,
+    type=float,
+    help="Fraction of resolved markets for test set (default: 0.2).",
+)
+@click.option(
+    "--output",
+    default=None,
+    type=str,
+    help="Output path for JSON results (optional).",
+)
+@click.option(
+    "--json-output",
+    is_flag=True,
+    help="Output as JSON to stdout.",
+)
+def validate_model(test_split: float, output: str, json_output: bool) -> None:
+    """Validate model on resolved markets.
+
+    This validates the current MoE model against markets that have
+    actually resolved, using ONLY is_fully_labeled=1 examples.
+
+    Outputs:
+    - Accuracy before/after calibration
+    - Expected Calibration Error (ECE)
+    - Win rate by confidence bucket
+    - Simulated P&L
+
+    Example:
+        polyb0t validate-model
+        polyb0t validate-model --test-split 0.3
+        polyb0t validate-model --output results.json
+    """
+    setup_logging()
+
+    from polyb0t.ml.validation.resolved_validator import ResolvedMarketValidator
+    from polyb0t.ml.moe.expert_pool import get_expert_pool
+
+    click.echo("\nValidating model on resolved markets...\n")
+
+    validator = ResolvedMarketValidator()
+    pool = get_expert_pool()
+
+    result = validator.validate_model(pool, test_split=test_split)
+
+    if result is None:
+        click.echo("ERROR: Not enough resolved markets for validation")
+        click.echo("Need at least 100 resolved markets. Try again later as more markets resolve.")
+        return
+
+    if json_output:
+        click.echo(json.dumps(result.to_dict(), indent=2))
+        return
+
+    # Pretty print results
+    click.echo("=" * 60)
+    click.echo("MODEL VALIDATION RESULTS")
+    click.echo("=" * 60)
+    click.echo(f"Train samples: {result.n_train}")
+    click.echo(f"Test samples:  {result.n_test}")
+
+    click.echo(f"\nRaw Model Performance (before calibration):")
+    click.echo(f"  Accuracy:  {result.raw_accuracy:.1%}")
+    click.echo(f"  Precision: {result.raw_precision:.1%}")
+    click.echo(f"  Recall:    {result.raw_recall:.1%}")
+    click.echo(f"  F1 Score:  {result.raw_f1:.1%}")
+    click.echo(f"  Brier:     {result.raw_brier:.3f}")
+
+    click.echo(f"\nCalibration Quality:")
+    click.echo(f"  ECE (Expected Calibration Error): {result.calibration_metrics.expected_calibration_error:.3f}")
+    click.echo(f"  MCE (Max Calibration Error):      {result.calibration_metrics.max_calibration_error:.3f}")
+    status = "GOOD" if result.calibration_metrics.is_well_calibrated() else "NEEDS IMPROVEMENT"
+    click.echo(f"  Status: {status}")
+
+    click.echo(f"\nAfter Calibration:")
+    click.echo(f"  Accuracy:  {result.calibrated_accuracy:.1%}")
+    click.echo(f"  Brier:     {result.calibrated_brier:.3f}")
+
+    pnl_str = f"+{result.simulated_pnl:.2%}" if result.simulated_pnl >= 0 else f"{result.simulated_pnl:.2%}"
+    click.echo(f"\nSimulated Trading Performance:")
+    click.echo(f"  Total P&L:    {pnl_str}")
+    click.echo(f"  Trades:       {result.simulated_trades}")
+    click.echo(f"  Win Rate:     {result.simulated_win_rate:.1%}")
+    if result.simulated_avg_win > 0:
+        click.echo(f"  Avg Win:      +{result.simulated_avg_win:.2%}")
+    if result.simulated_avg_loss > 0:
+        click.echo(f"  Avg Loss:     -{result.simulated_avg_loss:.2%}")
+
+    click.echo(f"\nConfidence Bucket Analysis:")
+    click.echo(f"  {'Bucket':<12} {'Count':>6} {'Actual':>8} {'Expected':>10} {'Status':>14}")
+    click.echo(f"  {'-'*12} {'-'*6} {'-'*8} {'-'*10} {'-'*14}")
+    for bucket, stats in result.confidence_buckets.items():
+        actual = stats['win_rate']
+        expected = stats['expected']
+        status = stats.get('status', 'UNKNOWN')
+        click.echo(f"  {bucket:<12} {stats['count']:>6} {actual:>7.1%} {expected:>9.1%} {status:>14}")
+
+    if result.category_results:
+        click.echo(f"\nPerformance by Category:")
+        for cat, stats in sorted(result.category_results.items(), key=lambda x: -x[1]['count']):
+            gap = stats['calibration_gap']
+            gap_str = f"+{gap:.1%}" if gap >= 0 else f"{gap:.1%}"
+            click.echo(f"  {cat}: {stats['count']} samples, {stats['accuracy']:.1%} accuracy (gap: {gap_str})")
+
+    click.echo("=" * 60)
+
+    # Provide interpretation
+    if result.is_model_profitable():
+        click.echo("\nModel shows POSITIVE expected value on test set.")
+    else:
+        click.echo("\nModel shows NEGATIVE or NEUTRAL expected value on test set.")
+        click.echo("Consider reducing position sizes or waiting for more training data.")
+
+    # Save results if output path specified
+    if output:
+        with open(output, 'w') as f:
+            json.dump(result.to_dict(), f, indent=2)
+        click.echo(f"\nResults saved to {output}")
+
+
 if __name__ == "__main__":
     cli()
 
