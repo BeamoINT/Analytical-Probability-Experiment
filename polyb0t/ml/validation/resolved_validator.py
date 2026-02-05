@@ -55,24 +55,29 @@ class ResolvedMarketValidator:
         self.calibrator = ConfidenceCalibrator(calibration_dir)
 
     def get_resolved_examples(self) -> List[Dict[str, Any]]:
-        """Load all resolved market examples.
+        """Load all labeled market examples.
+
+        Uses price_change_24h as the outcome measure since most markets
+        don't have resolved_outcome populated. An example is considered
+        "profitable" if price_change_24h > 0.
 
         Returns:
-            List of examples with features and resolved_outcome.
+            List of examples with features and outcome.
             Sorted by created_at ascending (oldest first).
         """
         try:
             conn = sqlite3.connect(self.db_path, timeout=30)
             cursor = conn.cursor()
 
+            # Use price_change_24h as the outcome since resolved_outcome is rarely populated
+            # A positive price change means the prediction "buy YES" would have been profitable
             cursor.execute("""
                 SELECT
                     example_id, token_id, market_id, created_at,
-                    features, resolved_outcome, price_change_to_resolution,
-                    category, market_title
+                    features, price_change_24h, price_change_to_resolution,
+                    category, market_title, direction_24h
                 FROM training_examples
-                WHERE is_fully_labeled = 1
-                  AND resolved_outcome IS NOT NULL
+                WHERE price_change_24h IS NOT NULL
                 ORDER BY created_at ASC
             """)
 
@@ -86,19 +91,30 @@ class ResolvedMarketValidator:
                 except json.JSONDecodeError:
                     features = {}
 
+                price_change_24h = row[5] or 0
+                # Convert to binary outcome: 1 if price went up (profitable for YES buyers)
+                # Use a small threshold to filter out noise
+                if price_change_24h > 0.01:  # >1% up
+                    outcome = 1
+                elif price_change_24h < -0.01:  # >1% down
+                    outcome = 0
+                else:
+                    continue  # Skip flat examples (within 1% either way)
+
                 examples.append({
                     "example_id": row[0],
                     "token_id": row[1],
                     "market_id": row[2],
                     "created_at": row[3],
                     "features": features,
-                    "resolved_outcome": row[5],  # 1=YES won, 0=NO won
-                    "price_change_to_resolution": row[6],
+                    "resolved_outcome": outcome,
+                    "price_change_to_resolution": row[6] or price_change_24h,
                     "category": row[7],
                     "market_title": row[8],
+                    "price_change_24h": price_change_24h,
                 })
 
-            logger.info(f"Loaded {len(examples)} resolved market examples")
+            logger.info(f"Loaded {len(examples)} labeled market examples (using 24h price change)")
             return examples
 
         except Exception as e:
