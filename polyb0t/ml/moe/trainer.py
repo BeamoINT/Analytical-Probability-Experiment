@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from polyb0t.ml.moe.expert import Expert, ExpertMetrics, SPREAD_COST, MIN_PROFIT_THRESHOLD
+from polyb0t.ml.moe.expert import Expert, ExpertMetrics, SPREAD_COST, MIN_PROFIT_THRESHOLD, CANONICAL_FEATURES
 from polyb0t.ml.moe.expert_pool import ExpertPool, get_expert_pool
 from polyb0t.ml.moe.auto_discovery import AutoDiscovery
 from polyb0t.ml.moe.versioning import ExpertState
@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 MIN_TRAINING_SAMPLES = 100
 HOLDOUT_FRACTION = 0.2
 SAMPLE_WEIGHT_DECAY = 0.5  # Recent data weighted more
-MIN_EXPERT_SAMPLES = 30  # Minimum samples for an expert to train
+MIN_EXPERT_SAMPLES = 200  # Minimum samples for an expert to train (raised from 30 to prevent overfitting)
 
 # Profitability thresholds for trading simulation
 SPREAD_COST = 0.02  # 2% spread cost
@@ -706,10 +706,13 @@ class MoETrainer:
             # Handle None values explicitly - features may have category=None
             categories.append(features.get("category") or sample.get("category") or "other")
             
-            # Calculate binary labels (is trade profitable?) for each horizon
+            # Calculate directional labels for each horizon
+            # Label = 1 if price went UP enough to cover spread + min profit (LONG profitable)
+            # Label = 0 if price went DOWN or didn't move enough
+            # This makes the model predict DIRECTION, not just volatility magnitude
             for horizon, pc in [('1h', pc_1h), ('4h', pc_4h), ('24h', pc_24h)]:
-                is_profitable = abs(float(pc)) > (SPREAD_COST + MIN_PROFIT_THRESHOLD)
-                y_binary_dict[horizon].append(1 if is_profitable else 0)
+                went_up_enough = float(pc) > (SPREAD_COST + MIN_PROFIT_THRESHOLD)
+                y_binary_dict[horizon].append(1 if went_up_enough else 0)
                 y_reg_dict[horizon].append(float(pc))
         
         if not X_list:
@@ -724,94 +727,15 @@ class MoETrainer:
         )
     
     def _get_feature_cols(self) -> List[str]:
-        """Get feature column names.
+        """Get feature column names for training.
 
-        V2: Now includes historical price-derived features from CLOB API
-        for real momentum, volatility, and trend signals.
+        Uses CANONICAL_FEATURES from expert.py to ensure the SAME feature list
+        is used for both training and inference, preventing train/serve skew.
 
         IMPORTANT: price_change_* are LABELS, not features. Including them
-        causes data leakage and 100% accuracy (model predicts label from itself).
-        Only include backward-looking features available at prediction time.
+        causes data leakage. Only backward-looking features are included.
         """
-        return [
-            # === REAL-TIME FEATURES (from continuous collector) ===
-            "price", "bid", "ask", "spread", "spread_pct", "mid_price",
-            "volume_24h", "volume_1h", "volume_6h",
-            "liquidity", "liquidity_bid", "liquidity_ask",
-            "orderbook_imbalance", "bid_depth", "ask_depth",
-            "bid_depth_5", "ask_depth_5", "bid_depth_10", "ask_depth_10",
-            "best_bid_size", "best_ask_size", "bid_ask_size_ratio",
-            # NOTE: momentum_* are backward-looking (past price changes), safe to use
-            "momentum_1h", "momentum_4h", "momentum_24h", "momentum_7d",
-            # NOTE: price_change_* are LABELS (future changes) - EXCLUDED to prevent leakage
-            "volatility_1h", "volatility_24h", "volatility_7d",
-            "trade_count_1h", "trade_count_24h",
-            "avg_trade_size_1h", "avg_trade_size_24h",
-            "buy_sell_ratio_1h",
-            "days_to_resolution", "hours_to_resolution", "market_age_days",
-            "hour_of_day", "day_of_week", "is_weekend",
-            "open_interest", "unique_traders",
-            # High/low/range are backward-looking (past 24h stats), safe to use
-            "price_high_24h", "price_low_24h", "price_range_24h",
-
-            # === V2: HISTORICAL PRICE FEATURES (from CLOB /prices-history) ===
-            # These are backward-looking features computed from past price data
-            "historical_price",
-            "historical_price_1h_ago",
-            "historical_price_4h_ago",
-            "historical_price_24h_ago",
-            "historical_price_7d_ago",
-            # Historical momentum = (current - past) / past, backward-looking
-            "historical_momentum_1h",
-            "historical_momentum_4h",
-            "historical_momentum_24h",
-            "historical_momentum_7d",
-            "historical_volatility_1h",
-            "historical_volatility_4h",
-            "historical_volatility_24h",
-            "historical_volatility_7d",
-            "historical_high_24h",
-            "historical_low_24h",
-            "historical_range_24h",
-            "historical_sma_1h",
-            "historical_sma_24h",
-            "historical_price_vs_sma_24h",
-            "historical_data_points",
-
-            # === V3: MICROSTRUCTURE FEATURES ===
-            # VPIN and order flow toxicity for detecting informed trading
-            "vpin",
-            "order_flow_toxicity",
-            "trade_impact_10usd",
-            "trade_impact_100usd",
-            "amihud_illiquidity",
-
-            # === V3: NEWS/SENTIMENT FEATURES ===
-            # News article counts and sentiment scores
-            "news_article_count",
-            "news_recency_hours",
-            "news_sentiment_score",
-            "news_sentiment_confidence",
-            "keyword_positive_count",
-            "keyword_negative_count",
-            "headline_confirmation",
-            "headline_conf_confidence",
-            "intelligent_confirmation",
-            "intelligent_conf_confidence",
-
-            # === V3: INSIDER TRACKING FEATURES ===
-            # Smart wallet activity and reputation
-            "smart_wallet_buy_count_1h",
-            "smart_wallet_sell_count_1h",
-            "smart_wallet_net_direction_1h",
-            "smart_wallet_volume_1h",
-            "avg_buyer_reputation",
-            "avg_seller_reputation",
-            "smart_wallet_buy_count_24h",
-            "smart_wallet_sell_count_24h",
-            "smart_wallet_net_direction_24h",
-            "unusual_activity_score",
-        ]
+        return list(CANONICAL_FEATURES)
     
     def _calculate_sample_weights(self, timestamps: List[str]) -> np.ndarray:
         """Calculate sample weights based on recency."""
@@ -944,13 +868,14 @@ class MoETrainer:
             
             for i in range(len(X)):
                 if confidence[i] < 0.6:
-                    profits.append(0.0)  # No trade
-                elif predictions[i] == 1:  # Predicted profitable
-                    actual_change = y_reg[i]
-                    profit = actual_change - SPREAD_COST
-                    profits.append(profit * 0.05)  # 5% position
+                    profits.append(0.0)  # No trade - low confidence
                 else:
-                    profits.append(0.0)  # Skipped
+                    actual_change = y_reg[i]
+                    if predictions[i] == 1:  # Predicted UP -> LONG
+                        profit = (actual_change - SPREAD_COST) * 0.05
+                    else:  # Predicted DOWN/FLAT -> SHORT
+                        profit = (-actual_change - SPREAD_COST) * 0.05
+                    profits.append(profit)
                     
         except Exception as e:
             logger.debug(f"Error calculating profits for {expert.expert_id}: {e}")

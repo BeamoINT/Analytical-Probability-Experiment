@@ -852,18 +852,11 @@ class AIOrchestrator:
                 # Maps raw model confidence to empirical probability
                 confidence = self._calibrate_confidence(raw_confidence)
 
-                # Convert binary prediction to edge-like value
-                # 1.0 = strongly profitable, 0.0 = not profitable
-                # Map to: positive = bullish, near-zero = neutral
+                # Directional prediction: > 0.5 means price will go UP, < 0.5 means DOWN
                 if prediction > 0.5:
-                    # Profitable prediction - determine direction from momentum
-                    momentum = features.get("momentum_24h", 0)
-                    if momentum >= 0:
-                        edge = (prediction - 0.5) * 2 * confidence  # 0 to 1
-                    else:
-                        edge = -(prediction - 0.5) * 2 * confidence  # -1 to 0
+                    edge = (prediction - 0.5) * 2 * confidence   # positive = BUY
                 else:
-                    edge = 0  # Not profitable, no signal
+                    edge = -(0.5 - prediction) * 2 * confidence  # negative = SELL
 
                 return (edge, confidence)
 
@@ -877,16 +870,12 @@ class AIOrchestrator:
                 confidence = self._calibrate_confidence(raw_confidence)
 
                 if prediction > 0.5:
-                    momentum = features.get("momentum_24h", 0)
-                    if momentum >= 0:
-                        edge = (prediction - 0.5) * 2 * confidence
-                    else:
-                        edge = -(prediction - 0.5) * 2 * confidence
+                    edge = (prediction - 0.5) * 2 * confidence
                 else:
-                    edge = 0
+                    edge = -(0.5 - prediction) * 2 * confidence
 
                 return (edge, confidence)
-        
+
         # No MoE prediction available
         return None
 
@@ -952,15 +941,11 @@ class AIOrchestrator:
             if moe_result is not None:
                 prediction, model_confidence, best_expert_id = moe_result
                 
-                # Convert binary prediction to edge
+                # Directional prediction: > 0.5 means UP (BUY), < 0.5 means DOWN (SELL)
                 if prediction > 0.5:
-                    momentum = features.get("momentum_24h", 0)
-                    if momentum >= 0:
-                        edge = (prediction - 0.5) * 2 * model_confidence
-                    else:
-                        edge = -(prediction - 0.5) * 2 * model_confidence
+                    edge = (prediction - 0.5) * 2 * model_confidence
                 else:
-                    edge = 0
+                    edge = -(0.5 - prediction) * 2 * model_confidence
             else:
                 # Fall back to legacy
                 result = self.predict(features)

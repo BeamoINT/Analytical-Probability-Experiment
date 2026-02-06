@@ -48,6 +48,34 @@ MIN_PROFIT_THRESHOLD = 0.005  # 0.5% minimum profit to be considered profitable
 POSITION_SIZE = 0.05  # 5% of portfolio per trade
 CONFIDENCE_THRESHOLD = 0.55  # Only trade when 55%+ confident (lowered from 60% for more simulated trades)
 
+# Canonical feature list: the SINGLE SOURCE OF TRUTH for both training and inference.
+# Every feature here MUST be:
+#   1. Collected during data collection (scheduler.py data collection path)
+#   2. Computed at inference time (scheduler.py _generate_ai_signals)
+#   3. Used by trainer._get_feature_cols()
+# Do NOT add features here unless they satisfy all 3 conditions.
+CANONICAL_FEATURES = [
+    # Price features
+    "price", "bid", "ask", "spread", "spread_pct", "mid_price",
+    # Volume
+    "volume_24h",
+    # Liquidity
+    "liquidity", "liquidity_bid", "liquidity_ask",
+    # Orderbook
+    "orderbook_imbalance", "bid_depth", "ask_depth",
+    "bid_depth_5", "ask_depth_5", "bid_depth_10", "ask_depth_10",
+    "best_bid_size", "best_ask_size", "bid_ask_size_ratio",
+    # Momentum (backward-looking, computed from price history)
+    "momentum_1h", "momentum_4h", "momentum_24h", "momentum_7d",
+    # Volatility (backward-looking, computed from price history)
+    "volatility_1h", "volatility_24h", "volatility_7d",
+    # Timing
+    "days_to_resolution", "hours_to_resolution",
+    "hour_of_day", "day_of_week", "is_weekend",
+    # Derived
+    "price_vs_volume_ratio", "liquidity_per_dollar_volume",
+]
+
 
 @dataclass
 class ExpertMetrics:
@@ -283,33 +311,11 @@ class Expert:
         return None
     
     def _get_base_feature_cols(self) -> List[str]:
-        """Get the base feature columns for training."""
-        return [
-            # Price features
-            "price", "bid", "ask", "spread", "spread_pct", "mid_price",
-            # Volume
-            "volume_24h", "volume_1h", "volume_6h",
-            # Liquidity
-            "liquidity", "liquidity_bid", "liquidity_ask",
-            # Orderbook
-            "orderbook_imbalance", "bid_depth", "ask_depth",
-            "bid_depth_5", "ask_depth_5", "bid_depth_10", "ask_depth_10",
-            "best_bid_size", "best_ask_size", "bid_ask_size_ratio",
-            # Momentum
-            "momentum_1h", "momentum_4h", "momentum_24h", "momentum_7d",
-            # Volatility
-            "volatility_1h", "volatility_24h", "volatility_7d",
-            # Trade flow
-            "trade_count_1h", "trade_count_24h",
-            "avg_trade_size_1h", "avg_trade_size_24h",
-            "buy_sell_ratio_1h",
-            # Market metadata
-            "days_to_resolution", "hours_to_resolution", "market_age_days",
-            # Timing
-            "hour_of_day", "day_of_week", "is_weekend",
-            # Market state
-            "open_interest", "unique_traders",
-        ]
+        """Get the canonical feature columns for training and inference.
+
+        Uses CANONICAL_FEATURES to ensure train/serve alignment.
+        """
+        return list(CANONICAL_FEATURES)
     
     def _add_interaction_features(self, X: np.ndarray) -> np.ndarray:
         """Add interaction features to improve pattern detection."""
@@ -702,8 +708,8 @@ class Expert:
         # Binary metrics for reference
         accuracy = np.mean(predictions == y_binary)
         
-        # Profitable accuracy
-        profitable_mask = np.abs(y_reg) > (SPREAD_COST + MIN_PROFIT_THRESHOLD)
+        # Profitable accuracy (directional: price went up enough for a long)
+        profitable_mask = y_reg > (SPREAD_COST + MIN_PROFIT_THRESHOLD)
         if np.sum(profitable_mask) > 0:
             profitable_accuracy = np.mean(predictions[profitable_mask] == y_binary[profitable_mask])
         else:
@@ -727,26 +733,29 @@ class Expert:
             if not confident_mask[i]:
                 continue
 
-            if predictions[i] == 1:  # Model says profitable
-                actual_change = y_reg[i] if i < len(y_reg) else 0
+            actual_change = y_reg[i] if i < len(y_reg) else 0
+
+            if predictions[i] == 1:  # Model predicts UP -> go LONG
                 trade_return = actual_change - SPREAD_COST
+            else:  # Model predicts DOWN/FLAT -> go SHORT
+                trade_return = -actual_change - SPREAD_COST
 
-                portfolio_return = POSITION_SIZE * trade_return
-                cumulative_pnl += portfolio_return
-                trade_returns.append(portfolio_return)
+            portfolio_return = POSITION_SIZE * trade_return
+            cumulative_pnl += portfolio_return
+            trade_returns.append(portfolio_return)
 
-                if portfolio_return > 0:
-                    wins.append(portfolio_return)
-                else:
-                    losses.append(portfolio_return)
+            if portfolio_return > 0:
+                wins.append(portfolio_return)
+            else:
+                losses.append(portfolio_return)
 
-                if cumulative_pnl > peak_pnl:
-                    peak_pnl = cumulative_pnl
-                # Calculate drawdown from peak
-                if peak_pnl > 0:
-                    current_dd = (peak_pnl - cumulative_pnl) / peak_pnl
-                    if current_dd > max_drawdown:
-                        max_drawdown = current_dd
+            if cumulative_pnl > peak_pnl:
+                peak_pnl = cumulative_pnl
+            # Calculate drawdown from peak
+            if peak_pnl > 0:
+                current_dd = (peak_pnl - cumulative_pnl) / peak_pnl
+                if current_dd > max_drawdown:
+                    max_drawdown = current_dd
 
         num_trades = len(trade_returns)
 

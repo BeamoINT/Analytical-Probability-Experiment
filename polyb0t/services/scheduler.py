@@ -2015,28 +2015,85 @@ class TradingScheduler:
                     rejections["no_orderbook"] = rejections.get("no_orderbook", 0) + 1
                     continue
                     
-                # Calculate features for AI
-                mid = (ob.bids[0].price + ob.asks[0].price) / 2
-                spread = (ob.asks[0].price - ob.bids[0].price) / mid if mid > 0 else 0
-                bid_depth = sum(l.size for l in ob.bids[:5])
-                ask_depth = sum(l.size for l in ob.asks[:5])
-                imbalance = (bid_depth - ask_depth) / (bid_depth + ask_depth) if (bid_depth + ask_depth) > 0 else 0
-                
+                # Calculate features for AI - matches CANONICAL_FEATURES exactly
+                best_bid = ob.bids[0].price
+                best_ask = ob.asks[0].price
+                mid = (best_bid + best_ask) / 2
+                spread_raw = best_ask - best_bid
+                spread_pct = spread_raw / mid if mid > 0 else 0
+
+                # Orderbook depth
+                bid_depth_5 = sum(l.size for l in ob.bids[:5])
+                ask_depth_5 = sum(l.size for l in ob.asks[:5])
+                bid_depth_10 = sum(l.size for l in ob.bids[:10])
+                ask_depth_10 = sum(l.size for l in ob.asks[:10])
+                total_bid_depth = bid_depth_5 + bid_depth_10
+                total_ask_depth = ask_depth_5 + ask_depth_10
+                imbalance = (total_bid_depth - total_ask_depth) / (total_bid_depth + total_ask_depth) if (total_bid_depth + total_ask_depth) > 0 else 0
+
+                best_bid_size = ob.bids[0].size if ob.bids else 0
+                best_ask_size = ob.asks[0].size if ob.asks else 0
+                bid_ask_size_ratio = best_bid_size / best_ask_size if best_ask_size > 0 else 1
+
+                # Volume & liquidity
+                volume_24h = float(market.volume or 0)
+                liquidity_val = float(market.liquidity or 0)
+                liquidity_bid = sum(l.size * l.price for l in ob.bids[:10])
+                liquidity_ask = sum(l.size * l.price for l in ob.asks[:10])
+
+                # Momentum & volatility from collector's price history
+                collector = self.ai_orchestrator.collector
+                momentum_1h = collector.compute_momentum(outcome.token_id, 1)
+                momentum_4h = collector.compute_momentum(outcome.token_id, 4)
+                momentum_24h = collector.compute_momentum(outcome.token_id, 24)
+                momentum_7d = collector.compute_momentum(outcome.token_id, 168)
+                volatility_1h = collector.compute_volatility(outcome.token_id, 1)
+                volatility_24h = collector.compute_volatility(outcome.token_id, 24)
+                volatility_7d = collector.compute_volatility(outcome.token_id, 168)
+
+                # Timing
                 days_to_res = self._days_to_resolution(market.end_date)
-                
+                now = datetime.utcnow()
+
+                # Derived
+                price_vs_volume = mid / volume_24h if volume_24h > 0 else 0
+                liq_per_vol = liquidity_val / volume_24h if volume_24h > 0 else 0
+
                 features = {
                     "price": mid,
-                    "spread": spread,
-                    "spread_pct": spread,
-                    "volume_24h": float(market.volume or 0),
-                    "liquidity": float(market.liquidity or 0),
+                    "bid": best_bid,
+                    "ask": best_ask,
+                    "spread": spread_raw,
+                    "spread_pct": spread_pct,
+                    "mid_price": mid,
+                    "volume_24h": volume_24h,
+                    "liquidity": liquidity_val,
+                    "liquidity_bid": liquidity_bid,
+                    "liquidity_ask": liquidity_ask,
                     "orderbook_imbalance": imbalance,
-                    "bid_depth": bid_depth,
-                    "ask_depth": ask_depth,
-                    "momentum_1h": 0,  # TODO: calculate from price history
-                    "momentum_24h": 0,
-                    "volatility_24h": 0,
+                    "bid_depth": total_bid_depth,
+                    "ask_depth": total_ask_depth,
+                    "bid_depth_5": bid_depth_5,
+                    "ask_depth_5": ask_depth_5,
+                    "bid_depth_10": bid_depth_10,
+                    "ask_depth_10": ask_depth_10,
+                    "best_bid_size": best_bid_size,
+                    "best_ask_size": best_ask_size,
+                    "bid_ask_size_ratio": bid_ask_size_ratio,
+                    "momentum_1h": momentum_1h,
+                    "momentum_4h": momentum_4h,
+                    "momentum_24h": momentum_24h,
+                    "momentum_7d": momentum_7d,
+                    "volatility_1h": volatility_1h,
+                    "volatility_24h": volatility_24h,
+                    "volatility_7d": volatility_7d,
                     "days_to_resolution": days_to_res,
+                    "hours_to_resolution": days_to_res * 24,
+                    "hour_of_day": now.hour,
+                    "day_of_week": now.weekday(),
+                    "is_weekend": 1 if now.weekday() >= 5 else 0,
+                    "price_vs_volume_ratio": price_vs_volume,
+                    "liquidity_per_dollar_volume": liq_per_vol,
                 }
                 
                 # === CHECK FOR ARBITRAGE FIRST ===
@@ -2046,14 +2103,14 @@ class TradingScheduler:
                     market_id=market.condition_id,
                     market_title=market.question or market.condition_id,
                     price=mid,
-                    bid=ob.bids[0].price,
-                    ask=ob.asks[0].price,
-                    volume_24h=float(market.volume or 0),
+                    bid=best_bid,
+                    ask=best_ask,
+                    volume_24h=volume_24h,
                     days_to_resolution=days_to_res,
-                    spread_pct=spread,
-                    momentum_24h=0,
-                    volatility_24h=0,
-                    event_end_date=market.end_date,  # For event date checking
+                    spread_pct=spread_pct,
+                    momentum_24h=momentum_24h,
+                    volatility_24h=volatility_24h,
+                    event_end_date=market.end_date,
                 )
                 
                 if arb_opp:
