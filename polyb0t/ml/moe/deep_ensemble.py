@@ -71,6 +71,7 @@ LIGHTGBM_CONFIG = {
     "reg_alpha": 0.1,
     "reg_lambda": 1.0,
     "min_child_samples": 20,
+    "is_unbalance": True,  # Handle class imbalance (~78% class 0 vs ~22% class 1)
     "n_jobs": -1,
     "random_state": 42,
     "verbose": -1,
@@ -320,6 +321,13 @@ class DeepExpertEnsemble:
             # Remove early_stopping_rounds from config for fit
             xgb_fit_config = {k: v for k, v in self.xgb_config.items()
                              if k != 'early_stopping_rounds'}
+
+            # Handle class imbalance: scale_pos_weight = neg_count / pos_count
+            if 'scale_pos_weight' not in xgb_fit_config:
+                n_pos = int(np.sum(y_train == 1))
+                n_neg = len(y_train) - n_pos
+                if n_pos > 0:
+                    xgb_fit_config['scale_pos_weight'] = n_neg / n_pos
 
             self.xgb_model = xgb.XGBClassifier(**xgb_fit_config)
             self.xgb_model.fit(

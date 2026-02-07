@@ -737,8 +737,8 @@ class Expert:
 
             if predictions[i] == 1:  # Model predicts UP -> go LONG
                 trade_return = actual_change - SPREAD_COST
-            else:  # Model predicts DOWN/FLAT -> go SHORT
-                trade_return = -actual_change - SPREAD_COST
+            else:  # Model predicts DOWN/FLAT -> SKIP (no shorting on Polymarket)
+                continue
 
             portfolio_return = POSITION_SIZE * trade_return
             cumulative_pnl += portfolio_return

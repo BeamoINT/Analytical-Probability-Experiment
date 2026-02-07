@@ -873,9 +873,9 @@ class MoETrainer:
                     actual_change = y_reg[i]
                     if predictions[i] == 1:  # Predicted UP -> LONG
                         profit = (actual_change - SPREAD_COST) * 0.05
-                    else:  # Predicted DOWN/FLAT -> SHORT
-                        profit = (-actual_change - SPREAD_COST) * 0.05
-                    profits.append(profit)
+                        profits.append(profit)
+                    else:  # Predicted DOWN/FLAT -> SKIP (no shorting)
+                        profits.append(0.0)
                     
         except Exception as e:
             logger.debug(f"Error calculating profits for {expert.expert_id}: {e}")
